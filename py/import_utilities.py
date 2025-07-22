@@ -11,23 +11,24 @@ def get_python_dir():
     print(f"Running on: {hostname}")
 
     # 2. Set default Python code location based on hostname
-    code_locations = {
-        "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/", # Mac laptop
-        "satdata": "/mnt/EDAB_Archive/",
-        "other": "/Users/path_to_nadata/"
+    code_locations = {                                              # 2. Set default Python code location based on hostname
+        "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/",  # Mac laptop
+        "nefscsatdata": "/mnt/EDAB_Archive/",
+        "guihyde": "/mnt/EDAB_Archive/"
     }
 
     # 3. Set default path to the python utilties functions
-    default_code_path = os.path.join(code_locations.get(hostname),"nadata/python/utilities/python")    
+    default_code_path = os.path.join(code_locations.get(hostname),"nadata/python/utilities/py")    
     if not os.path.isdir(default_code_path):
         print(f"Directory not found: {default_code_path}")
         return {}
     return default_code_path
 
     
-def get_pyfile_functions(directory=None):
+def get_pyfile_functions(directory=None,search_string=None):
     function_map = {}
 
+    # Get the directory if not provided
     if not directory:
         directory = get_python_dir()
     if not directory:
@@ -37,6 +38,11 @@ def get_pyfile_functions(directory=None):
     for filename in os.listdir(directory):
         # Look for .py files
         if filename.endswith(".py") and filename != "__init__.py":
+
+            # Look for specific files if search_string provided
+            if search_string and search_string not in filename:
+                continue
+
             file_path = os.path.join(directory, filename)
 
             with open(file_path, "r") as file:
@@ -82,7 +88,7 @@ def import_utility_functions(directory=None,function_map=None):
                 func = getattr(module, name, None)
                 if isinstance(func, types.FunctionType):
                     imported_functions[name] = func
-                    print(f"Imported: {name} from {module_name}")
+                    #print(f"Imported: {name} from {module_name}")
     
     return imported_functions
 
