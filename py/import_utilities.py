@@ -8,7 +8,7 @@ import types
 def get_python_dir():
     # 1. Identify the computer by hostname
     hostname = socket.gethostname()
-    print(f"Running on: {hostname}")
+    #print(f"Running on: {hostname}")
 
     # 2. Set default Python code location based on hostname
     code_locations = {                                              # 2. Set default Python code location based on hostname
