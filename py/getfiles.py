@@ -261,7 +261,8 @@ def get_prod_files(prod,
                    dataset_type=None,
                    dataset_map=None,
                    prod_type=None,
-                   period=None):
+                   period=None,
+                   getfilepath=False):
     """
     Get the files for the specified product
     
@@ -342,8 +343,11 @@ def get_prod_files(prod,
         print(f"⚠ Product '{prod}' not found under {resolved_type}/{resolved_map} in '{dataset}'.")
         return None
     
+    if getfilepath:
+        return path
+    
     if period:
-        search_pattern = f"{period}*.nc"
+        search_pattern = f"*{period}*.nc"
     else:
         search_pattern = "*.nc"
     nc_files = glob.glob(os.path.join(path, "*.nc"))
