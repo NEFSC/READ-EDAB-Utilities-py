@@ -57,7 +57,7 @@ def product_defaults():
     return prod_info_map
 
 #--------------------------------------------------------------------------------------
-def get_datasets_source(preferred=None):
+def get_datasets_source(preferred=None,verbose=False):
     """
     Checks for the first valid input data directory from a given dictionary.
     
@@ -84,7 +84,8 @@ def get_datasets_source(preferred=None):
         if preferred in input_dirs:
             path = input_dirs[preferred]
             if os.path.exists(path):
-                print(f"✓ Using specified input directory: [{preferred}] → {path}")
+                if verbose:
+                    print(f"✓ Using specified input directory: [{preferred}] → {path}")
                 return path
             else:
                 print(f"✗ Preferred input source '{preferred}' not available — falling back to defaults.")
@@ -94,13 +95,14 @@ def get_datasets_source(preferred=None):
     # Try remaining options
     for label, path in input_dirs.items():
         if os.path.exists(path):
-            print(f"✓ Using default input data directory: [{label}] → {path}")
+            if verbose:
+                print(f"✓ Using default input data directory: [{label}] → {path}")
             return path
 
     raise FileNotFoundError("No valid input data directory found.")
 
 #--------------------------------------------------------------------------------------
-def get_dataset_dirs(dataset=None):
+def get_dataset_dirs(dataset=None,verbose=False):
     """
     Search for subfolders within a directory and return a dictionary mapping
     folder names to their full paths.
@@ -140,7 +142,7 @@ def get_dataset_dirs(dataset=None):
     return results
 
 #--------------------------------------------------------------------------------------
-def get_dataset_products(dataset, dataset_map=None):
+def get_dataset_products(dataset, dataset_map=None, verbose=False):
     """
     Searches within the given SOURCE and OUTPUT paths for a dataset,
     organizes the results into:
@@ -176,7 +178,7 @@ def get_dataset_products(dataset, dataset_map=None):
             }
     """
     # First, get all available SOURCE_DATA paths
-    all_sources = get_dataset_dirs()
+    all_sources = get_dataset_dirs(verbose=False)
     
     if dataset not in all_sources:
         print(f"❌ {dataset}' not found in available sources.")
@@ -198,10 +200,12 @@ def get_dataset_products(dataset, dataset_map=None):
         return None
     
     if not source_data_path:
-        print(f"⚠ No 'SOURCE' path found for '{dataset}' – proceeding with OUTPTU only.")
+        if verbose:
+            print(f"⚠ No 'SOURCE' path found for '{dataset}' – proceeding with OUTPUT only.")
 
     if not output_data_path:
-        print(f"⚠ No 'OUTPUT' path found for '{dataset}' – proceeding with SOURCE only.")
+        if verbose:
+            print(f"⚠ No 'OUTPUT' path found for '{dataset}' – proceeding with SOURCE only.")
 
     results = {}
     
@@ -262,7 +266,8 @@ def get_prod_files(prod,
                    dataset_map=None,
                    prod_type=None,
                    period=None,
-                   getfilepath=False):
+                   getfilepath=False,
+                   verbose=False):
     """
     Get the files for the specified product
     
@@ -330,7 +335,8 @@ def get_prod_files(prod,
     )
 
     if not resolved_map:
-        print(f"⚠ Map type '{dataset_map}' not found under '{resolved_type}' in '{dataset}'.")
+        if verbose:
+            print(f"⚠ Map type '{dataset_map}' not found under '{resolved_type}' in '{dataset}'.")
         return None
 
     try:
@@ -338,7 +344,8 @@ def get_prod_files(prod,
         # Add prod_type if it's specified
         if prod_type:
             path = os.path.join(path, prod_type)
-        print(f"✅ Found path for '{prod}' → {path}")
+        if verbose:
+            print(f"✅ Found path for '{prod}' → {path}")
     except KeyError:
         print(f"⚠ Product '{prod}' not found under {resolved_type}/{resolved_map} in '{dataset}'.")
         return None
