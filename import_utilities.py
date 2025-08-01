@@ -5,7 +5,7 @@ import ast
 import importlib.util
 import types
 
-def get_python_dir():
+def get_python_dir(python=False,resources=False):
     # 1. Identify the computer by hostname
     hostname = socket.gethostname()
     #print(f"Running on: {hostname}")
@@ -18,11 +18,23 @@ def get_python_dir():
     }
 
     # 3. Set default path to the python utilties functions
-    default_code_path = os.path.join(code_locations.get(hostname),"nadata/python/utilities/py")    
-    if not os.path.isdir(default_code_path):
+    default_python = os.path.join(code_locations.get(hostname),"nadata/python/")  
+    utilities_path = os.path.join(default_python,"utilities/py")  
+    resources_path = os.path.join(default_python,"resources")  
+    
+    if not os.path.isdir(default_python):
         print(f"Directory not found: {default_code_path}")
         return {}
-    return default_code_path
+    
+    if python:
+        return default_python
+    
+    if resources:
+        os.makedirs(resources_path, exist_ok=True)
+        return resources_path
+    
+    os.makedirs(utilities_path, exist_ok=True)
+    return utilities_path
 
     
 def get_pyfile_functions(directory=None,search_string=None):

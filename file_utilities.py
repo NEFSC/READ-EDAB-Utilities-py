@@ -1,6 +1,8 @@
 import os
 import glob
 from pathlib import Path
+import re
+import stat
 
 def dataset_defaults():
     """
@@ -366,6 +368,115 @@ def get_prod_files(prod,
     print(f"📦 Found {len(nc_files)} .nc files in: {path}")
     return nc_files
     
+
+#--------------------------------------------------------------------------------------
+def parse_dataset_info(path, base=None):
+    """
+    Extract structured metadata from a full dataset path.
+    
+    Parameters:
+        path: str, full path to a dataset directory or file
+        base: str, optional base path to strip (e.g. from get_datasets_source())
+
+    Returns:
+        dict: metadata including source name, version, resolution, product
+    """
+   
+    if base is None:
+        base = get_datasets_source()
+    
+    # Ensure relative path is always set
+    relative = path[len(base):].lstrip(os.sep) if path.startswith(base) else path
+
+    parts = relative.split(os.sep)
+    
+    if len(parts) < 4:
+        raise ValueError(f"Insufficient path depth: {path}")
+
+    return {
+        "dataset": parts[0],       # OCCCI, CORALSST, etc.
+        "version": parts[1],      # V6.0, V3.1, etc.
+        "dataset_type": parts[2],  # SOURCE_DATA, OUTPUT_DATA
+        "dataset_map": parts[3], # MAPPED_4KM_DAILY, etc.
+        "product": parts[4] if len(parts) > 4 else "UNKNOWN"  # CHL, SST, PAR
+    }
+
+def get_dataset_vars(src_ds, requested=None, name=None, min_ndim=2):
+    """
+    Determine which variables to regrid from a source dataset.
+
+    Parameters
+    ----------
+    src_ds : xarray.Dataset
+        The source dataset containing variables to regrid.
+    requested : list or None
+        List of variable names to regrid. If None or invalid, defaults to all suitable variables.
+    name : str or None
+        Optional name used in diagnostics (e.g., filename or label).
+    min_ndim : int
+        Minimum number of dimensions a variable must have to be considered regriddable.
+
+    Returns
+    -------
+    list
+        Valid variable names to regrid.
+    """
+    name = name or "source"
+    available = set(src_ds.data_vars)
+
+    if requested is None:
+        print(f"ℹ️ No variables specified for '{name}', defaulting to all regriddable variables.")
+        return [v for v in available if src_ds[v].ndim >= min_ndim]
+
+    filtered = [v for v in requested if v in available and src_ds[v].ndim >= min_ndim]
+    if not filtered:
+        print(f"⚠️ No matching variables found in '{name}'. Defaulting to all regriddable variables.")
+        return [v for v in available if src_ds[v].ndim >= min_ndim]
+
+    missing = set(requested) - available
+    if missing:
+        print(f"⚠️ Variables not found in '{name}': {', '.join(sorted(missing))}")
+
+    return filtered  
+
+def set_file_permissions(filepath,desired_permissions=0o664):
+    """
+    Checks the permissions of a file and changes them if they don't match
+    the desired permissions.
+
+    Args:
+        filepath (str): The path to the file.
+        desired_permissions (int): The desired permissions in octal format (e.g., 0o664).
+    """
+    try:
+        # Get current file mode
+        current_mode = os.stat(filepath).st_mode
+        # Extract only the permission bits
+        current_permissions = stat.S_IMODE(current_mode)
+
+        print(f"Current permissions for {filepath}: {oct(current_permissions)}")
+
+        if current_permissions != desired_permissions:
+            print(f"Permissions do not match. Changing to {oct(desired_permissions)}...")
+            os.chmod(filepath, desired_permissions)
+            print("Permissions updated successfully.")
+        else:
+            print("Permissions already match the desired settings.")
+        
+        file_info = os.stat(filepath)
+        permissions_mode = file_info.st_mode
+        return stat.filemode(permissions_mode)
+        
+    except FileNotFoundError:
+        print(f"Error: File not found at {filepath}")
+    except PermissionError:
+        print(f"Error: Permission denied when accessing or modifying {filepath}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    
+    
+    
+   
 
     
 
