@@ -1,4 +1,7 @@
 from datetime import datetime, date, timedelta
+from pathlib import Path
+import re
+
 
 def format_date(dt, fmt):
     if fmt == "yyyymmdd":
@@ -8,7 +11,12 @@ def format_date(dt, fmt):
     elif fmt == "yyyymmddhhmmss":
         return dt.strftime("%Y%m%d%H%M%S")
     elif fmt == "datetime":
-        return dt.date()
+        if isinstance(dt, datetime):
+            return dt.date()
+        elif isinstance(dt, date):
+            return dt
+        else:
+            raise TypeError(f"Expected date or datetime, got {type(dt)}")
     else:
         raise ValueError(f"Unknown format: {fmt}")
     
@@ -68,4 +76,58 @@ def get_dates(dates,format='yyyymmdd'):
     while current <= end:
         out.append(format_date(current, format))
         current += step
+    return out
+
+
+
+def get_source_file_dates(files, format="yyyymmdd", placeholder=None):
+    """
+    Extract standardized date strings from source data filenames.
+    
+    Args:
+        files (list): List of filenames to extract dates from.
+        format (str): Output date format. Options: 'yyyymmdd', 'yyyy-mm-dd', 'datetime', etc.
+        placeholder: Value to return when a filename doesn't match any known pattern.
+                    Default is None, but can be set to '' or 'NA' as needed.
+    
+    Returns:
+        list: One formatted date per input filename (or placeholder if no match)
+    """
+    
+    # Get dates from files
+    def extract_raw_date(filename):
+        
+        # Define common patterns to match the date portion across different formats
+        patterns = [
+            r"^(\d{14})",                                   # e.g. ACSPO, MUR
+            r"[-_](\d{8})(?=[-_\.])",                       # e.g. CORALSST, OCCCI, Globcolour
+            r"\.mean\.(\d{4})\.nc$",                        # e.g. OISST
+        ]
+
+        basename = Path(filename).name
+        for p in patterns:
+            m = re.search(p, basename)
+            if m:
+                return m.group(1)
+        return None
+    
+    def parse_date_string(s):
+        for fmt in ("%Y%m%d%H%M%S", "%Y%m%d", "%Y"):
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+        return None
+    
+    out = []
+    for f in files:
+        raw = extract_raw_date(f)
+        if not raw:
+            out.append(placeholder)
+            continue
+        dt = parse_date_string(raw)
+        if not dt:
+            out.append(placeholder)
+            continue
+        out.append(format_date(dt, format))
     return out

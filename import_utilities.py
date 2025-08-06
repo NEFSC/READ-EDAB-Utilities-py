@@ -19,7 +19,7 @@ def get_python_dir(python=False,resources=False):
 
     # 3. Set default path to the python utilties functions
     default_python = os.path.join(code_locations.get(hostname),"nadata/python/")  
-    utilities_path = os.path.join(default_python,"utilities/py")  
+    utilities_path = os.path.join(default_python,"utilities")  
     resources_path = os.path.join(default_python,"resources")  
     
     if not os.path.isdir(default_python):

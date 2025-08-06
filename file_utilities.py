@@ -1,7 +1,6 @@
 import os
 import glob
 from pathlib import Path
-import re
 import stat
 
 def dataset_defaults():
@@ -475,7 +474,19 @@ def set_file_permissions(filepath,desired_permissions=0o664):
         print(f"An unexpected error occurred: {e}")
     
     
-    
+def file_make(input_files, output_file):
+    output_path = Path(output_file)
+    if not output_path.exists():
+        print(f"↪ Output file missing: {output_file}, recreate")
+        return True
+
+    output_mtime = output_path.stat().st_mtime
+    for file in input_files:
+        if os.path.getmtime(file) > output_mtime:
+            print(f"↪ {file} newer than output file: {output_file}, recreate")
+            return True
+
+    return False
    
 
     
