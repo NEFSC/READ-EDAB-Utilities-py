@@ -3,6 +3,7 @@ import glob
 from pathlib import Path
 import stat
 
+
 def dataset_defaults():
     """
     Returns the default/primary datatype location and product for each "source" dataset
@@ -489,5 +490,43 @@ def file_make(input_files, output_file):
     return False
    
 
-    
+def make_product_output_dir(input_product,output_product,dataset=None,new_dataset_type='OUTPUT_DATA',create_dir=True):
+    """
+    Create the output path by replacing dataset_type and product,
+    and create the directory if it does not exist.
 
+    Parameters:
+    - input_product (str): Original product name (e.g., 'CHL').
+    - output_product (str): Replacement for product name (e.g. 'PPD' or 'PSC').
+    - dataset (str): Dataset name for the original product (e.g. 'OCCCI').
+    - new_dataset_type (str): Replacement for dataset_type (default: 'OUTPUT_DATA').
+    - create (bool): Whether to create the directory if it doesn't exist.
+
+    Returns:
+    - str: Transformed directory path.
+
+    Raises:
+    - ValueError: If original or new product name is missing or invalid.
+    """
+    
+    defaults = product_defaults()
+
+    # Validate input product
+    if input_product.upper() not in defaults:
+        raise ValueError(f"Input product '{product_name}' not found in defaults.")
+
+    # Validate output product
+    if input_product.upper() not in defaults:
+        raise ValueError(f"Output product '{new_product}' not found in defaults.")    
+
+    original_path = get_prod_files(input_product, dataset=dataset, getfilepath=True)
+    info = parse_dataset_info(original_path)
+
+    new_path = original_path
+    new_path = new_path.replace(info["dataset_type"], new_dataset_type)
+    new_path = new_path.replace(info["product"], output_product)
+
+    if create_dir:
+        os.makedirs(new_path, exist_ok=True)
+
+    return new_path

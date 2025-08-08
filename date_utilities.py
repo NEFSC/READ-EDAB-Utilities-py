@@ -29,7 +29,7 @@ def get_dates(dates,format='yyyymmdd'):
             - List of date strings (yyyymmdd or yyyy-mm-dd)
             - List of datetime.date objects
             - List of integers: [2023] or [2023, 2025]
-            - List of two strings: ['20250101', '20250630']
+            - List of one or two strings: ['20250101'] or ['20250101', '20250630']
     
         format (str): Output format. Options:
             - 'yyyymmdd'       → default
@@ -55,16 +55,24 @@ def get_dates(dates,format='yyyymmdd'):
     if dates is None:
         return None
 
+    # Normalize input to list
+    if not isinstance(dates, list):
+        dates = [dates]
+
+    # Handle single date input
+    if len(dates) == 1:
+        single = to_dt(dates[0])
+        return [format_date(single, format)]
+
     # Range of years
     if all(isinstance(d, int) for d in dates):
         start = date(dates[0], 1, 1)
         end = date(dates[-1], 12, 31)
 
-    # Range of strings
+    # Handle two dates (any type)
     elif len(dates) == 2 and all(isinstance(d, (str, int, date, datetime)) for d in dates):
-        start = to_dt(dates[0])
-        end = to_dt(dates[1])
-
+        start, end = sorted([to_dt(d) for d in dates])
+    
     # Treat as list of individual dates
     else:
         return [format_date(to_dt(d), format) for d in dates]
