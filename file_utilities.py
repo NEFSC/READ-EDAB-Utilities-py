@@ -58,6 +58,98 @@ def product_defaults():
 
     return prod_info_map
 
+def netcdf_product_defaults():
+    """
+    Returns the data product name found in the original source netcdf files
+
+    Parameters:
+        No inputs
+    
+    Returns:
+        Dictionary of default dataset specific data types and products
+    """
+
+    # The default product name, dataset and source data location product
+    return {
+        'ACSPO': {
+            'SST': 'TBD_sst',
+        },
+        'ACSPO_NRT': {
+            'SST': 'TBD_sst',
+        },
+        'CORALSST': {
+            'SST': 'analyzed_sst',
+        },
+        'OISST': {
+            'SST': 'TBD_sst',
+        },
+        'MUR': {
+            'SST': 'TBD_sst',
+        },
+        'AVHRR': {
+            'SST': 'TBD_sst',
+        },
+        'GLOBCOLOUR': {
+            'PAR': 'PAR_mean',
+            'CHL1': 'TBD_chl',
+        },
+        'OCCCI': {
+            'CHL': 'chlor_a',
+        },
+        'PACE': {
+            'SST': 'TBD_sst',
+        },
+        'TESTDATASET': {
+            'SST_MEAN': 'sst_mean',
+            'SST_MAX': 'sst_max',
+        }
+    }
+
+#--------------------------------------------------------------------------------------
+def get_nc_prod(dataset,product):
+    """
+    Returns internal variable name and metadata for a given dataset and product.
+
+    Parameters:
+        dataset_name (str): Dataset key (e.g., 'GLOBCOLOUR')
+        product_name (str): Product key (e.g., 'CHL1')
+
+    Returns:
+        dict with keys like 'var_name', 'source', 'frequency', or None if not found
+    """
+    dataset_name = dataset.upper()
+    product_name = product.upper()
+
+    dataset_map = netcdf_product_defaults()
+
+    # Check if dataset exists
+    if dataset_name not in dataset_map:
+        print(f"[ERROR] Dataset '{dataset_name}' not found.")
+        return None
+    
+    product_map = dataset_map[dataset_name]
+
+    # Exact match
+    if product_name in product_map:
+        return product_map[product_name]
+
+    fuzzy_matches = []
+
+    # Fuzzy match: product_name vs product keys
+    for key in product_map:
+        if product_name in key or key in product_name:
+            fuzzy_matches.append((key, product_map[key]))
+
+    if len(fuzzy_matches) == 1:
+        return fuzzy_matches[0][1]
+    elif len(fuzzy_matches) > 1:
+        print(f"[ERROR] Ambiguous product name '{product_name}'. Multiple matches found:")
+        for key, val in fuzzy_matches:
+            print(f"  - Product key: {key}, internal name: {val}")
+        return None
+    else:
+        print(f"[ERROR] No match found for product '{product_name}' in dataset '{dataset_name}'.")
+        return None
 #--------------------------------------------------------------------------------------
 def get_datasets_source(preferred=None,verbose=False):
     """
