@@ -48,6 +48,7 @@ def product_defaults():
         'SST': ('SST','ACSPO', 'SOURCE',''),
         'PPD': ('PPD','OCCCI', 'OUTPUT','DAILY'),
         'PSC': ('PSC','OCCCI', 'OUTPUT','DAILY'),
+        'RRS': ('RRS','OCCCI', 'SOURCE',''),
         'PAR': ('PAR','GLOBCOLOUR','SOURCE',''),
         'CHL_TEMP': ('CHL1','GLOBCOLOUR','SOURCE',''),
         'SST_TEMP': ('SST','ACSPONRT', 'SOURCE',''),
@@ -168,8 +169,8 @@ def get_datasets_source(preferred=None,verbose=False):
     
     # List of input directories in the ordered preference (e.g. if two are available, the first will be choosen)
     input_dirs = {
+        "laptop": r"/Users/kimberly.hyde/Documents/nadata/DATASETS/",
         "network": r"/Volumes/EDAB_Datasets/",
-        "laptop": r"/Users/kimberly.hyde/Documents/nadata/DATASETS_SOURCE/",
         "server": r"/mnt/EDAB_Datasets/"
     }
 

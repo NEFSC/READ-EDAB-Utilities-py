@@ -23,7 +23,7 @@ def get_python_dir(python=False,resources=False):
     resources_path = os.path.join(default_python,"resources")  
     
     if not os.path.isdir(default_python):
-        print(f"Directory not found: {default_code_path}")
+        print(f"Directory not found: {default_python}")
         return {}
     
     if python:
