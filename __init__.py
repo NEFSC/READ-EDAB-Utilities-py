@@ -5,4 +5,5 @@ from .file_utilities import *
 from .import_utilities import *
 from .calc_daylength import *
 from .metadata_utilities import *
+from .calc_primprod import *
 #from .algorithms import *

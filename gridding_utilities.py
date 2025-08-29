@@ -3,6 +3,8 @@ import os
 import hashlib
 import xarray as xr
 from pathlib import Path
+import numpy as np
+import pandas as pd
 from .file_utilities import parse_dataset_info
 from .import_utilities import get_python_dir
 from .date_utilities import get_dates
@@ -57,11 +59,19 @@ def get_regrid_weights(target_path, source_path,
         except Exception:
             source_parser = "CUSTOM_SOURCE"
     
-    target_ds = xr.open_mfdataset(os.path.join(target_path, "*.nc"))
+    if os.path.isfile(target_path) and target_path.endswith(".nc"):
+       target_ds = xr.open_dataset(target_path)  # Single NetCDF file
+    else:
+        target_ds = xr.open_mfdataset(os.path.join(target_path, "*.nc"), combine='by_coords') # Directory containing multiple NetCDF files
+        
     if "lat" not in target_ds or "lon" not in target_ds:
         raise ValueError("Target dataset must include 'lat' and 'lon' coordinates.")
     
-    source_ds = xr.open_mfdataset(os.path.join(source_path, "*.nc"))
+    if os.path.isfile(target_path) and target_path.endswith(".nc"):
+       source_ds = xr.open_dataset(source_path)  # Single NetCDF file
+    else:
+        source_ds = xr.open_mfdataset(os.path.join(source_path, "*.nc"), combine='by_coords') # Directory containing multiple NetCDF files
+
     if "lat" not in source_ds or "lon" not in source_ds:
         raise ValueError(f"Source dataset {source_path} missing lat/lon coordinates.")
 
@@ -145,15 +155,21 @@ def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None):
     weight_file = get_regrid_weights(target_path, source_path)
 
     # 2. Open the datasets    
-    target_ds = xr.open_mfdataset(os.path.join(target_path, "*.nc"))
-    source_ds = xr.open_mfdataset(os.path.join(source_path, "*.nc"))
+    if os.path.isfile(target_path) and target_path.endswith(".nc"):
+        target_ds = xr.open_dataset(target_path)  # Single NetCDF file
+    else:
+        target_ds = xr.open_mfdataset(os.path.join(target_path, "*.nc"), combine='by_coords') # Directory containing multiple NetCDF files
     
-    # 3 Subset dataset by time (daterange) and products if needed
+    if os.path.isfile(target_path) and target_path.endswith(".nc"):
+        source_ds = xr.open_dataset(source_path)  # Single NetCDF file
+    else:
+        source_ds = xr.open_mfdataset(os.path.join(source_path, "*.nc"), combine='by_coords') # Directory containing multiple NetCDF files
+    
+    # 3 Subset dataset by time (daterange) and products if needed    
     if daterange:
         dates = get_dates(daterange,format='datetime')
-        source_ds = source_ds.sel(time=dates)
+        source_ds = source_ds.sel(time=dates,method='nearest',tolerance=np.timedelta64(1, 'D'))
         
-
     if source_vars:
         source_ds = source_ds[source_vars]
 

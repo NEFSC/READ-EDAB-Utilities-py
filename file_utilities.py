@@ -79,7 +79,7 @@ def netcdf_product_defaults():
             'SST': 'TBD_sst',
         },
         'CORALSST': {
-            'SST': 'analyzed_sst',
+            'SST': 'analysed_sst',
         },
         'OISST': {
             'SST': 'TBD_sst',
@@ -606,11 +606,11 @@ def make_product_output_dir(input_product,output_product,dataset=None,new_datase
 
     # Validate input product
     if input_product.upper() not in defaults:
-        raise ValueError(f"Input product '{product_name}' not found in defaults.")
+        raise ValueError(f"Input product '{input_product}' not found in defaults.")
 
     # Validate output product
-    if input_product.upper() not in defaults:
-        raise ValueError(f"Output product '{new_product}' not found in defaults.")    
+    if output_product.upper() not in defaults:
+        raise ValueError(f"Output product '{output_product}' not found in defaults.")    
 
     original_path = get_prod_files(input_product, dataset=dataset, getfilepath=True)
     info = parse_dataset_info(original_path)
