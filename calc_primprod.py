@@ -13,6 +13,26 @@ from utilities import parse_dataset_info
 from utilities import get_fill_value
 from utilities import build_product_attributes
 
+def validate_inputs(chl, sst, par, daylength):
+    expected_type = xr.DataArray
+    inputs = {"CHL": chl, "SST": sst, "PAR": par, "Daylength": daylength}
+    
+    # Check types
+    for name, arr in inputs.items():
+        if not isinstance(arr, expected_type):
+            raise TypeError(f"{name} must be an xarray.DataArray, got {type(arr)}")
+
+    # Check shapes match
+    ref_shape = chl.shape
+    for name, arr in inputs.items():
+        if arr.shape != ref_shape:
+            raise ValueError(f"{name} shape mismatch: expected {ref_shape}, got {arr.shape}")
+
+    # Optional: check dims match
+    ref_dims = chl.dims
+    for name, arr in inputs.items():
+        if arr.dims != ref_dims:
+            raise ValueError(f"{name} dims mismatch: expected {ref_dims}, got {arr.dims}")
 
 def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None, verbose=False):
     """
@@ -246,6 +266,7 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file):
     """
     
     # 1️⃣ Check the chl, sst, par and daylength inputs
+    validate_inputs(chl, sst, par, daylength)
     
     # 2️⃣  Create a mask of missing data
     def generate_valid_mask(*arrays):
