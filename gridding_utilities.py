@@ -1,6 +1,7 @@
 import xesmf as xe
 import os
 import hashlib
+import glob
 import xarray as xr
 from pathlib import Path
 import numpy as np
@@ -9,6 +10,42 @@ from .file_utilities import parse_dataset_info
 from .import_utilities import get_python_dir
 from .date_utilities import get_dates
 
+def compute_dynamic_chunks(ds: xr.Dataset, target_chunks: int = 32) -> dict:
+    """
+    Compute dynamic chunk sizes for a dataset with shape (time, lat, lon),
+    aiming for ~target_chunks total across spatial dimensions.
+    """
+    dims = list(ds.dims)
+    shape = tuple(ds.sizes[dim] for dim in dims)
+
+    # Default to full chunk along non-spatial dims
+    chunks = {}
+
+    # Identify spatial dims (assumes lat/lon naming)
+    spatial_dims = [dim for dim in dims if dim.lower() in ("lat", "latitude", "lon", "longitude")]
+
+    if len(spatial_dims) != 2:
+        raise ValueError(f"Expected 2 spatial dimensions, got {spatial_dims}")
+
+    lat_dim, lon_dim = spatial_dims
+    lat_size, lon_size = ds.sizes[lat_dim], ds.sizes[lon_dim]
+
+    spatial_total = lat_size * lon_size
+    chunk_area = spatial_total // target_chunks
+    aspect_ratio = lon_size / lat_size
+
+    chunk_lat = int((chunk_area / aspect_ratio) ** 0.5)
+    chunk_lon = int(chunk_area / chunk_lat)
+
+    chunks[lat_dim] = min(chunk_lat, lat_size)
+    chunks[lon_dim] = min(chunk_lon, lon_size)
+
+    # Preserve full chunking for other dims (e.g. time)
+    for dim in dims:
+        if dim not in chunks:
+            chunks[dim] = ds.sizes[dim]
+
+    return chunks
 
 def hash_grid(ds):
     """Hash lat/lon coordinates for reproducible weight filenames."""
@@ -17,6 +54,28 @@ def hash_grid(ds):
     key = f"{lat.tobytes()}{lon.tobytes()}"
     return hashlib.md5(key.encode()).hexdigest()
     
+def load_dataset(path_or_paths):
+    """
+    Loads a NetCDF dataset from a file, directory, or list of files.
+    Returns an xarray.Dataset.
+    """
+    if isinstance(path_or_paths, (list, tuple)):
+        # List of files
+        return xr.open_mfdataset(path_or_paths, combine='by_coords')
+
+    if os.path.isfile(path_or_paths) and path_or_paths.endswith(".nc"):
+        # Single file
+        return xr.open_dataset(path_or_paths)
+
+    if os.path.isdir(path_or_paths):
+        # Directory of files
+        nc_files = sorted(glob.glob(os.path.join(path_or_paths, "*.nc")))
+        if not nc_files:
+            raise FileNotFoundError(f"No NetCDF files found in directory: {path_or_paths}")
+        return xr.open_mfdataset(nc_files, combine='by_coords')
+
+    raise ValueError(f"Invalid input: {path_or_paths}")
+
 def get_regrid_weights(target_path, source_path,
                        weights_dir=None,
                        method='bilinear',
@@ -59,19 +118,11 @@ def get_regrid_weights(target_path, source_path,
         except Exception:
             source_parser = "CUSTOM_SOURCE"
     
-    if os.path.isfile(target_path) and target_path.endswith(".nc"):
-       target_ds = xr.open_dataset(target_path)  # Single NetCDF file
-    else:
-        target_ds = xr.open_mfdataset(os.path.join(target_path, "*.nc"), combine='by_coords') # Directory containing multiple NetCDF files
-        
+    target_ds = load_dataset(target_path)
+    source_ds = load_dataset(source_path)
+  
     if "lat" not in target_ds or "lon" not in target_ds:
         raise ValueError("Target dataset must include 'lat' and 'lon' coordinates.")
-    
-    if os.path.isfile(target_path) and target_path.endswith(".nc"):
-       source_ds = xr.open_dataset(source_path)  # Single NetCDF file
-    else:
-        source_ds = xr.open_mfdataset(os.path.join(source_path, "*.nc"), combine='by_coords') # Directory containing multiple NetCDF files
-
     if "lat" not in source_ds or "lon" not in source_ds:
         raise ValueError(f"Source dataset {source_path} missing lat/lon coordinates.")
 
@@ -131,40 +182,55 @@ def regrid_dataset(
     elif not isinstance(variables, (list, tuple)):
         raise TypeError(f"`variables` must be a list of strings, not {type(variables).__name__}")
 
-    
     target_grid = target_ds[["lat", "lon"]]
-    #check_weights_valid(weights_file, source_ds, target_grid)
+    if any(dim in target_ds.chunks and target_ds.chunks[dim] is not None for dim in target_ds.dims):
+        target_chunks = {
+            dim: target_ds.chunks[dim][0] if dim in target_ds.chunks else None
+            for dim in target_ds.dims}
+    else:
+        target_chunks = compute_dynamic_chunks(target_ds)
 
     regridder = xe.Regridder(source_ds, target_grid, method, filename=weights_file, reuse_weights=True)
 
+    # 2. Regrid variables
     regridded = xr.Dataset()
     for var in variables:
-        regridded[var] = regridder(source_ds[var])
-        regridded[var].attrs.update(source_ds[var].attrs)
+        regridded_var = regridder(source_ds[var])  # Don't pre-chunk source
+        regridded_var = regridded_var.chunk(target_chunks)  # Apply target chunking here
+        regridded_var.attrs.update(source_ds[var].attrs)
+        regridded[var] = regridded_var
 
+    # 3. Add missing coords
     for coord in target_ds.coords:
         if coord not in regridded.coords:
             regridded[coord] = target_ds[coord]
 
+    # 4. Apply dynamic chunking AFTER regridding
+    regridded = regridded.chunk(target_chunks)
+
+    # 5. Copy global attrs
     regridded.attrs.update(target_ds.attrs)
     return regridded
 
 def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None):
-    
+    """
+    Wrapper function to regrid source dataset to target dataset grid.
+    Parameters:
+    - target_path: path to target dataset (file, dir, or list of files)
+    - source_path: path to source dataset (file, dir, or list of files)
+    - source_vars: list of variable names to regrid (default: all)
+    - daterange: tuple of (start_date, end_date) to subset source data by time
+    Returns:
+    - regridded xarray.Dataset
+    """
+
     # 1. Get the weights file
     weight_file = get_regrid_weights(target_path, source_path)
 
     # 2. Open the datasets    
-    if os.path.isfile(target_path) and target_path.endswith(".nc"):
-        target_ds = xr.open_dataset(target_path)  # Single NetCDF file
-    else:
-        target_ds = xr.open_mfdataset(os.path.join(target_path, "*.nc"), combine='by_coords') # Directory containing multiple NetCDF files
-    
-    if os.path.isfile(target_path) and target_path.endswith(".nc"):
-        source_ds = xr.open_dataset(source_path)  # Single NetCDF file
-    else:
-        source_ds = xr.open_mfdataset(os.path.join(source_path, "*.nc"), combine='by_coords') # Directory containing multiple NetCDF files
-    
+    target_ds = load_dataset(target_path)
+    source_ds = load_dataset(source_path)
+
     # 3 Subset dataset by time (daterange) and products if needed    
     if daterange:
         dates = get_dates(daterange,format='datetime')

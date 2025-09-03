@@ -2,6 +2,7 @@ import pandas as pd
 import xarray as xr
 import os
 import numpy as np
+import netCDF4
 
 from datetime import datetime
 
@@ -9,8 +10,11 @@ from utilities import regrid_wrapper
 from utilities import get_daylength
 from utilities import get_nc_prod
 from utilities import parse_dataset_info
+from utilities import get_fill_value
+from utilities import build_product_attributes
 
-def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None):
+
+def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None, verbose=False):
     """
     Constructs a date→(CHL, SST, PAR, PPD) file path mapping using get_prod_files.
 
@@ -232,7 +236,7 @@ def vgpm_models(chl,sst,par,day_length):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def process_daily_pp(date, chl_file, sst_file, par_file, output_pp_file, daylength_dir=None):
+def process_daily_pp(chl, sst, par, daylength, output_pp_file):
     """
     Process daily CHL, SST, and PAR inputs:
     - Checks if output exists or needs update
@@ -240,50 +244,10 @@ def process_daily_pp(date, chl_file, sst_file, par_file, output_pp_file, dayleng
     - Computes or loads daylength
     - Saves processed output
     """
-    # 1️⃣ Get input data informaiton
     
-    chl_info = parse_dataset_info(chl_file)
-    sst_info = parse_dataset_info(sst_file)
-    par_info = parse_dataset_info(par_file)
-
-    chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
-    sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
-    par_nc_var = get_nc_prod(par_info['dataset'],'PAR')
-
-    # 2️⃣  Load CHL directly (to be on target grid) and extract the coordinates
-    chl_ds = xr.open_dataset(chl_file)
-    chl = chl_ds[chl_nc_var]
-    lat = chl_ds["lat"].values
-    lon = chl_ds["lon"].values
-
-    # 3️⃣ Regrid SST and PAR and align with CHL
-    sst_ds = regrid_wrapper(chl_file,sst_file,source_vars=[sst_nc_var],daterange=date)
-    par_ds = regrid_wrapper(chl_file,par_file,source_vars=[par_nc_var],daterange=date)
+    # 1️⃣ Check the chl, sst, par and daylength inputs
     
-    sst = sst_ds[sst_nc_var]
-    par = par_ds[par_nc_var]
-
-    chl_date = pd.to_datetime(chl["time"].values[0]).date()
-    sst_date = pd.to_datetime(sst["time"].values[0]).date()
-    par_date = pd.to_datetime(par["time"].values[0]).date()
-
-    if chl_date == sst_date:
-        sst["time"] = chl["time"]
-    else:
-        raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
-
-    if chl_date == par_date:
-        par["time"] = chl["time"]
-    else:
-        raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
-
-    chl, sst, par = xr.align(chl, sst, par, join="exact")  # or "inner" if needed
-
-    # 4️⃣ Compute or load daylength
-    doy = pd.Timestamp(date).dayofyear
-    daylength_ds = get_daylength(chl_file, dayofyear=doy)
-
-    # 5️⃣ Create a mask of missing data
+    # 2️⃣  Create a mask of missing data
     def generate_valid_mask(*arrays):
         mask = arrays[0].notnull()
         for arr in arrays[1:]:
@@ -298,64 +262,166 @@ def process_daily_pp(date, chl_file, sst_file, par_file, output_pp_file, dayleng
     chl_valid = chl.where(valid_mask)
     sst_valid = sst.where(valid_mask)
     par_valid = par.where(valid_mask)
-    day_length_valid = daylength_ds.where(valid_mask)
+    day_length_valid = daylength.where(valid_mask)
 
-    # 6️⃣ Calculate PP on non-missing data and create dataset    
+    # 3️⃣ Calculate PP on non-missing data and create dataset    
     pp_eppley, pp_vgpm, kdpar, chl_euphotic, zeu = vgpm_models(
         chl_valid, sst_valid, par_valid, day_length_valid)
         
+    # 4️⃣ Create output dataset
     def ensure_shape(var, template):
         if isinstance(var, xr.DataArray):
             var = var.data
         if var.shape != template.shape:
             return np.broadcast_to(var, template.shape)
         return var
+    
     ds_out = xr.Dataset({
         "PP_Eppley": (chl.dims, ensure_shape(pp_eppley, chl)),
         "PP_VGPM": (chl.dims, ensure_shape(pp_vgpm, chl)),
         "Kd_PAR": (chl.dims, ensure_shape(kdpar, chl)),
         "Chl_Euphotic": (chl.dims, ensure_shape(chl_euphotic, chl)),
         "Z_eu": (chl.dims, ensure_shape(zeu, chl))
-    }, coords=chl_ds.coords)
+    }, coords=chl.coords)
 
-    # 8️⃣ Add Global metadata
+    # 5️⃣ Add variable attributes
+    encoding = {}
+    for var_name in ds_out.data_vars:
+        var = ds_out[var_name]
+        fill_value = get_fill_value(var)
+
+        # Mask invalid pixels
+        var_masked = var.where(valid_mask, fill_value)
+
+        # If dtype is float64 or float32, cast as float32
+        if np.issubdtype(var_masked.dtype, np.floating):
+            var_masked = var_masked.astype("float32")
+            encoding[var_name] = {
+                "_FillValue": np.float32(fill_value),
+                "dtype": "float32",
+                "zlib": True,
+                "complevel": 4
+            }
+        else:
+            encoding[var_name] = {
+                "_FillValue": fill_value,
+                "zlib": True,
+                "complevel": 4
+            }
+
+        # Assign masked and casted data back
+        ds_out[var_name] = var_masked
+        ds_out[var_name].attrs = build_product_attributes(var_name)
+        
+
+    # 6️⃣ Add Global metadata
     ds_out.attrs['creation_date'] = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
 
     #ds_out.attrs = chl_ds.attrs.copy()
 
-    """
-    ds_out.attrs.update({
-        "title": "Estimated Primary Production from Chlorophyll",
-        "summary": "Derived using Eppley and VGPM models from satellite chlorophyll data",
-        "history": f"{chl_ds.attrs.get('history', '')}; Processed with PP models on {pd.Timestamp.now()}",
-        "references": "Behrenfeld & Falkowski (1997), Morel (1991)",
-        "processing_level": "L3",
-        "creator_name": "Kim",
-        "software_version": "v1.0",
-    })
-    """
-
-    # 9️⃣  Add attribute metadata
-    ds_out["PP_Eppley"].attrs.update({
-        "long_name": "Primary Production estimated using Eppley model",
-        "units": "mg C m^-2 day^-1",
-        "standard_name": "primary_production",
-        "model": "Eppley",
-        "references": "Morel (1991)"
-    })
-
-    ds_out["PP_VGPM"].attrs.update({
-        "long_name": "Primary Production estimated using VGPM model",
-        "units": "mg C m^-2 day^-1",
-        "standard_name": "primary_production",
-        "model": "VGPM",
-        "references": "Behrenfeld & Falkowski (1997)"
-    })
+    
 
     # 🔟 Save results
-    ds_out.to_netcdf(output_pp_file)
+    ds_out.to_netcdf(output_pp_file,encoding=encoding)
     print(f"💾 Saved: {output_pp_file}")
 
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+def run_pp_pipeline(
+    chl_dataset=None,
+    sst_dataset=None,
+    par_dataset=None,
+    daterange=None,
+    daylength_dir=None,
+    overwrite=False,
+    verbose=True
+):
+    """
+    Runs the full primary productivity pipeline:
+    - Builds date→file map
+    - Regrids SST and PAR in batch
+    - Processes daily CHL/SST/PAR into PPD outputs
+
+    Parameters:
+        chl_dataset, sst_dataset, par_dataset (str): Dataset identifiers
+        daterange (list of str): Dates to process (YYYYMMDD)
+        overwrite (bool): If True, reprocess even if output is up-to-date
+        verbose (bool): If True, print progress
+    """
+    from utilities import build_pp_date_map, parse_dataset_info
+    import xarray as xr
+    import pandas as pd
+    import os
+
+    # 1️⃣ Build date→file map
+    pp_data_map = build_pp_date_map(
+        dates=daterange,
+        chl_dataset=chl_dataset,
+        sst_dataset=sst_dataset,
+        par_dataset=par_dataset,
+        verbose=verbose
+    )
+
+    # 2️⃣ Filter dates to run
+    dates_to_run = [
+        date for date, (_, _, _, _, up_to_date) in pp_data_map.items()
+        if overwrite or not up_to_date
+    ]
+    if verbose:
+        print(f"🚀 Processing {len(dates_to_run)} dates...")
+
+    if not dates_to_run:
+        print("✅ All outputs are up-to-date. Nothing to run.")
+        return
+
+    # 3️⃣ Collect input files
+    chl_files = [pp_data_map[d][0] for d in dates_to_run]
+    sst_files = [pp_data_map[d][1] for d in dates_to_run]
+    par_files = [pp_data_map[d][2] for d in dates_to_run]
+    output_files = [pp_data_map[d][3] for d in dates_to_run]
+
+    # 4️⃣ Get input data information
+    chl_info = parse_dataset_info(chl_files[0])
+    sst_info = parse_dataset_info(sst_files[0])
+    par_info = parse_dataset_info(par_files[0])
+
+    chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
+    sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
+    par_nc_var = get_nc_prod(par_info['dataset'],'PAR')
+
+    # 5️⃣ Batch regrid SST and PAR
+    sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
+    par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run)
+
+    # 6️⃣ Daily loop
+    for date, chl_file, output_file in zip(dates_to_run, chl_files, output_files):
+        
+        chl_ds = xr.open_dataset(chl_file)
+        chl = chl_ds[chl_nc_var]
+        sst = sst_ds.sel(time=pd.to_datetime(date))[sst_nc_var]
+        par = par_ds.sel(time=pd.to_datetime(date))[par_nc_var]
+
+        chl_date = pd.to_datetime(chl["time"].values[0]).date()
+        sst_date = pd.to_datetime(sst["time"].values[0]).date()
+        par_date = pd.to_datetime(par["time"].values[0]).date()
+
+        if chl_date == sst_date:
+            sst["time"] = chl["time"]
+        else:
+            raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+
+        if chl_date == par_date:
+            par["time"] = chl["time"]
+        else:
+            raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+
+        chl, sst, par = xr.align(chl, sst, par, join="exact")  # or "inner" if needed
+
+        # Compute or load daylength
+        doy = pd.Timestamp(date).dayofyear
+        daylength_ds = get_daylength(chl_file, daylength_dir=daylength_dir, dayofyear=doy)
+
+        process_daily_pp(date, chl, sst, par, daylength_ds,output_file)
+
+    print("🎉 Pipeline complete.")
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

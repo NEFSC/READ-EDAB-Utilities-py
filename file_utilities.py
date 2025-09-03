@@ -458,7 +458,8 @@ def get_prod_files(prod,
         print(f"⚠ No .nc files found in: {path}")
         return []
 
-    print(f"📦 Found {len(nc_files)} .nc files in: {path}")
+    if verbose:
+        print(f"📦 Found {len(nc_files)} .nc files in: {path}")
     return nc_files
     
 
@@ -478,7 +479,25 @@ def parse_dataset_info(path, base=None):
     if base is None:
         base = get_datasets_source()
     
-    # Ensure relative path is always set
+    # Handle list of files
+    if isinstance(path, (list, tuple)):
+        if len(path) == 0:
+            raise ValueError("Empty path list provided.")
+        dirnames = {os.path.dirname(p) for p in path}
+        if len(dirnames) > 1:
+            raise ValueError(f"Files span multiple directories: {dirnames}")
+        path = path[0]  # Use first file after validation
+
+    # Handle directory path
+    elif os.path.isdir(path):
+        nc_files = sorted(glob.glob(os.path.join(path, "*.nc")))
+        if not nc_files:
+            raise FileNotFoundError(f"No NetCDF files found in directory: {path}")
+        path = nc_files[0]  # ✅ Use first file in directory
+
+    # Normalize to relative path
+    path = os.path.abspath(path)
+    base = os.path.abspath(base)
     relative = path[len(base):].lstrip(os.sep) if path.startswith(base) else path
 
     parts = relative.split(os.sep)
