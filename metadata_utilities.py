@@ -1,5 +1,8 @@
 from utilities import get_python_dir
 from utilities import dataset_defaults
+from utilities import get_current_utc_timestamp
+from utilities import format_iso_duration
+
 import pandas as pd
 import xarray as xr
 import numpy as np
@@ -18,39 +21,16 @@ ISO_RESOLUTION_MAP = {
                 "annual": "P1Y"
             }
 
-def get_current_utc_timestamp() -> str:
-    """ Returns current UTC time in ISO 8601 format: 'YYYY-MM-DDTHH:MM:SSZ' """
-    return datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-
-def rename_source_prefix(metadata: dict, old_prefix: str = "source_", new_prefix: str = "source_sst_") -> dict:
+def metadata_dict_to_df(sheet_dict: dict) -> pd.DataFrame:
     """
-    Renames all keys in the metadata dictionary that start with `old_prefix` to use `new_prefix`.
-    Preserves all other keys and values.
+    Converts a metadata dictionary to a DataFrame with normalized column names.
     """
-    renamed = {}
-    for key, value in metadata.items():
-        if key.startswith(old_prefix):
-            new_key = new_prefix + key[len(old_prefix):]
-            renamed[new_key] = value
-        else:
-            renamed[key] = value
-    return renamed
+    df = pd.DataFrame.from_dict(sheet_dict, orient="index")
 
-def format_iso_duration(days: float) -> str:
-    """Convert float days to ISO 8601 duration string."""
-    whole_days = int(np.floor(days))
-    fractional_day = days - whole_days
-    seconds = int(round(fractional_day * 86400))  # 86400 seconds in a day
+    # Normalize column names: strip whitespace and uppercase
+    df.columns = [col.strip().upper() for col in df.columns]
 
-    if whole_days == 0 and seconds == 0:
-        return "P1D"  # fallback minimum duration
-
-    duration = "P"
-    if whole_days > 0:
-        duration += f"{whole_days}D"
-    if seconds > 0:
-        duration += f"T{seconds}S"
-    return duration
+    return df
 
 def get_metadata_table(metapath=None,sheet=None) -> dict:
     """
@@ -99,7 +79,6 @@ def get_metadata_table(metapath=None,sheet=None) -> dict:
         return parse_sheet(sheet)
 
     return {sheet_name: parse_sheet(sheet_name) for sheet_name in xls.sheet_names}
-
 
 def load_all_metadata(metadata_path=None) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
@@ -213,10 +192,10 @@ def extract_metadata_from_attrs(attrs: dict, keys: list, round_digits: int = 5) 
     return metadata
 
 def get_lut_metadata(metadata: dict=None,
-                    metapath: str = None,
-                    add_program: str = None,
-                    add_project: str = None,
-                    add_contributor: str = None) -> dict:
+                     metapath: str = None,
+                     add_program: str = None,
+                     add_project: str = None,
+                     add_contributor: str = None) -> dict:
     """
     Dynamically injects all available program/project metadata fields using lookup tables.
     Prepends 'program_' or 'project_' to each attribute name.
@@ -262,8 +241,6 @@ def get_lut_metadata(metadata: dict=None,
     projects = normalize_lut(lut_projects)
     contributors = normalize_lut(lut_contributors)
 
-    print("✅ Available programs:", list(programs.keys()))
-
     # Inject program metadata
     if add_program:
         if add_program not in programs:
@@ -271,7 +248,7 @@ def get_lut_metadata(metadata: dict=None,
             raise ValueError(f"Program '{add_program}' not found in LUT_Programs. Available: {available}")
 
         # Inject program_name first
-        metadata.setdefault("program_name", add_program)
+        metadata.setdefault("program_name", programs[add_program]["name"])
 
         # Inject remaining program metadata
         for key, value in programs[add_program].items():
@@ -285,7 +262,9 @@ def get_lut_metadata(metadata: dict=None,
             available = ", ".join(projects.keys())
             raise ValueError(f"Project '{add_project}' not found in LUT_Projects. Available: {available}")
         
-        metadata.setdefault("project_name", add_project)
+        # Inject project_name first
+        metadata.setdefault("project_name", projects[add_project]["name"])
+        # Inject remaining project metadata
         for key, value in projects[add_project].items():
             meta_key = f"project_{key}"
             if value and meta_key not in metadata and meta_key != "project_name":
@@ -305,8 +284,8 @@ def get_lut_metadata(metadata: dict=None,
 
     return metadata
 
-def get_geospatial_metadata(use_inputdata_path: Optional[str] = None,
-                            use_current_data: Optional[xr.Dataset] = None,
+def get_geospatial_metadata(filepath: Optional[str] = None,
+                            dataset: Optional[xr.Dataset] = None,
                             default_depth: float = 0.0,
                             round_digits: int = 5,
                             metadata_path: Optional[str] = None,
@@ -318,23 +297,29 @@ def get_geospatial_metadata(use_inputdata_path: Optional[str] = None,
     Returns a dictionary of metadata attributes.
     If vertical coordinate is missing, assumes surface data at default_depth.
     """
+    def is_required(attr: str, schema: dict) -> bool:
+        return schema.get(attr, {}).get("required", False) is True
+    
     default_attrs = get_metadata_table(metapath=metadata_path, sheet="Geospatial")
     
     metadata = {}
 
-    if use_inputdata_path:
-        with xr.open_dataset(use_inputdata_path) as ds:
+    if filepath:
+        with xr.open_dataset(filepath) as ds:
             geospatial_keys = [k for k in ds.attrs if k.startswith("geospatial_")]
             metadata = extract_metadata_from_attrs(ds.attrs, geospatial_keys, round_digits)
 
        # Fill in missing attributes from defaults
-        for key, default in default_attrs.items():
-            metadata.setdefault(key, default)
+        for key, meta_def in default_attrs.items():
+            default_value = meta_def.get("default")
+            if key not in metadata and default_value not in [None, "", False]:
+                metadata[key] = default_value
        
         return metadata
 
-    elif use_current_data:
-        ds = use_current_data
+    elif isinstance(dataset, (xr.Dataset, xr.DataArray)):
+        ds = dataset.to_dataset() if isinstance(dataset, xr.DataArray) else dataset
+
         lat_name = next((v for v in ds.coords if 'lat' in v.lower()), None)
         lon_name = next((v for v in ds.coords if 'lon' in v.lower()), None)
         vert_name = next((v for v in ds.coords if 'lev' in v.lower() or 'z' in v.lower()), None)
@@ -367,30 +352,34 @@ def get_geospatial_metadata(use_inputdata_path: Optional[str] = None,
                 'geospatial_vertical_resolution': round(float(np.mean(np.diff(np.sort(vert)))), round_digits)
             })
         else:
-            metadata.update({
-                'geospatial_vertical_min': round(default_depth, round_digits),
-                'geospatial_vertical_max': round(default_depth, round_digits),
-                'geospatial_vertical_units': default_attrs.get('geospatial_vertical_units'),
-                'geospatial_vertical_positive': default_attrs.get('geospatial_vertical_positive'),
-                'geospatial_vertical_resolution': default_attrs.get('geospatial_vertical_resolution')
-            })
+            if is_required("geospatial_vertical_min", default_attrs):
+                metadata["geospatial_vertical_min"] = round(default_depth, round_digits)
+            if is_required("geospatial_vertical_max", default_attrs):
+                metadata["geospatial_vertical_max"] = round(default_depth, round_digits)
+            if is_required("geospatial_vertical_units", default_attrs):
+                metadata["geospatial_vertical_units"] = default_attrs["geospatial_vertical_units"]["default"]
+            if is_required("geospatial_vertical_positive", default_attrs):
+                metadata["geospatial_vertical_positive"] = default_attrs["geospatial_vertical_positive"]["default"]
+            if is_required("geospatial_vertical_resolution", default_attrs):
+                metadata["geospatial_vertical_resolution"] = default_attrs["geospatial_vertical_resolution"]["default"]
+            
         # Fill in remaining defaults
-        for key, default in default_attrs.items():
-            metadata.setdefault(key, default)
+        for key, meta_def in default_attrs.items():
+            default_value = meta_def.get("default")
+            if key not in metadata and default_value not in [None, "", False]:
+                metadata[key] = default_value
 
         return metadata
 
     else:
         raise ValueError("Either use_inputdata_path or use_current_data must be provided.")
 
-def get_temporal_metadata(
-    ds: Optional[xr.Dataset] = None,
-    include_dates: bool = True,
-    include_time_coverage: bool = True,
-    resolution_mode: str = "auto",  # options: "auto", "daily", "weekly", "monthly", "seasonal", "annual"
-    metadata_path: Optional[str] = None,
-    round_digits: int = 5
-) -> Dict[str, Any]:
+def get_temporal_metadata(ds: Optional[xr.Dataset] = None,
+                          include_dates: bool = True,
+                          include_time_coverage: bool = True,
+                          resolution_mode: str = "auto",  # options: "auto", "daily", "weekly", "monthly", "seasonal", "annual"
+                          metadata_path: Optional[str] = None
+                          ) -> Dict[str, Any]:
     """
     Generates temporal metadata including date stamps and time coverage.
     Uses EDAB_metadata sheet='Temporal' to inject defaults.
@@ -720,4 +709,78 @@ def get_fill_value(var) -> Optional[float]:
     except KeyError:
         raise ValueError(f"Unknown default _FillValue for dtype {dtype}")
 
+def get_summary_metadata(product: str, metapath: str = None, verbose=False) -> dict:
+    """
+    Builds the summary metadata dictionary for a given product short_name.
+    - Uses 'Summary' sheet to determine required attributes
+    - Pulls values from 'LUT_Summary' sheet
+    - Pulls values from 'LUT_Keyword' sheet
+    - Raises message for missing required attributes with note to add manually
+    """
+    product_key = product.strip().upper()
+    
+    # Load metadata from the metadata file
+    summary_meta = get_metadata_table(metapath=metapath, sheet="Summary")
+    lut_summary = metadata_dict_to_df(get_metadata_table(metapath=metapath, sheet="LUT_Summary"))
+    lut_keywords = metadata_dict_to_df(get_metadata_table(metapath=metapath, sheet="LUT_Keywords"))
+
+
+    # Find matching product in LUT_Summary
+    summary_row = lut_summary[lut_summary["PRODUCT"].str.upper() == product_key]
+    if summary_row.empty:
+        raise ValueError(f"❌ Product '{product_key}' not found in LUT_Summary.")
+    summary_info = summary_row.iloc[0].to_dict()
+    # Normalize keys to uppercase for consistent access
+    summary_info = {k.upper(): v for k, v in summary_info.items()}
+
+    
+
+    # Build product-derived metadata first
+    product_metadata = {}
+    for attr in summary_meta:
+        if attr.lower() == "keywords":
+            continue  # handled separately
+        value = summary_info.get(attr.upper())
+        if value not in [None, "", False]:
+            product_metadata[attr] = value
+
+    # Expand keywords if needed
+    if "keywords" in summary_meta:
+        keyword_names = [kw.strip() for kw in summary_info.get("KEYWORDS", "").split(",") if kw.strip()]
+        expanded_keywords = []
+        for name in keyword_names:
+            match = lut_keywords[lut_keywords["NAME"].str.upper() == name.upper()]
+            if not match.empty:
+                expanded_keywords.extend(match.iloc[0]["KEYWORDS"].split(","))
+            elif verbose:
+                print(f"⚠ Keyword group '{name}' not found in LUT_Keywords.")
+        if expanded_keywords:
+            product_metadata["keywords"] = ", ".join(sorted(set(expanded_keywords)))
+
+    # Get required attribute defaults
+    required_defaults = {
+        attr: meta.get("default")
+        for attr, meta in summary_meta.items()
+        if meta.get("required") is True and meta.get("default") not in [None, "", False]
+    }
+
+    # Inject product-specific overrides
+    product_overrides = {
+        attr: meta.get("products", {}).get(product_key)
+        for attr, meta in summary_meta.items()
+        if "products" in meta and product_key in meta["products"]
+    }
+
+    # Final merged metadata
+    metadata = {**product_metadata, **product_overrides, **required_defaults}   
+
+    # Validate required attributes
+    missing = [
+        attr for attr, meta in summary_meta.items()
+        if meta.get("required") is True and not metadata.get(attr)
+    ]
+    if missing:
+        details = {attr: metadata.get(attr) for attr in missing}
+        raise ValueError(f"❌ Missing required metadata for product '{product_key}': {details}")
+    return metadata
 

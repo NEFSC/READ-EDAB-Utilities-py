@@ -1,38 +1,96 @@
 import pandas as pd
 import xarray as xr
 import os
+import time
 import numpy as np
-import netCDF4
-
 from datetime import datetime
 
 from utilities import regrid_wrapper
 from utilities import get_daylength
 from utilities import get_nc_prod
-from utilities import parse_dataset_info
 from utilities import get_fill_value
+
 from utilities import build_product_attributes
+from utilities import get_reference_metadata
+from utilities import get_geospatial_metadata
+from utilities import get_lut_metadata
+from utilities import get_temporal_metadata
+from utilities import get_summary_metadata
+from utilities import get_default_metadata
+from utilities import get_source_metadata
+from utilities import parse_dataset_info
+
+"""
+CALC_PRIMPROD create daily net primary productivity (PPD) files from daily satellite chlorophyll (CHL), sea surface temperature (SST), and photosynthetic active radiation (PAR) inputs.
+It uses the Behrenfeld-Falkowski VGPM Model (1997) and a modified Eppley-based formulation to compute primary productivity.
+Main Functions:
+    - run_pp_pipeline: Main function to run the full pipeline
+    - build_pp_date_map: Constructs a date→(CHL, SST, PAR, PPD) file path mapping and determines which files need to be processed
+    - process_daily_pp: Runs the vgpm_models function using daily CHL, SST, PAR and Daylength inputs, adds metadata, and saves the data as a netcdf file
+    - vgpm_models: Calculates primary productivity using VGPM and Eppley models
+
+Helper Functions:
+    - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes
+
+References:
+    Antoine, D., Andre, J.-M., Morel, A., 1996. Oceanic primary production 2.Estimation at global scale from satellite (coastal zone color scanner) chlorophyll. Global Biogeochemical Cycles 10, 57–69.
+    Behrenfeld, M.J., Falkowski, P.G., 1997. Photosynthetic rates derived from satellite-based chlorophyll concentration. Limnology and Oceanography 42, 1–20
+    Eppley, R.W., 1972. Temperature and phytoplankton growth in the sea. Fishery Bulletin 70, 1063–1085
+    Kirk, J.T.O., 1994. Light and Photosynthesis in Aquatic Ecosystems. Cambridge University Press, Cambridge, UK
+    Morel, A., 1991. Light and marine photosynthesis: a spectral model with geochemical and climatological implications. Progress in Oceanography 96, 263–306
+    Morel, A., Berthon, J.-F., 1989. Surface pigments, algal biomass profiles, and potential production of the euphotic layer: Relationships reinvestigated in view of remote-sensing applications. Limnology and Oceanography 34, 1545–1562. https://doi.org/10.4319/lo.1989.34.8.1545.
+
+Copywrite: 
+    Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
+    Northeast Fisheries Science Center, Narragansett Laboratory.
+    This software may be used, copied, or redistributed as long as it is not sold and this copyright notice is reproduced on each copy made.
+    This routine is provided AS IS without any express or implied warranties whatsoever.
+
+Author:
+    This program was written on June 02, 2025 by Kimberly J. W. Hyde, Northeast Fisheries Science Center | NOAA Fisheries | U.S. Department of Commerce, 28 Tarzwell Dr, Narragansett, RI 02882
+  
+Modification History
+    Jun 02, 2025 - KJWH: Initial code written and adapted from John E. O'Reilly's PP_VGPM2.pro (IDL) code
+    Jun 23, 2025 - KJWH: Modified to return both VGPM and Eppley
+    Sep 02, 2025 - KJWH: Added run_pp_pipeline function to run the full pipeline
+                         Modified process_daily_pp to require xarray.DataArrays instead of filepaths
+    Sep 03, 2025 - KJWH: Added metadata functions to process_daily_pp
+                         Updated documentation
+                         Added validate_inputs function to check input data types and shapes
+"""
 
 def validate_inputs(chl, sst, par, daylength):
     expected_type = xr.DataArray
-    inputs = {"CHL": chl, "SST": sst, "PAR": par, "Daylength": daylength}
+    inputs = {"CHL": chl, "SST": sst, "PAR": par}
     
-    # Check types
-    for name, arr in inputs.items():
+    # 1️⃣ Type check
+    for name, arr in {**inputs, "Daylength": daylength}.items():
         if not isinstance(arr, expected_type):
             raise TypeError(f"{name} must be an xarray.DataArray, got {type(arr)}")
 
-    # Check shapes match
+    # 2️⃣ Shape and dims check for CHL/SST/PAR
     ref_shape = chl.shape
+    ref_dims = chl.dims
     for name, arr in inputs.items():
         if arr.shape != ref_shape:
             raise ValueError(f"{name} shape mismatch: expected {ref_shape}, got {arr.shape}")
-
-    # Optional: check dims match
-    ref_dims = chl.dims
-    for name, arr in inputs.items():
         if arr.dims != ref_dims:
             raise ValueError(f"{name} dims mismatch: expected {ref_dims}, got {arr.dims}")
+
+    # 3️⃣ Daylength check: must be 1D over latitude
+    if daylength.ndim != 1:
+        raise ValueError(f"Daylength must be 1D over latitude, got shape {daylength.shape}")
+    
+    lat_dim = next((dim for dim in daylength.dims if 'lat' in dim.lower()), None)
+    if lat_dim is None:
+        raise ValueError("Daylength must have a latitude dimension.")
+
+    chl_lat_dim = next((dim for dim in chl.dims if 'lat' in dim.lower()), None)
+    if chl_lat_dim and not np.array_equal(daylength[lat_dim], chl[chl_lat_dim]):
+        raise ValueError("Daylength latitude values do not match CHL latitude values.")
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None, verbose=False):
     """
@@ -46,7 +104,6 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
         dict: Mapping of date → (chl_path, sst_path, par_path,ppd_output_path)
     """
     
-    import os
     from utilities import get_source_file_dates, get_prod_files, get_dates, make_product_output_dir,parse_dataset_info
     
     # Get files
@@ -119,25 +176,6 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def make_pp_files(pp_data_map, overwrite=False):
-    """
-    Create primary productivity files using the pp_data_map. Skip up-to-date outputs unless overwrite=True.
-
-    Parameters:
-        pp_data_map (dict): Input and output file names from build_pp_date_map
-        overwrite (bool): If True, regenerate the output file even if output is newer
-    """
-    for date, (chl, sst, par, ppd, is_up_to_date) in pp_data_map.items():
-        if is_up_to_date and not overwrite:
-            print(f"⏩ Skipping {date}: {os.path.basename(ppd)} is up-to-date.")
-            continue
-
-        print(f"🛠️ Processing {date} → {os.path.basename(ppd)}")
-        process_daily_pp(date,chl,sst,par,ppd)
-
-# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 def vgpm_models(chl,sst,par,day_length):
     """
@@ -155,28 +193,6 @@ def vgpm_models(chl,sst,par,day_length):
         kdpar            : Diffuse attenuation coefficient for PAR (m⁻¹)
         chl_euphotic     : Areal chlorophyll within euphotic layer (mg m⁻²)
         euphotic_depth   : Euphotic depth (m)
-    
-    REFERENCES:
-        VGPM Reference:
-        Behrenfeld, M.J. and P.G. Falkowski. 1997. Photosynthetic Rates Derived from Satellite-based Chlorophyll Concentration. Limnol. Oceanogr., 42[1]:1-20.
-
-        Pbopt/temperature Reference:
-        Antoine, D., J.-M. Andre, and A. Morel. 1996. Oceanic primary production. 2. Estimation at global
-           scale from satellite (coastal zone color scanner) chlorophyll. Global Biogeochem. Cycles 10:57- 69.
-
-    COPYRIGHT: 
-        Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
-        Northeast Fisheries Science Center, Narragansett Laboratory.
-        This software may be used, copied, or redistributed as long as it is not sold and this copyright notice is reproduced on each copy made.
-        This routine is provided AS IS without any express or implied warranties whatsoever.
-
-    AUTHOR:
-      This program was written on June 02, 2025 by Kimberly J. W. Hyde, Northeast Fisheries Science Center | NOAA Fisheries | U.S. Department of Commerce, 28 Tarzwell Dr, Narragansett, RI 02882
-  
-    MODIFICATION HISTORY:
-        June 02, 2025 - KJWH: Initial code written and adapted from John E. O'Reilly's PP_VGPM2.pro (IDL) code
-        June 23, 2025 - KJWH: Modified to return both VGPM and Eppley
-    
     """
 
     def wrap_output(data, template):
@@ -217,8 +233,6 @@ def vgpm_models(chl,sst,par,day_length):
     )
 
     # Calculate Kd_PAR (m⁻¹)
-    #kdpar = -np.log(0.01) / zeu
-    #kdpar = xr.where(zeu > 0, -np.log(0.01) / zeu, np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
         kdpar = xr.where(zeu > 0, -np.log(0.01) / zeu, np.nan)
 
@@ -255,19 +269,17 @@ def vgpm_models(chl,sst,par,day_length):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-def process_daily_pp(chl, sst, par, daylength, output_pp_file):
+def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sourceinfo=None):
     """
-    Process daily CHL, SST, and PAR inputs:
-    - Checks if output exists or needs update
-    - Regrids SST and PAR
-    - Computes or loads daylength
-    - Saves processed output
+    Process daily CHL, SST, PAR and Daylength inputs:
+    - Checks if data are valid and creates a valid data mask
+    - Computes primary productivity using VGPM and VGPM-EPPLEY models
+    - Adds global and product metadata
+    - Saves processed output as a netcdf file
     """
-    
     # 1️⃣ Check the chl, sst, par and daylength inputs
     validate_inputs(chl, sst, par, daylength)
-    
+
     # 2️⃣  Create a mask of missing data
     def generate_valid_mask(*arrays):
         mask = arrays[0].notnull()
@@ -336,26 +348,45 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file):
         
 
     # 6️⃣ Add Global metadata
-    ds_out.attrs['creation_date'] = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    # Global Attributes
+    attrs = get_default_metadata(sheet="Global")
+    attrs = attrs | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
+  
+    # Geospatial Attributes
+    attrs = attrs | get_geospatial_metadata(dataset=chl)
 
-    #ds_out.attrs = chl_ds.attrs.copy()
+    # Temporal Attributes
+    attrs = attrs | get_temporal_metadata(ds=ds_out)
 
+    # Product Specific Attributes
+    attrs["product_name"] = build_product_attributes("PPD")["long_name"]
+    attrs = attrs | get_summary_metadata("PPD")
+    attrs["references"] = get_reference_metadata(['VGPM_EPPLEY','KIRK','ZEU'],refs_only=True)
+
+    # Source Metadata
+    if history: attrs["history"] = history
+    chl_source = get_source_metadata(sourceinfo["CHL"]["dataset"],dataset_version=sourceinfo["CHL"]["version"],source_prefix="source_chl")
+    sst_source = get_source_metadata(sourceinfo["SST"]["dataset"],dataset_version=sourceinfo["SST"]["version"],source_prefix="source_sst")
+    par_source = get_source_metadata(sourceinfo["PAR"]["dataset"],dataset_version=sourceinfo["PAR"]["version"],source_prefix="source_par")
+    attrs = attrs | chl_source | sst_source | par_source
     
+    # Add metadta to the output dataset
+    ds_out.attrs = attrs
 
-    # 🔟 Save results
+    # 7️⃣ Save results
     ds_out.to_netcdf(output_pp_file,encoding=encoding)
-    print(f"💾 Saved: {output_pp_file}")
-
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-def run_pp_pipeline(
-    chl_dataset=None,
-    sst_dataset=None,
-    par_dataset=None,
-    daterange=None,
-    daylength_dir=None,
-    overwrite=False,
-    verbose=True
-):
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+def run_pp_pipeline(chl_dataset=None,
+                    sst_dataset=None,
+                    par_dataset=None,
+                    daterange=None,
+                    daylength_dir=None,
+                    overwrite=False,
+                    verbose=True
+                    ):
     """
     Runs the full primary productivity pipeline:
     - Builds date→file map
@@ -368,27 +399,24 @@ def run_pp_pipeline(
         overwrite (bool): If True, reprocess even if output is up-to-date
         verbose (bool): If True, print progress
     """
-    from utilities import build_pp_date_map, parse_dataset_info
-    import xarray as xr
-    import pandas as pd
-    import os
-
+    
     # 1️⃣ Build date→file map
-    pp_data_map = build_pp_date_map(
-        dates=daterange,
-        chl_dataset=chl_dataset,
-        sst_dataset=sst_dataset,
-        par_dataset=par_dataset,
-        verbose=verbose
-    )
+    pp_data_map = build_pp_date_map(dates=daterange,
+                                    chl_dataset=chl_dataset,
+                                    sst_dataset=sst_dataset,
+                                    par_dataset=par_dataset,
+                                    verbose=verbose)
 
     # 2️⃣ Filter dates to run
     dates_to_run = [
         date for date, (_, _, _, _, up_to_date) in pp_data_map.items()
         if overwrite or not up_to_date
     ]
+    
+    total_dates = len(dates_to_run)  # or however you're batching
+
     if verbose:
-        print(f"🚀 Processing {len(dates_to_run)} dates...")
+        print(f"🚀 Processing {total_dates} dates...")
 
     if not dates_to_run:
         print("✅ All outputs are up-to-date. Nothing to run.")
@@ -405,32 +433,50 @@ def run_pp_pipeline(
     sst_info = parse_dataset_info(sst_files[0])
     par_info = parse_dataset_info(par_files[0])
 
+    chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
+    sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
+    par_source = get_source_metadata(par_info["dataset"],dataset_version=par_info["version"],source_prefix="source_par")
+    
+    merged_info = {
+        chl_info["product"]: chl_info,
+        sst_info["product"]: sst_info,
+        par_info["product"]: par_info
+    }
+
     chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
     sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
     par_nc_var = get_nc_prod(par_info['dataset'],'PAR')
 
     # 5️⃣ Batch regrid SST and PAR
+    print(f"Regridding SST and PAR files to CHL grid...")
     sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
     par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run)
 
     # 6️⃣ Daily loop
-    for date, chl_file, output_file in zip(dates_to_run, chl_files, output_files):
+    print(f"Writing PPD files to {os.path.dirname(output_files[0])}")
+    for i, (date, chl_file, sst_file, par_file, output_file) in enumerate(
+        zip(dates_to_run, chl_files, sst_files, par_files, output_files), start=1):
         
         chl_ds = xr.open_dataset(chl_file)
         chl = chl_ds[chl_nc_var]
-        sst = sst_ds.sel(time=pd.to_datetime(date))[sst_nc_var]
-        par = par_ds.sel(time=pd.to_datetime(date))[par_nc_var]
+        
+        target_time = pd.to_datetime(date)
 
+        sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var]        
+        par = par_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[par_nc_var]        
+        
         chl_date = pd.to_datetime(chl["time"].values[0]).date()
-        sst_date = pd.to_datetime(sst["time"].values[0]).date()
-        par_date = pd.to_datetime(par["time"].values[0]).date()
+        sst_date = pd.to_datetime(sst["time"].values).date()
+        par_date = pd.to_datetime(par["time"].values).date()
 
         if chl_date == sst_date:
+            sst = sst.expand_dims(time=chl["time"])
             sst["time"] = chl["time"]
         else:
             raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
 
         if chl_date == par_date:
+            par = par.expand_dims(time=chl["time"])
             par["time"] = chl["time"]
         else:
             raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
@@ -441,8 +487,23 @@ def run_pp_pipeline(
         doy = pd.Timestamp(date).dayofyear
         daylength_ds = get_daylength(chl_file, daylength_dir=daylength_dir, dayofyear=doy)
 
-        process_daily_pp(date, chl, sst, par, daylength_ds,output_file)
+         # Build the ppd history
+        history = " ".join([f"{build_product_attributes('PPD')['long_name']} is calculated using the VGPM {get_reference_metadata('VGPM')[0]['citation']} and VGPM-EPPLEY {get_reference_metadata('VGPM_EPPLEY')[0]['citation']} models. ",
+                f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
+                f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
+                f"The input photosynthetic active radiation file ({os.path.basename(par_file)}) is from the {par_source['source_par_title']}. ",
+                f"The SST and PAR data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}.",
+                f"Day length was calculated according to Kirk (1994)"
+        ])
+        
+        # 7️⃣ Process daily PP
+        
+        start_time = time.perf_counter()
+        process_daily_pp(chl, sst, par, daylength_ds,output_file,history=history,sourceinfo=merged_info)
+        elapsed = (time.perf_counter() - start_time) / 60
+        if verbose: print(f"Finished writing {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
 
-    print("🎉 Pipeline complete.")
+    print("🎉 Primary productivity pipeline complete.")
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

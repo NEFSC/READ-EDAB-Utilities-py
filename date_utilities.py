@@ -1,7 +1,7 @@
 from datetime import datetime, date, timedelta
+import numpy as np
 from pathlib import Path
 import re
-
 
 def format_date(dt, fmt):
     if fmt == "yyyymmdd":
@@ -139,3 +139,23 @@ def get_source_file_dates(files, format="yyyymmdd", placeholder=None):
             continue
         out.append(format_date(dt, format))
     return out
+
+def get_current_utc_timestamp() -> str:
+    """ Returns current UTC time in ISO 8601 format: 'YYYY-MM-DDTHH:MM:SSZ' """
+    return datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+
+def format_iso_duration(days: float) -> str:
+    """Convert float days to ISO 8601 duration string."""
+    whole_days = int(np.floor(days))
+    fractional_day = days - whole_days
+    seconds = int(round(fractional_day * 86400))  # 86400 seconds in a day
+
+    if whole_days == 0 and seconds == 0:
+        return "P1D"  # fallback minimum duration
+
+    duration = "P"
+    if whole_days > 0:
+        duration += f"{whole_days}D"
+    if seconds > 0:
+        duration += f"T{seconds}S"
+    return duration
