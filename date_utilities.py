@@ -43,6 +43,9 @@ def get_dates(dates,format='yyyymmdd'):
     def to_dt(d):
         if isinstance(d, int): return date(d, 1, 1)
         if isinstance(d, str):
+            # Try to coerce year-like strings to int
+            if d.isdigit() and len(d) == 4:
+                return date(int(d), 1, 1)
             for fmt in ("%Y%m%d%H%M%S", "%Y%m%d", "%Y-%m-%d"):
                 try:
                     return datetime.strptime(d, fmt)
