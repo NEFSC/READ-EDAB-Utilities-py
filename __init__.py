@@ -6,4 +6,5 @@ from .import_utilities import *
 from .calc_daylength import *
 from .metadata_utilities import *
 from .calc_primprod import *
+from .statanom_utilties import *
 #from .algorithms import *

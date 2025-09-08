@@ -349,7 +349,7 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sou
 
     # 6️⃣ Add Global metadata
     # Global Attributes
-    attrs = get_default_metadata(sheet="Global")
+    attrs = get_default_metadata(sheet="General")
     attrs = attrs | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
   
     # Geospatial Attributes

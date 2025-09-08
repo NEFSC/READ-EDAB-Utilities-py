@@ -149,7 +149,7 @@ def load_all_metadata(metadata_path=None) -> Dict[str, Dict[str, Dict[str, Any]]
 
     return metadata
 
-def get_default_metadata(metadata_path: Optional[str] = None,sheet: str = "Global") -> Dict[str, Any]:
+def get_default_metadata(metadata_path: Optional[str] = None,sheet: str = "General") -> Dict[str, Any]:
     """
     Returns a dictionary of default values for all attributes marked as required in the given sheet.
     """
