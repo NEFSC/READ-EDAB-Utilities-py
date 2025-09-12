@@ -2,6 +2,35 @@ import os
 import glob
 from pathlib import Path
 import stat
+from bootstrap.environment import bootstrap_environment
+env = bootstrap_environment(verbose=False)
+
+"""
+FILE_UTILITIES is a collection of utility functions for handling file paths, directories, and permissions.
+
+Main Functions:
+    - dataset_defaults: Returns the default/primary datatype location and product for each "source" dataset
+    - product_defaults: Returns the default/primary dataset and datatype location for each product
+    - netcdf_product_defaults: Returns the data product name found in the original source netcdf files
+    - get_nc_prod: Returns internal variable name and metadata for a given dataset and product.
+
+Helper Functions:
+    - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes
+    
+Copywrite: 
+    Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
+    Northeast Fisheries Science Center, Narragansett Laboratory.
+    This software may be used, copied, or redistributed as long as it is not sold and this copyright notice is reproduced on each copy made.
+    This routine is provided AS IS without any express or implied warranties whatsoever.
+
+Author:
+    This program was written on August 01, 2025 by Kimberly J. W. Hyde, Northeast Fisheries Science Center | NOAA Fisheries | U.S. Department of Commerce, 28 Tarzwell Dr, Narragansett, RI 02882
+  
+Modification History
+    Aug 01, 2025 - KJWH: Initial code written
+    Sep 10, 2025 - KJWH: Updated documentation
+"""
+
 
 
 def dataset_defaults():
@@ -21,10 +50,11 @@ def dataset_defaults():
         'ACSPONRT': ('V2.8.1','MAPPED_2KM', 'SST'),
         'AVHRR': ('V5.3','MAPPED_4KM', 'SST'),
         'CORALSST': ('V3.1','MAPPED_5KM', 'SST'),
-        'GLOBCOLOUR': ('V4.2.1','MAPPED_4KM', 'CHL1'),
+        'GLOBCOLOUR': ('V4.2.1','MAPPED_4KM', 'CHL'),
         'MUR': ('V4.1','MAPPED_1KM', 'SST'),
         'OCCCI': ('V6.0','MAPPED_4KM', 'CHL'),
-        'OISST': ('V2','MAPPED_25KM', 'SST')
+        'OISST': ('V2','MAPPED_25KM', 'SST'),
+        'PACE': ('V3.1','MAPPED_4KM','CHL')
     }
 
     return dataset_info_map
@@ -43,18 +73,25 @@ def product_defaults():
 
     # The default product name, dataset and source data location product
     prod_info_map = {
-        'CHL': ('CHL','OCCCI', 'SOURCE',''),
-        'CHLOR_A': ('CHLOR_A','OCCCI','OUTPUT','DAILY'),
-        'SST': ('SST','ACSPO', 'SOURCE',''),
-        'PPD': ('PPD','OCCCI', 'OUTPUT','DAILY'),
-        'PSC': ('PSC','OCCCI', 'OUTPUT','DAILY'),
-        'RRS': ('RRS','OCCCI', 'SOURCE',''),
-        'PAR': ('PAR','GLOBCOLOUR','SOURCE',''),
-        'CHL_TEMP': ('CHL1','GLOBCOLOUR','SOURCE',''),
-        'SST_TEMP': ('SST','ACSPONRT', 'SOURCE',''),
-        'CHL_FRONTS': ('CHL_FRONTS','OCCCI', 'OUTPUT','DAILY'),
-        'SST_FRONTS': ('SST_FRONTS','ACSPO', 'OUTPUT','DAILY'),
-        'FRONTS': ('SST_FRONTS','ACSPO', 'OUTPUT','DAILY')
+        'CHL': ('CHL','OCCCI', 'SOURCE'),
+        'CHLOR_A': ('CHLOR_A','OCCCI','PRODUCT'),
+        'SST': ('SST','ACSPO', 'SOURCE'),
+        'PPD': ('PPD','OCCCI', 'PRODUCT'),
+        'PSC': ('PSC','OCCCI', 'PRODUCT'),
+        'RRS': ('RRS','OCCCI', 'SOURCE'),
+        'PAR': ('PAR','GLOBCOLOUR','SOURCE'),
+        'IPAR': ('IPAR','PACE','SOURCE'),
+        'AVW': ('AVW','OCCCI','PRODUCT'),
+        'KD': ('KD','OCCCI','SOURCE'),
+        'IOP': ('IOP','OCCCI','SOURCE'),
+        'MOANA': ('MOANA','PACE','SOURCE'),
+        'CARBON': ('CARBON','PACE','SOURCE'),
+        'FLH': ('FLH','PACE','SOURCE'),
+        'CHL_TEMP': ('CHL','GLOBCOLOUR','SOURCE'),
+        'SST_TEMP': ('SST','ACSPONRT', 'SOURCE'),
+        'CHL_FRONTS': ('CHL_FRONTS','OCCCI', 'PRODUCT'),
+        'SST_FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT'),
+        'FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT')
     }
 
     return prod_info_map
@@ -73,32 +110,47 @@ def netcdf_product_defaults():
     # The default product name, dataset and source data location product
     return {
         'ACSPO': {
-            'SST': 'TBD_sst',
+            'SST': 'sea_surface_temperature',
+            'SST_GRADMAG': 'sst_gradient_magnitude',
+            'SST_GRADDIR': 'sst_gradient_direction',
+            'SST_BIAS': 'sses_bias'
         },
         'ACSPO_NRT': {
-            'SST': 'TBD_sst',
+            'SST': 'sea_surface_temperature',
+            'SST_GRADMAG': 'sst_gradient_magnitude',
+            'SST_GRADDIR': 'sst_gradient_direction',
+            'SST_BIAS': 'sses_bias'
         },
         'CORALSST': {
             'SST': 'analysed_sst',
         },
         'OISST': {
-            'SST': 'TBD_sst',
+            'SST': 'SST',
         },
         'MUR': {
-            'SST': 'TBD_sst',
+            'SST': 'analysed_sst',
         },
         'AVHRR': {
-            'SST': 'TBD_sst',
+            'SST': 'sea_surface_temperature',
         },
         'GLOBCOLOUR': {
             'PAR': 'PAR_mean',
-            'CHL1': 'TBD_chl',
+            'CHL': 'CHL1_mean',
         },
         'OCCCI': {
             'CHL': 'chlor_a',
         },
         'PACE': {
-            'SST': 'TBD_sst',
+            'CHL': 'chlor_a',
+            'PAR': 'par_day_planar_above',
+            'IPAR': 'ipar_plana_above',
+            'RRS': 'Rrs',
+            'AVW': 'avw',
+            'MOANA_PRO': 'prococcus_moana',
+            'MOANA_SYN': 'synococcus_moana',
+            'MOANA_PICO': 'picoeuk_moana',
+            'PYTHO_CARBON': 'carbon_phyto',
+            'FLH': 'nflh'
         },
         'TESTDATASET': {
             'SST_MEAN': 'sst_mean',
@@ -197,43 +249,54 @@ def get_datasets_source(preferred=None,verbose=False):
     raise FileNotFoundError("No valid input data directory found.")
 
 #--------------------------------------------------------------------------------------
-def get_dataset_dirs(dataset=None,verbose=False):
+def get_dataset_dirs(dataset=None,verbose=True):
     """
     Search for subfolders within a directory and return a dictionary mapping
     folder names to their full paths.
 
     Parameters:
         root_dir (str): The directory to search.
+        verbose (bool): Whether to print status messages.
 
     Returns:
         dict: Dictionary with subfolder names as keys and full paths as values.
-    """
-    root_dir = get_datasets_source()
-    results = {}
-    for dirpath, dirnames, _ in os.walk(root_dir):
-        for dirname in dirnames:
-            if dirname.startswith("SOURCE") or dirname.startswith("OUTPUT"):
-                full_path = os.path.join(dirpath, dirname)
-                
-               # Determine subkey type
-                subkey = dirname
+              If dataset is provided, returns only its matching subfolders.
 
+    """
+    root_dir = env["dataset_path"]
+    dataset_info_map = dataset_defaults()
+    results = {}
+    for dirpath, dirnames, _ in os.walk(root_dir): 
+        for dirname in dirnames:
+            if dirname.startswith("SOURCE") or dirname.endswith("PRODUCTS"):
+                full_path = os.path.join(dirpath, dirname)
+               
                 # Get top-level dataset name
                 relative_parts = os.path.relpath(full_path, root_dir).split(os.sep)
                 dataset_name = relative_parts[0] if relative_parts else os.path.basename(root_dir)
 
-                if dataset and dataset_name == dataset:
-                    return full_path
+                # Skip datasets not in dataset_info_map if no specific dataset is requested
+                if not dataset and dataset_name not in dataset_info_map:
+                    continue
 
+                # Filter by dataset if specified
+                if dataset and dataset_name != dataset:
+                    continue
+                
                 # Initialize nested dict if needed
                 if dataset_name not in results:
                     results[dataset_name] = {}
 
-                results[dataset_name][subkey] = full_path
+                results[dataset_name][dirname] = full_path
                         
     if dataset:
-        raise ValueError(f"No SOURCE_DATA folder found for top-level: {dataset}")
-    
+        if dataset not in results:
+            raise ValueError(f"No matching folders found for dataset: {dataset}")
+        return results[dataset]
+
+    if verbose:
+        print("No dataset specified. Returning available datasets from dataset_info_map.")
+
     return results
 
 #--------------------------------------------------------------------------------------
@@ -257,13 +320,13 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
         dict: Nested dictionary grouped by source_type → map_type → product.
 
             {
-                "SOURCE_DATA": {
+                "SOURCE": {
                     "MAPPED_4KM_DAILY": {
                         "CHL": "/.../MAPPED_4KM_DAILY/CHL",
                         "RRS": "/.../MAPPED_4KM_DAILY/RRS"
                     },
                 }
-                "OUTPUT": {
+                "EDAB_PRODUCTS": {
                     "MAPPED_4KM_DAILY": {}
                         "PPD": "/.../MAPPED_4KM_DAILY/PPD",
                         "PSC": "/.../MAPPED_4KM_DAILY/PSC",
@@ -272,15 +335,15 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
                 ...
             }
     """
-    # First, get all available SOURCE_DATA paths
+    # First, get all available SOURCE paths
     all_sources = get_dataset_dirs(verbose=False)
     
     if dataset not in all_sources:
         print(f"❌ {dataset}' not found in available sources.")
         return None
     
-     # Extract nested SOURCE and OUTPUT paths
-# Dynamically find the first key containing 'SOURCE'
+    # Extract nested SOURCE and OUTPUT paths
+    # Dynamically find the first key containing 'SOURCE'
     source_data_path = next(
         (path for key, path in all_sources[dataset].items() if "SOURCE" in key),
         None
@@ -370,7 +433,7 @@ def get_prod_files(prod,
         prod (str, required): The name of the product to search for the files (e.g. CHL, SST)
         dataset (str, optional): The name of a dataset (e.g. 'OCCCI', 'ACSPO', 'GLOBCOLOUR') to 
             find the requested product. If none provided, will use the product default.
-        dataset_type(str,optional): The name of the dataset type (e.g. 'SOURCE_DATA','OUTPUT_DATA') to
+        dataset_type(str,optional): The name of the dataset type (e.g. 'SOURCE','EDAB_PRODUCTS') to
             search for the requested product. If none provided, will use the product default.
         dataset_map (str, optional): The dataset map type to search for the files (e.g. MAPPED_4KM_DAILY)
             If none is provided, will use the product defualt.
@@ -391,10 +454,10 @@ def get_prod_files(prod,
         print(f"❌ Product '{prod}' not found in prod_info_map.")
         return None
 
-    actual_prod, default_dataset, default_type, default_prod_type = prod_info_map[prod]
+    actual_prod, default_dataset, default_type = prod_info_map[prod]
     dataset = dataset.upper().strip() if dataset else default_dataset
     dataset_type = dataset_type.upper().strip() if dataset_type else default_type
-    prod_type = prod_type.upper().strip() if prod_type else default_prod_type
+    #prod_type = prod_type.upper().strip() if prod_type else default_prod_type
 
     # Load default dataset info (version, map type)
     dataset_info_map = dataset_defaults()
@@ -413,11 +476,47 @@ def get_prod_files(prod,
         print(f"⚠ No product structure found for dataset '{dataset}'.")
         return None
 
-    # Try locating product path
-    resolved_type = next(
-        (key for key in dataset_products.keys() if dataset_type in key),
-        None
-    )
+    # Try locating product path. If dataset is specified, search both SOURCE and PRODUCT types
+    # Match folder keys using flexible rules
+    candidate_types = [
+        key for key in dataset_products.keys()
+        if key.startswith("SOURCE") or key.endswith("PRODUCTS")
+    ]
+    matching_paths = {}
+    
+    for dtype in candidate_types:
+        if dtype not in dataset_products:
+            continue
+
+        # Try to resolve map type from folder keys using partial match
+        resolved_map = next(
+            (maptype for maptype in dataset_products[dtype] if dataset_map in maptype),
+            None
+        )
+
+        if not resolved_map:
+            continue
+
+        # Check if product exists under this type/map
+        prod_dict = dataset_products[dtype][resolved_map]
+        if actual_prod in prod_dict:
+            path = prod_dict[actual_prod]
+            if prod_type:
+                path = os.path.join(path, prod_type)
+            matching_paths[dtype] = path
+
+    # Handle results
+    if not matching_paths:
+        print(f"⚠ Product '{prod}' not found in any type under dataset '{dataset}'.")
+        return None
+
+    if len(matching_paths) > 1:
+        raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple types ({list(matching_paths.keys())}) for dataset '{dataset}'.")
+
+    # Use the single resolved path
+    resolved_type, path = next(iter(matching_paths.items()))
+    if verbose:
+        print(f"✅ Found '{prod}' in '{resolved_type}' → {path}")
 
     if not resolved_type:
         print(f"⚠ Dataset type '{dataset_type}' not found in products for '{dataset}'.")
@@ -436,9 +535,6 @@ def get_prod_files(prod,
 
     try:
         path = dataset_products[resolved_type][resolved_map][actual_prod]
-        # Add prod_type if it's specified
-        if prod_type:
-            path = os.path.join(path, prod_type)
         if verbose:
             print(f"✅ Found path for '{prod}' → {path}")
     except KeyError:
@@ -452,6 +548,10 @@ def get_prod_files(prod,
         search_pattern = f"*{period}*.nc"
     else:
         search_pattern = "*.nc"
+    if verbose:
+        print(f"🔍 Searching for .nc files in: {path}")    
+    
+    if verbose: print(f"🔍 Searching for .nc files in: {path}")
     nc_files = glob.glob(os.path.join(path, "*.nc"))
 
     if not nc_files:
@@ -460,6 +560,7 @@ def get_prod_files(prod,
 
     if verbose:
         print(f"📦 Found {len(nc_files)} .nc files in: {path}")
+    nc_files.sort()
     return nc_files
     
 
@@ -477,7 +578,7 @@ def parse_dataset_info(path, base=None):
     """
    
     if base is None:
-        base = get_datasets_source()
+        base = env["dataset_path"]
     
     # Handle list of files
     if isinstance(path, (list, tuple)):
@@ -487,13 +588,6 @@ def parse_dataset_info(path, base=None):
         if len(dirnames) > 1:
             raise ValueError(f"Files span multiple directories: {dirnames}")
         path = path[0]  # Use first file after validation
-
-    # Handle directory path
-    elif os.path.isdir(path):
-        nc_files = sorted(glob.glob(os.path.join(path, "*.nc")))
-        if not nc_files:
-            raise FileNotFoundError(f"No NetCDF files found in directory: {path}")
-        path = nc_files[0]  # ✅ Use first file in directory
 
     # Normalize to relative path
     path = os.path.abspath(path)
@@ -508,7 +602,7 @@ def parse_dataset_info(path, base=None):
     return {
         "dataset": parts[0],       # OCCCI, CORALSST, etc.
         "version": parts[1],      # V6.0, V3.1, etc.
-        "dataset_type": parts[2],  # SOURCE_DATA, OUTPUT_DATA
+        "dataset_type": parts[2],  # SOURCE, EDAB_PRODUCTS, etc.
         "dataset_map": parts[3], # MAPPED_4KM_DAILY, etc.
         "product": parts[4] if len(parts) > 4 else "UNKNOWN"  # CHL, SST, PAR
     }
@@ -602,7 +696,7 @@ def file_make(input_files, output_file):
     return False
    
 
-def make_product_output_dir(input_product,output_product,dataset=None,new_dataset_type='OUTPUT_DATA',create_dir=True):
+def make_product_output_dir(input_product,output_product,dataset=None,new_dataset_type='EDAB_PRODUCTS',subset='GLOBAL',create_dir=True):
     """
     Create the output path by replacing dataset_type and product,
     and create the directory if it does not exist.
@@ -611,7 +705,8 @@ def make_product_output_dir(input_product,output_product,dataset=None,new_datase
     - input_product (str): Original product name (e.g., 'CHL').
     - output_product (str): Replacement for product name (e.g. 'PPD' or 'PSC').
     - dataset (str): Dataset name for the original product (e.g. 'OCCCI').
-    - new_dataset_type (str): Replacement for dataset_type (default: 'OUTPUT_DATA').
+    - new_dataset_type (str): Replacement for dataset_type (default: 'EDAB_PRODUCTS').
+    - subset (str): Indicates the map subset region (default: GLOBAL)
     - create (bool): Whether to create the directory if it doesn't exist.
 
     Returns:
@@ -637,6 +732,10 @@ def make_product_output_dir(input_product,output_product,dataset=None,new_datase
     new_path = original_path
     new_path = new_path.replace(info["dataset_type"], new_dataset_type)
     new_path = new_path.replace(info["product"], output_product)
+    for old_prefix in ["MAPPED", "BINNED"]:
+        if info["dataset_map"].startswith(old_prefix):
+            dmap = info['dataset_map'].replace(old_prefix, subset, 1)
+            new_path = new_path.replace(info['dataset_map'],dmap)
 
     if create_dir:
         os.makedirs(new_path, exist_ok=True)

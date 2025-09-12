@@ -1,4 +1,3 @@
-from utilities import get_python_dir
 from utilities import dataset_defaults
 from utilities import get_current_utc_timestamp
 from utilities import format_iso_duration
@@ -12,6 +11,9 @@ import netCDF4
 from typing import Optional, Dict, Any
 from datetime import datetime
 from typing import Dict
+
+from bootstrap.environment import bootstrap_environment
+env = bootstrap_environment(verbose=False)
 
 ISO_RESOLUTION_MAP = {
                 "daily": "P1D",
@@ -41,8 +43,8 @@ def get_metadata_table(metapath=None,sheet=None) -> dict:
     """
 
     if metapath is None:
-        dir = get_python_dir(resources=True)
-        metapath = os.path.join(dir,'metadata','EDAB_metadata.xlsx')
+        dir = env["metadata_path"]
+        metapath = os.path.join(dir,'EDAB_metadata.xlsx')
 
     xls = pd.ExcelFile(metapath)
     sheet_map = {s.lower(): s for s in xls.sheet_names}
@@ -149,7 +151,7 @@ def load_all_metadata(metadata_path=None) -> Dict[str, Dict[str, Dict[str, Any]]
 
     return metadata
 
-def get_default_metadata(metadata_path: Optional[str] = None,sheet: str = "Global") -> Dict[str, Any]:
+def get_default_metadata(metadata_path: Optional[str] = None,sheet: str = "General") -> Dict[str, Any]:
     """
     Returns a dictionary of default values for all attributes marked as required in the given sheet.
     """
@@ -514,7 +516,7 @@ def get_reference_metadata(models: list, metapath: str = None, refs_only: bool =
 
         entry = normalized_refs[model_key]
         clean_entry = {
-            k: str(v).strip() if isinstance(v, str) else v
+            k: str(int(v)) if k == "year" and isinstance(v, (float, int)) else str(v).strip() if isinstance(v, str) else v
             for k, v in entry.items()
             if pd.notna(v)
         }
