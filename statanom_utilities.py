@@ -27,16 +27,17 @@ Modification History
     
 """
 def compute_stats(grouped, label):
+    """
         return xr.Dataset({
             f"{var_name}_{label}_mean": grouped.mean(dim=time_dim, skipna=True),
             f"{var_name}_{label}_min": grouped.min(dim=time_dim, skipna=True),
             f"{var_name}_{label}_max": grouped.max(dim=time_dim, skipna=True),
             f"{var_name}_{label}_median": grouped.median(dim=time_dim, skipna=True),
             f"{var_name}_{label}_std": grouped.std(dim=time_dim, skipna=True)
-            f"{var_name}_{label}_sum": grouped.std(dim=time_dim, skipna=True)
-            f"{var_name}_{label}_var": grouped.std(dim=time_dim, skipna=True)
+            f"{var_name}_{label}_sum": grouped.sum(dim=time_dim, skipna=True)
+            f"{var_name}_{label}_var": grouped.var(dim=time_dim, skipna=True)
         })
-
+    """
 def get_stats(ds, periods=['W','M'], var_name='chlorophyll', time_dim='time'):
     """
     Compute weekly and monthly statistics (mean, min, max, median, std) 

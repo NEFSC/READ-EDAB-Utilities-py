@@ -19,6 +19,8 @@ from utilities import get_summary_metadata
 from utilities import get_default_metadata
 from utilities import get_source_metadata
 from utilities import parse_dataset_info
+from utilities import get_source_file_dates, get_prod_files, get_dates, make_product_output_dir
+
 
 """
 CALC_PRIMPROD create daily net primary productivity (PPD) files from daily satellite chlorophyll (CHL), sea surface temperature (SST), and photosynthetic active radiation (PAR) inputs.
@@ -103,9 +105,7 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
     Returns:
         dict: Mapping of date → (chl_path, sst_path, par_path,ppd_output_path)
     """
-    
-    from utilities import get_source_file_dates, get_prod_files, get_dates, make_product_output_dir,parse_dataset_info
-    
+        
     # Get files
     chl_files = get_prod_files("CHL", dataset=chl_dataset)
     sst_files = get_prod_files("SST", dataset=sst_dataset)
@@ -298,10 +298,15 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sou
     day_length_valid = daylength.where(valid_mask)
 
     # 3️⃣ Calculate PP on non-missing data and create dataset    
+    start_vgpm = time.perf_counter()
     pp_eppley, pp_vgpm, kdpar, chl_euphotic, zeu = vgpm_models(
         chl_valid, sst_valid, par_valid, day_length_valid)
+    elapsed_vgpm = (time.perf_counter() - start_vgpm) / 60
+    print(f"    Finished running the VGPM models after {elapsed_vgpm:.2f} minutes.")
+
         
     # 4️⃣ Create output dataset
+    start_meta = time.perf_counter()
     def ensure_shape(var, template):
         if isinstance(var, xr.DataArray):
             var = var.data
@@ -372,9 +377,15 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sou
     
     # Add metadta to the output dataset
     ds_out.attrs = attrs
+    elapsed_meta = (time.perf_counter() - start_meta) / 60
+    print(f"    Finished building the dataset after {elapsed_meta:.2f} minutes.")
 
     # 7️⃣ Save results
+    print (f"    Starting to write {output_pp_file}")
+    start_netcdf = time.perf_counter()
     ds_out.to_netcdf(output_pp_file,encoding=encoding)
+    elapsed_netcdf = (time.perf_counter() - start_netcdf) / 60
+    print(f"    Finished writing {output_pp_file} after {elapsed_netcdf:.2f} minutes.")
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

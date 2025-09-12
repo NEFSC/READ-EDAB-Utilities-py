@@ -3,7 +3,8 @@ import xarray as xr
 import os
 from pathlib import Path
 from utilities import parse_dataset_info
-from utilities import get_python_dir
+from bootstrap.environment import bootstrap_environment
+env = bootstrap_environment(verbose=False)
 
 def _validate_daylength_grid(ds):
     assert "daylength" in ds, "Missing 'daylength' variable in dataset."
@@ -78,7 +79,7 @@ def get_daylength(latitude_grid_path, daylength_dir=None,dayofyear=None):
         raise TypeError("latitude_grid_path must be a string or Path object.")
 
     if not daylength_dir:
-        pypath = get_python_dir(resources=True)
+        pypath = env["workflow_resources"]
         daylength_dir = Path(pypath) / "daylength"
     os.makedirs(daylength_dir, exist_ok=True)
 

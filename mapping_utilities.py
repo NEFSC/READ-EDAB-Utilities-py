@@ -7,8 +7,63 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from .file_utilities import parse_dataset_info
-from .import_utilities import get_python_dir
 from .date_utilities import get_dates
+
+from bootstrap.environment import bootstrap_environment
+env = bootstrap_environment(verbose=False)
+
+def map_subset_defaults():
+    """
+    Returns the default longitude and latitude coordinates for map subsets
+
+    Parameters:
+        No inputs
+    
+    Returns:
+        Dictionary of default dataset specific data types and products
+    """
+
+    # The default source data location and product for each dataset
+    subset_map_info = {
+        'NES': {'lat_min':34.0,'lat_max':46.0,'lon_min':-79.0,'lon_max':-61.0},
+        'NWA': {'lat_min':22.5,'lat_max':48.5,'lon_min':-82.5,'lon_max':-51.5}
+    }
+
+    return subset_map_info
+
+def subset_dataset(ds, region, lat_name="lat", lon_name="lon"):
+    """
+    Subsets an xarray Dataset or DataArray using predefined lat/lon bounds.
+
+    Parameters:
+        ds          : xarray.Dataset or xarray.DataArray
+        region.     : str — key from map_subset_defaults() (e.g., 'NES', 'NWA')
+        lat_name    : str — name of latitude coordinate in ds
+        lon_name    : str — name of longitude coordinate in ds
+
+    Returns:
+        Subsetted xarray object
+    """
+    bounds = map_subset_defaults().get(region)
+    if bounds is None:
+        raise ValueError(f"Region '{region}' not found in subset map.")
+
+    lat_min, lat_max = bounds["lat_min"], bounds["lat_max"]
+    lon_min, lon_max = bounds["lon_min"], bounds["lon_max"]
+
+    # Handle longitude wraparound if needed
+    if ds[lon_name].max() > 180:
+        lon_min = (lon_min + 360) if lon_min < 0 else lon_min
+        lon_max = (lon_max + 360) if lon_max < 0 else lon_max
+
+    # Handle latitude direction
+    lat_vals = ds[lat_name].values
+    if lat_vals[0] > lat_vals[-1]:  # descending
+        lat_slice = slice(lat_max, lat_min)
+    else:  # ascending
+        lat_slice = slice(lat_min, lat_max)
+
+    return ds.sel({lat_name: lat_slice, lon_name: slice(lon_min, lon_max)})
 
 def compute_dynamic_chunks(ds: xr.Dataset, target_chunks: int = 32) -> dict:
     """
@@ -100,7 +155,7 @@ def get_regrid_weights(target_path, source_path,
 
     # Get the output directory for the weight files
     if not weights_dir:
-        pypath = get_python_dir(resources=True)
+        pypath = env["workflow_resources"]
         weights_dir = Path(pypath) / "regrid_weights"
     os.makedirs(weights_dir, exist_ok=True)
 
