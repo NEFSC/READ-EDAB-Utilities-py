@@ -1,6 +1,7 @@
 import pandas as pd
 import xarray as xr
 import os
+import sys
 import time
 import numpy as np
 
@@ -91,11 +92,12 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
     Parameters:
         dates (list of str): List of dates (YYYYMMDD) to process.
         get_date_prod (str): Which product to use for date filtering.
-        chl_dataset, sst_dataset (str): Dataset identifiers.   
+        chl_dataset, sst_dataset (str): Dataset identifiers. 
+        subset (str): The subset region (e.g. NES, NWA) to subset the data 
     Returns:
         dict: Mapping of date → (chl_path, sst_path, psc_output_path)
     """
-        
+
     # Get files
     chl_files = get_prod_files("CHL", dataset=chl_dataset)
     sst_files = get_prod_files("SST", dataset=sst_dataset)
@@ -149,6 +151,11 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
                 is_up_to_date = all(psc_mtime > m for m in input_mtimes)
             else:
                 is_up_to_date = False
+
+            if is_up_to_date:
+                print(f"✅ PSC is current for {date}")
+            else:
+                print(f"⏳ Need to process PSC for {date}")
 
             psc_data_map[date] = (chl_path, sst_path, psc_path, is_up_to_date)
         else:
@@ -334,7 +341,8 @@ def run_psc_pipeline(chl_dataset=None,
                     daterange=None,
                     subset='NES',
                     overwrite=False,
-                    verbose=True
+                    verbose=True,
+                    logfile=None
                     ):
     """
     Runs the full phytoplankton size class pipeline:
@@ -348,8 +356,17 @@ def run_psc_pipeline(chl_dataset=None,
         subset (str): The subset region (e.g. NES, NWA) to subset the data 
         overwrite (bool): If True, reprocess even if output is up-to-date
         verbose (bool): If True, print progress
+        logfile (str): Optional file to log the progress
+
     """
-    
+    subset = subset or "NES"  # Default to NES if None provided
+
+    if logfile:
+        print(f"logging progress in {logfile}")
+        log = open(logfile, "w")
+        sys.stdout = log
+        sys.stderr = log
+
     # 1️⃣ Build date→file map
     psc_data_map = build_psc_date_map(dates=daterange,
                                       chl_dataset=chl_dataset,

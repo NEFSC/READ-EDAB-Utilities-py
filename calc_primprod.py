@@ -1,11 +1,12 @@
 import pandas as pd
 import xarray as xr
 import os
+import sys
 import time
 import numpy as np
 from datetime import datetime
 
-from utilities import regrid_wrapper
+from utilities import regrid_wrapper, subset_dataset
 from utilities import get_daylength
 from utilities import get_nc_prod
 from utilities import get_fill_value
@@ -94,7 +95,7 @@ def validate_inputs(chl, sst, par, daylength):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None, verbose=False):
+def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None, subset=None, verbose=False):
     """
     Constructs a date→(CHL, SST, PAR, PPD) file path mapping using get_prod_files.
 
@@ -102,6 +103,7 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
         dates (list of str): List of dates (YYYYMMDD) to process.
         get_date_prod (str): Which product to use for date filtering.
         chl_dataset, sst_dataset, par_dataset (str): Dataset identifiers.   
+        subset (str): The subset region (e.g. NES, NWA) to subset the data 
     Returns:
         dict: Mapping of date → (chl_path, sst_path, par_path,ppd_output_path)
     """
@@ -127,7 +129,7 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
     par_map = {d: f for d, f in zip(par_dates, par_files) if d}
     #ppd_map = {d: f for d, f in zip(ppd_dates, ppd_files) if d}
     # Build PPD file map
-    output_dir = make_product_output_dir('CHL','PPD',dataset=chl_dataset)
+    output_dir = make_product_output_dir('CHL','PPD',dataset=chl_dataset,subset=subset)
     ppd_map = {}
     for date in chl_dates:
         filename = f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_map']}-PPD.nc"
@@ -164,6 +166,11 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
                 is_up_to_date = all(ppd_mtime > m for m in input_mtimes)
             else:
                 is_up_to_date = False
+
+            if is_up_to_date:
+                print(f"✅ PSC is current for {date}")
+            else:
+                print(f"⏳ Need to process PSC for {date}")
 
             pp_data_map[date] = (chl_path, sst_path, par_path, ppd_path, is_up_to_date)
         else:
@@ -394,9 +401,11 @@ def run_pp_pipeline(chl_dataset=None,
                     sst_dataset=None,
                     par_dataset=None,
                     daterange=None,
+                    subset=None,
                     daylength_dir=None,
                     overwrite=False,
-                    verbose=True
+                    verbose=True,
+                    logfile=None
                     ):
     """
     Runs the full primary productivity pipeline:
@@ -407,15 +416,25 @@ def run_pp_pipeline(chl_dataset=None,
     Parameters:
         chl_dataset, sst_dataset, par_dataset (str): Dataset identifiers
         daterange (list of str): Dates to process (YYYYMMDD)
+        subset (str): The subset region (e.g. NES, NWA) to subset the data 
         overwrite (bool): If True, reprocess even if output is up-to-date
         verbose (bool): If True, print progress
+        logfile (str): Optional file to log the progress
     """
     
+    if logfile:
+        print(f"logging progress in {logfile}")
+        log = open(logfile, "w")
+        sys.stdout = log
+        sys.stderr = log
+
+
     # 1️⃣ Build date→file map
     pp_data_map = build_pp_date_map(dates=daterange,
                                     chl_dataset=chl_dataset,
                                     sst_dataset=sst_dataset,
                                     par_dataset=par_dataset,
+                                    subset=subset,
                                     verbose=verbose)
 
     # 2️⃣ Filter dates to run
@@ -492,6 +511,13 @@ def run_pp_pipeline(chl_dataset=None,
         else:
             raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
 
+        # Subset CHL and SST if requested
+        if subset:
+            if verbose: print(f"Subsetting to region: {subset}")
+            chl = subset_dataset(chl, subset)
+            sst = subset_dataset(sst, subset)
+            par = subset_dataset(par, subset)
+        
         chl, sst, par = xr.align(chl, sst, par, join="exact")  # or "inner" if needed
 
         # Compute or load daylength
