@@ -6,6 +6,8 @@ import re
 def format_date(dt, fmt):
     if fmt == "yyyymmdd":
         return dt.strftime("%Y%m%d")
+    elif fmt == "yyyy":
+        return dt.strftime("%Y")
     elif fmt == "yyyy-mm-dd":
         return dt.strftime("%Y-%m-%d")
     elif fmt == "yyyymmddhhmmss":
