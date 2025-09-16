@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from typing import Dict
 
-from bootstrap.environment import bootstrap_environment
+from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 ISO_RESOLUTION_MAP = {

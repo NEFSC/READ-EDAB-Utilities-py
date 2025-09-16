@@ -3,7 +3,7 @@ import xarray as xr
 import os
 from pathlib import Path
 from utilities import parse_dataset_info
-from bootstrap.environment import bootstrap_environment
+from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 def _validate_daylength_grid(ds):

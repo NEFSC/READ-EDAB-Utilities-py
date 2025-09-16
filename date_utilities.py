@@ -2,6 +2,9 @@ from datetime import datetime, date, timedelta
 import numpy as np
 from pathlib import Path
 import re
+from utilities.bootstrap.environment import bootstrap_environment
+env = bootstrap_environment(verbose=False)
+
 
 def format_date(dt, fmt):
     if fmt == "yyyymmdd":

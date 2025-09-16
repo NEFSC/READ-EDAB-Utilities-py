@@ -1,5 +1,8 @@
 import numpy as np
 import xarray as xr
+from utilities.bootstrap.environment import bootstrap_environment
+env = bootstrap_environment(verbose=False)
+
 
 def total_annual_pp(pp):
     """

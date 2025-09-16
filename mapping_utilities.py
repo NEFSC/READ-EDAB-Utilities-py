@@ -9,7 +9,7 @@ import pandas as pd
 from .file_utilities import parse_dataset_info
 from .date_utilities import get_dates
 
-from bootstrap.environment import bootstrap_environment
+from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 def map_subset_defaults():

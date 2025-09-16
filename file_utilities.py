@@ -2,7 +2,7 @@ import os
 import glob
 from pathlib import Path
 import stat
-from bootstrap.environment import bootstrap_environment
+from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 """
@@ -13,6 +13,8 @@ Main Functions:
     - product_defaults: Returns the default/primary dataset and datatype location for each product
     - netcdf_product_defaults: Returns the data product name found in the original source netcdf files
     - get_nc_prod: Returns internal variable name and metadata for a given dataset and product.
+    - 
+    - get_pyfile_functions: Generate a list of all python functions in the utilities directory.
 
 Helper Functions:
     - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes
@@ -741,3 +743,36 @@ def make_product_output_dir(input_product,output_product,dataset=None,new_datase
         os.makedirs(new_path, exist_ok=True)
 
     return new_path
+
+def get_pyfile_functions(directory=None,search_string=None):
+    function_map = {}
+
+    # Get the directory if not provided
+    if not directory:
+        directory = env.python_path
+    if not directory:
+        return {}
+
+    # Find all files in the directory
+    for filename in os.listdir(directory):
+        # Look for .py files
+        if filename.endswith(".py") and filename != "__init__.py":
+
+            # Look for specific files if search_string provided
+            if search_string and search_string not in filename:
+                continue
+
+            file_path = os.path.join(directory, filename)
+
+            with open(file_path, "r") as file:
+                node = ast.parse(file.read(), filename=filename)
+
+                functions = [
+                    n.name for n in node.body
+                    if isinstance(n, ast.FunctionDef)
+                ]
+
+            module_name = filename[:-3]  # Strip .py
+            function_map[module_name] = functions
+
+    return function_map
