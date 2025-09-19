@@ -34,3 +34,4 @@ def init_notebook_environment(verbose=False):
         raise ImportError(f"[INIT] Failed to import bootstrap_environment: {e}")
 
     return bootstrap_environment(verbose=verbose)
+

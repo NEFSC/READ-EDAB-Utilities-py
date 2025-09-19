@@ -2,8 +2,8 @@ import xarray as xr
 import numpy as np
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
-from utilities import dataset_info_map
-from utilities import get_prod_files
+#from utilities import dataset_info_map
+
 
 """
 STATANOM_UTILITIES creates statistic and anomaly outputs from gridded satellite or modeled data. 
@@ -69,8 +69,46 @@ def period_info():
         'YY':     ('year',  'D',  True,  False, False, 'P1Y', 'time.dt.year', 'YY_YYYY_YYYY', 'Range of yearly (daily inputs)'),
         'YEAR':   ('year',  'Y',  False, False, True,  'PnY', 'time.dt.year', 'YEAR_YYYY_YYYY', 'Climatological year'),
     }
-    
 
+def get_period_info(period_code):
+    """
+    Returns a dictionary of named fields for a given period code.
+
+    Parameters:
+        period_code (str): The key from the period_info() map (e.g. 'W', 'M3', 'SEASON')
+
+    Returns:
+        dict: A dictionary with named metadata fields, or raises KeyError if not found.
+    """
+    period_map = period_info()
+
+    if period_code not in period_map:
+        raise KeyError(f"Period code '{period_code}' not found in period_info()")
+
+    (
+        groupby,
+        input_period_code,
+        is_range,
+        is_running_mean,
+        is_climatology,
+        iso_duration,
+        groupby_hint,
+        file_format,
+        description
+    ) = period_map[period_code]
+
+    return {
+        'groupby': groupby,
+        'input_period_code': input_period_code,
+        'is_range': is_range,
+        'is_running_mean': is_running_mean,
+        'is_climatology': is_climatology,
+        'iso_duration': iso_duration,
+        'groupby_hint': groupby_hint,
+        'file_format': file_format,
+        'description': description
+    }
+    
 def get_groupby_hint(period_code):
     """
     Returns the appropriate xarray groupby hint or rolling strategy for a given statistical period code.
@@ -167,29 +205,33 @@ def stats_wrapper(ds, periods=['W','M'], var_name='chlorophyll', time_dim='time'
 
 
 
-def run_stats_pipeline(dataset,prods=None,periods=['W','WEEK','M','MONTH','A','ANNUAL','DOY'],version=None):
+def run_stats_pipeline(dataset,prods=None,periods=['W','WEEK','M','MONTH','A','ANNUAL','DOY'],version=None, verbose=False):
+    from utilities import get_prod_files,dataset_defaults
     """
     Runs the full stats pipeline
         - Finds the input files
         - 
     """
+    # --- Step 1: Get standard PERIOD_CODE information and DATASETS defaults
     period_map = period_info()
+    dataset_map = dataset_defaults()
 
+    # If prod not provided use the dataset default
     if not prods:
-        prods = dataset_info_map(dataset)
+        prods = dataset_map[dataset][2]
         
-
     # Loop through prods
-    for prod in prods:
+    for prod in [prods]:
         # Loop through the periods
         for per in periods:
-            aper = period_map(per)
-            _, input_period, is_range, is_running, is_climatology, iso_duration, groupby_key, *_ = aper
-            if input_period == 'D':
+            per_map = get_period_info(per)
+            input_per = per_map['input_period_code']
+            print(f"Searching for {input_per} files for {dataset}:{prod}")
+            if input_per == 'D':
                 files = get_prod_files(prod,dataset=dataset)
             else:
-                files = get_prod_files(prod,dataset=dataset,dataset_map="PRODUCT",period=input_period)
-
+                files = get_prod_files(prod,dataset=dataset,data_type="STATS",period=input_per)
+    return files
 
 def get_climatology(ds, periods=['MONTH','WEEK','ANNUAL'],variable=None):
     """

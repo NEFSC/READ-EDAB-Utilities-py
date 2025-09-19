@@ -70,9 +70,10 @@ def bootstrap_environment(preferred=None, verbose=False):
     metadata_path = workflow_path / "metadata"
     lookup_path = workflow_path / "lookuptables"
     satlog_path = root_path / "logs/satprocessing"
+    utilities_path = python_path / "utilities"
 
     # Validate existence
-    for p in [python_path, workflow_path, metadata_path]:
+    for p in [python_path, workflow_path, metadata_path,lookup_path,satlog_path,utilities_path]:
         if not p.is_dir():
             raise FileNotFoundError(f"[BOOTSTRAP] Missing expected directory: {p}")
 
@@ -83,6 +84,7 @@ def bootstrap_environment(preferred=None, verbose=False):
     if verbose:
         print(f"[BOOTSTRAP] Hostname: {hostname}")
         print(f"[BOOTSTRAP] Python path: {python_path}")
+        print(f"[BOOTSTRAP] Utilities path: {utilities_path}")
         print(f"[BOOTSTRAP] Workflow resources: {workflow_path}")
         print(f"[BOOTSTRAP] Metadata path: {metadata_path}")
         print(f"[BOOTSTRAP] Look-up table path: {lookup_path}")
@@ -93,6 +95,8 @@ def bootstrap_environment(preferred=None, verbose=False):
     return {
         "hostname": hostname,
         "project_root": python_path,
+        "python_path": python_path,
+        "utilities_path": utilities_path,
         "workflow_resources": workflow_path,
         "metadata_path": metadata_path,
         "lookuptable_path": lookup_path,
