@@ -1,9 +1,8 @@
 import xarray as xr
 import numpy as np
+from datetime import datetime
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
-#from utilities import dataset_info_map
-
 
 """
 STATANOM_UTILITIES creates statistic and anomaly outputs from gridded satellite or modeled data. 
@@ -172,66 +171,138 @@ def compute_stats(grouped, var_name, time_dim, label):
         f"{var_name}_{label}_sum":    grouped.sum(dim=time_dim, skipna=True),
         f"{var_name}_{label}_var":    grouped.var(dim=time_dim, skipna=True),
     })
+       
+
+def run_stats_pipeline(prods,
+                       dataset=None,
+                       periods=None,
+                       subset=None,
+                       daterange=None,
+                       time_dim='time',
+                       version=None,
+                       dataset_map=None,
+                       verbose=False
+):
     
-def stats_wrapper(ds, periods=['W','M'], var_name='chlorophyll', time_dim='time'):
+    from utilities import get_prod_files,product_defaults, get_nc_prod, get_dates
     """
-    Compute statistics (mean, min, max, median, std) from a gridded xarray Dataset or DataArray.
+    Runs a multi-product, multi-period stats pipeline.
 
-    Parameters:
+    For each product in `prods` and each period code in `periods`, this function:
+      1. Determines dataset defaults (via product_defaults).
+      2. Locates raw (D/'DD') or derived stats files (all other periods).
+      3. Opens and subsets those files in time.
+      4. Applies xarray grouping or rolling based on period code.
+      5. Computes summary statistics (mean, min, max, etc.).
+      6. Returns a dict of xr.Dataset results keyed by (prod, period).
+
+    Parameters
     ----------
-    ds (xr.Dataset or xr.DataArray) : Input dataset containing chlorophyll data.
-    var_name (str): Name of the variable to compute stats on.
-    periods (str): Name of the output period(s) to calculate
+    prods : str or list of str
+        Single product name or list of product names (e.g. 'CHL', ['CHL','PSC']).
+    dataset : str, optional
+        Override dataset. Defaults to each product’s default from product_defaults().
+    periods : list of str, optional
+        Period codes to compute (e.g. ['D','W','M']). Defaults to
+        ['W','WEEK','M','MONTH','A','ANNUAL','DOY'].
+    subset : str, optional
+        Region subset (e.g. 'NES'). Passed through to get_prod_files() as data_type or map override.
+    daterange : str or tuple, optional
+        Date range spec to subset time (passed to get_dates()).
+    time_dim : str, default 'time'
+        Name of the time dimension in your NetCDF files.
+    version : str, optional
+        Dataset version override (passed through to get_prod_files).
+    dataset_map : str, optional
+        Dataset map override (passed through to get_prod_files)
+    verbose : bool, default False
+        If True, prints progress and provenance.
 
-    Returns:
+    Returns
     -------
-    xr.Dataset: Dataset containing period statistics.
+    results : dict
+        {(prod, period): xr.Dataset} of computed statistics.
     """
-    # Defensive checks
-    if var_name not in ds:
-        raise ValueError(f"Variable '{var_name}' not found in dataset.")
-    if time_dim not in ds.dims and time_dim not in ds.coords:
-        raise ValueError(f"Time dimension '{time_dim}' not found.")
-
-    da = ds[var_name] if isinstance(ds, xr.Dataset) else ds
-
-    # Ensure datetime type
-    da[time_dim] = xr.decode_cf(da).indexes[time_dim].to_datetimeindex()
-
-    for per in periods:
-
-        grouped = apply_grouping(da, per, time_dim)
-        stats = compute_stats(grouped, var_name, time_dim, label=per)
-
-
-
-def run_stats_pipeline(dataset,prods=None,periods=['W','WEEK','M','MONTH','A','ANNUAL','DOY'],version=None, verbose=False):
-    from utilities import get_prod_files,dataset_defaults
-    """
-    Runs the full stats pipeline
-        - Finds the input files
-        - 
-    """
-    # --- Step 1: Get standard PERIOD_CODE information and DATASETS defaults
+    # Normalize inputs
+    if isinstance(prods, str):
+        prods = [prods]
+    if periods is None:
+        periods = ['W','WEEK','M','MONTH','A','ANNUAL','DOY']
+    
+    # Load PERIOD and PRODUCT defaults
     period_map = period_info()
-    dataset_map = dataset_defaults()
-
-    # If prod not provided use the dataset default
-    if not prods:
-        prods = dataset_map[dataset][2]
+    prods_map = product_defaults()
         
     # Loop through prods
     for prod in [prods]:
+        prod = prod.upper().strip()
+
+        # If prod not provided use the dataset default
+        if not dataset:
+            dataset = prods_map[prod][1]
         # Loop through the periods
         for per in periods:
             per_map = get_period_info(per)
             input_per = per_map['input_period_code']
-            print(f"Searching for {input_per} files for {dataset}:{prod}")
-            if input_per == 'D':
-                files = get_prod_files(prod,dataset=dataset)
+            
+            # Find the input files
+            if verbose:
+                print(f"Searching for {input_per} files for {dataset}:{prod}")
+            if input_per in ['D','DD']:
+                files = get_prod_files(prod,dataset=dataset,dataset_version=version,dataset_map=dataset_map,period=None,data_type=None,verbose=verbose)
             else:
-                files = get_prod_files(prod,dataset=dataset,data_type="STATS",period=input_per)
-    return files
+                files = get_prod_files(prod,dataset=dataset,dataset_version=version,dataset_map=dataset_map,period=input_per,data_type="STATS",verbose=verbose)
+
+            if not files:
+                print(f"No {input_per} files found for {dataset}:{prod}")
+                continue
+            
+            # Open dataset
+            ds = xr.open_mfdataset(files, combine="by_coords")
+            ds = xr.decode_cf(ds)
+
+            if time_dim not in ds.dims and time_dim not in ds.coords:
+                raise ValueError(
+                    f"Time dimension '{time_dim}' not found in {dataset}:{prod} "
+                    f"({datetime.now()})"
+                )
+
+            # Check that the time resolution matches the input period
+
+            # Subset the data based on the input daterange
+            if daterange:
+                dates = get_dates(daterange)
+                ds = ds.sel({time_dim: slice(min(dates), max(dates))})
+
+            # Check that the prod exists in the dataset and extract the dataset product
+            if prod not in ds.data_vars:
+                ncprod = get_nc_prod(ds_name, prod)
+                if ncprod in ds.data_vars:
+                    prod_key = ncprod
+                else:
+                    raise ValueError(
+                        f"Variable '{prod}' not in dataset. "
+                        f"Available: {list(ds.data_vars)} ({datetime.now()})"
+                    )
+            else:
+                prod_key = prod
+
+            da = ds[prod_key]
+
+            # Apply grouping
+            grouped = apply_grouping(da, per, time_dim)
+            
+            # Compute stats
+            stats = compute_stats(grouped, prod, time_dim, label=per)
+
+            if verbose:
+                print(f"✅ Completed stats for {prod}, period '{per}'")
+    
+            return stats
+
+
+
+    
 
 def get_climatology(ds, periods=['MONTH','WEEK','ANNUAL'],variable=None):
     """
