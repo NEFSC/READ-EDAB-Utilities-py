@@ -27,6 +27,7 @@ Author:
   
 Modification History
     Sep 08, 2025 - KJWH: Initial code written
+    Sep 29, 2025 - KJWH: Started building stats_period_map
     
 """
 
@@ -113,7 +114,7 @@ def stats_period_map(prod, period, dataset=None, dates=None, version=None, datas
     Returns:
         dict: Mapping of output period dates
     """
-    from utilities import get_prod_files, get_period_info, parse_dataset_info, get_source_file_dates
+    from utilities import get_prod_files, get_period_info, parse_dataset_info, get_file_dates
     per_map = get_period_info(period)
     input_per = per_map['input_period_code']
 
@@ -134,9 +135,82 @@ def stats_period_map(prod, period, dataset=None, dates=None, version=None, datas
         print(f"No {input_per} files found for {dataset}:{prod}")
         return []
 
+    # Get the dates of the input files
     ds_parsed = parse_dataset_info(files[0])
-    if ds_parsed['dataset_type'] is 'SOURCE':
-        infile_dates = get_source_file_dates(files)
+    infile_dates = get_file_dates(files)
+
+    # Create output periods based on the range of input dates
+
+
+import os
+from datetime import datetime
+from collections import defaultdict
+
+def build_stat_file_map(files, period_code, output_dir, date_format="%Y%m%d", verbose=False):
+    """
+    Builds a map of output period → (input files, output path, is_up_to_date)
+
+    Parameters
+    ----------
+    files : list of str
+        Input file paths.
+    period_code : str
+        Output period code (e.g. 'D3', 'M3', 'SEA').
+    output_dir : str
+        Directory where stat files will be written.
+    date_format : str
+        Format of date strings in filenames.
+    verbose : bool
+        If True, print status messages.
+
+    Returns
+    -------
+    dict
+        Mapping of period → dict with keys:
+            - 'inputs': list of input file paths
+            - 'output': output stat file path
+            - 'is_up_to_date': bool
+    """
+    # Extract start dates from input files
+    dates = get_source_file_dates(files, format="yyyymmdd", placeholder=None)
+    file_map = {d: f for d, f in zip(dates, files) if d}
+
+    # Get output periods
+    period_spans = get_period_sets(period_code, dates=dates, running=True)
+
+    stat_map = {}
+    for period in period_spans:
+        _, start, end = period.split("_")
+        inputs = [
+            f for d, f in file_map.items()
+            if start <= d <= end
+        ]
+        if not inputs:
+            continue
+
+        # Build output filename
+        filename = f"{period}-STAT.nc"
+        output_path = os.path.join(output_dir, filename)
+
+        # Check freshness
+        if os.path.exists(output_path):
+            output_mtime = os.path.getmtime(output_path)
+            input_mtimes = [os.path.getmtime(f) for f in inputs]
+            is_up_to_date = all(output_mtime > m for m in input_mtimes)
+        else:
+            is_up_to_date = False
+
+        if verbose:
+            status = "✅ up-to-date" if is_up_to_date else "⏳ needs update"
+            print(f"{period}: {status} ({len(inputs)} files)")
+
+        stat_map[period] = {
+            "inputs": inputs,
+            "output": output_path,
+            "is_up_to_date": is_up_to_date
+        }
+
+    return stat_map
 
 
 
