@@ -9,6 +9,7 @@ Purpose:
     FILE_UTILITIES is a collection of utility functions for handling file paths, directories, and permissions.
 
 Main Functions:
+    - get_file_dates: Extracts dates from a list of filenames
     - file_make: Checks to see if a file exists and if it needs to be remade based on the mtimes of the input files
     - set_file_permissions: Checks the permissions of a file and changes them if they don't match the desired permissions.
 
@@ -27,7 +28,77 @@ Author:
 Modification History
     Aug 01, 2025 - KJWH: Initial code written
     Sep 10, 2025 - KJWH: Updated documentation
+    Sep 25, 2025 - KJWH: Added get_file_dates
 """
+import os
+from pathlib import Path
+
+def get_file_dates(files, source_format="yyyymmdd", period_format="%Y%m%d", placeholder=None):
+    """
+    Extracts (start,end) dates from a list of filenames, dispatching to either:
+        • Uses get_period_dates() in batch for files starting with a known period code.
+        • Uses get_source_file_dates() in batch for all others.
+        • Preserves input order.
+        • Returns (placeholder, placeholder) for unmatched files.
+
+    Parameters
+        files (list of str or Path): Paths or basenames of your files.
+        source_format (str): Format passed to get_source_file_dates(). default "yyyymmdd"
+        period_format (str): Format passed to extract_period_dates(). default "%Y%m%d"
+        placeholder (any): Value to use for start/end when extraction fails. Default is NA, but can be set to '' or None as needed.
+
+    
+    Returns a dict mapping each input filename to a (start, end) tuple:
+        - Raw SOURCE files yield (date, date)
+        - PERIOD files yield (start_date, end_date)
+        - Files that fail both extractors map to (placeholder, placeholder)
+
+    
+    Returns
+    -------
+        list of tuple: [(start_str, end_str)] aligned with the input file order
+    """
+    
+    from utilities import period_info, get_period_dates, get_source_file_dates
+    
+    period_codes = set(period_info().keys())
+
+    # Track which files are period-coded vs source
+    period_files = []
+    source_files = []
+    period_indices = []
+    source_indices = []
+
+    for i, f in enumerate(files):
+        fname = str(f)
+        token = Path(fname).name.split("_", 1)[0]
+        if token in period_codes:
+            period_files.append(fname)
+            period_indices.append(i)
+        else:
+            source_files.append(fname)
+            source_indices.append(i)
+
+    # Initialize output
+    results = [None] * len(files)
+
+    # Batch process period-coded files
+    if period_files:
+        period_ranges = get_period_dates(period_files, format=period_format)
+        for i, rng in zip(period_indices, period_ranges):
+            results[i] = rng if rng else (placeholder, placeholder)
+
+    # Batch process source files
+    if source_files:
+        source_dates = get_source_file_dates(source_files, format=source_format, placeholder=placeholder)
+        for i, date in zip(source_indices, source_dates):
+            if date and date != placeholder:
+                results[i] = (date, date)
+            else:
+                results[i] = (placeholder, placeholder)
+
+    return results
+
 def file_make(input_files, output_file):
     output_path = Path(output_file)
     if not output_path.exists():

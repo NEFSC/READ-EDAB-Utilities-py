@@ -129,7 +129,7 @@ def get_source_file_dates(files, format="yyyymmdd", placeholder=None):
         files (list): List of filenames to extract dates from.
         format (str): Output date format. Options: 'yyyymmdd', 'yyyy-mm-dd', 'datetime', etc.
         placeholder: Value to return when a filename doesn't match any known pattern.
-                    Default is None, but can be set to '' or 'NA' as needed.
+                     Default is None, but can be set to '' or 'NA' as needed.
     
     Returns:
         list: One formatted date per input filename (or placeholder if no match)

@@ -29,84 +29,7 @@ Modification History
     Sep 08, 2025 - KJWH: Initial code written
     
 """
-def period_info():
-    """
-    Returns a dictionary mapping period codes to metadata for statistical processing.
-    Each entry contains:
-        0) Input time to xarray.groupby for stat calculations
-        1) Input period code (to stats) to create the period
-        2) Is it a range period?
-        3) Is it a running mean period?
-        4) Is it a climatological period?
-        5) ISO 8601 duration
-        6) GroupBy hint (xarray expression or None)
-        7) File period format
-        8) Description
-    """
-    return {
-        'D':      ('time',  'D',  False, False, False, 'P1D', 'time', 'D_YYYYMMDD', 'Daily'),
-        'DD':     ('time',  'D',  True,  False, False, 'PnD', 'time', 'DD_YYYYMMDD_YYYYMMDD', 'Range of daily data'),
-        'DOY':    ('doy',   'D',  False, False, True,  '',    'time.dt.dayofyear', 'DOY_YYYY_YYYY', 'Climatological day of year'),
-        'D3':     ('day3',  'D',  False, True,  False, 'P3D',  None, 'D3_YYYYMMDD_YYYYMMDD', 'Running 3-day'),
-        'DD3':    ('day3',  'D',  True,  True,  False, 'P3D',  None, 'DD3_YYYYMMDD_YYYYMMDD', 'Range of running 3-day data'),
-        'D8':     ('day8',  'D',  False, True,  False, 'P8D',  None, 'D8_YYYYMMDD_YYYYMMDD', 'Running 8-day'),
-        'DD8':    ('day8',  'D',  True,  True,  False, 'P8D',  None, 'DD8_YYYYMMDD_YYYYMMDD', 'Range of running 8-day data'),
-        'W':      ('week',  'D',  False, False, False, 'P1W', 'time.dt.isocalendar().week', 'W_YYYYWW', 'Weekly'),
-        'WW':     ('week',  'D',  True,  False, False, 'P1W', 'time.dt.isocalendar().week', 'WW_YYYYWW_YYYYWW', 'Range of weekly data'),
-        'WEEK':   ('week',  'W',  False, False, True,  '',    'time.dt.isocalendar().week', 'WEEK_YYYYWW_YYYYWW', 'Climatological week'),
-        'M':      ('month', 'D',  False, False, False, 'P1M', 'time.dt.month', 'M_YYYYMM', 'Monthly'),
-        'MM':     ('month', 'D',  True,  False, False, 'P1M', 'time.dt.month', 'MM_YYYYMM_YYYYMM', 'Range of monthly data'),
-        'M3':     ('month3','M',  False, True,  False, 'P3M',  None, 'M3_YYYYMM_YYYYMM', 'Running 3-month'),
-        'MM3':    ('month3','M',  True,  True,  False, 'P3M',  None, 'MM3_YYYYMM_YYYYMM', 'Range of running 3-month'),
-        'MONTH':  ('month', 'M',  False, False, True,  'P1M', 'time.dt.month', 'MONTH_YYYYMM_YYYYMM', 'Climatological month'),
-        'SEA':    ('sea',   'M',  False, False, False, 'P3M', 'time.dt.month', 'SEA_YYYYMM_YYYYMM', 'Seasonal (JFM)'),
-        'SEASON': ('season','SEA',False, False, True,  'P3M', 'time.dt.season', 'SEASON_YYYYMM_YYYYMM', 'Climatological season'),
-        'A':      ('annual' ,'M', False, False, False, 'P1Y', 'time.dt.year', 'A_YYYY', 'Annual (monthly inputs)'),
-        'AA':     ('annual' ,'M', True,  False, False, 'P1Y', 'time.dt.year', 'AA_YYYY_YYYY', 'Range of annual (monthly inputs)'),
-        'ANNUAL': ('annual' ,'A', False, False, True,  'P1Y', 'time.dt.year', 'ANNUAL_YYYY_YYYY', 'Climatological annual'),
-        'Y':      ('year',  'D',  False, False, False, 'P1Y', 'time.dt.year', 'Y_YYYY_YYYY', 'Yearly (daily inputs)'),
-        'YY':     ('year',  'D',  True,  False, False, 'P1Y', 'time.dt.year', 'YY_YYYY_YYYY', 'Range of yearly (daily inputs)'),
-        'YEAR':   ('year',  'Y',  False, False, True,  'PnY', 'time.dt.year', 'YEAR_YYYY_YYYY', 'Climatological year'),
-    }
 
-def get_period_info(period_code):
-    """
-    Returns a dictionary of named fields for a given period code.
-
-    Parameters:
-        period_code (str): The key from the period_info() map (e.g. 'W', 'M3', 'SEASON')
-
-    Returns:
-        dict: A dictionary with named metadata fields, or raises KeyError if not found.
-    """
-    period_map = period_info()
-
-    if period_code not in period_map:
-        raise KeyError(f"Period code '{period_code}' not found in period_info()")
-
-    (
-        groupby,
-        input_period_code,
-        is_range,
-        is_running_mean,
-        is_climatology,
-        iso_duration,
-        groupby_hint,
-        file_format,
-        description
-    ) = period_map[period_code]
-
-    return {
-        'groupby': groupby,
-        'input_period_code': input_period_code,
-        'is_range': is_range,
-        'is_running_mean': is_running_mean,
-        'is_climatology': is_climatology,
-        'iso_duration': iso_duration,
-        'groupby_hint': groupby_hint,
-        'file_format': file_format,
-        'description': description
-    }
     
 def get_groupby_hint(period_code):
     """
@@ -172,6 +95,51 @@ def compute_stats(grouped, var_name, time_dim, label):
         f"{var_name}_{label}_var":    grouped.var(dim=time_dim, skipna=True),
     })
        
+def stats_period_map(prod, period, dataset=None, dates=None, version=None, dataset_map=None, subset=None, is_running=True, verbose=False):
+    """
+    Constructs a stats period file path map using get_prod_files.
+
+    Parameters:
+        prod (str): Product to conduct the stats on.
+        period (str): The period code for the output stats file.
+        dataset (str): Override dataset. Defaults to each product’s default from product_defaults() (optional).
+        dates (list of str): List of input dates (YYYYMMDD) to process.
+        version (str): Dataset version override passed through to get_prod_files (optional)).
+        dataset_map (str): Dataset map override passed through to get_prod_files (optional).
+        subset (str): The subset region (e.g. NES, NWA) to subset the data 
+        is_running (bolean): To override the D3 and D8 running stats.
+        verbose (bool): If True, prints progress and provenance (default is False).
+
+    Returns:
+        dict: Mapping of output period dates
+    """
+    from utilities import get_prod_files, get_period_info, parse_dataset_info, get_source_file_dates
+    per_map = get_period_info(period)
+    input_per = per_map['input_period_code']
+
+    # Turn off the is_running_mean option in in the period map if the default is to create a running_mean (e.g. D3 and D8 periods)
+    if not is_running:
+        if per_map['is_running_mean']:
+            per_map['is_running_mean'] = False
+    
+    # Find the input files
+    if verbose:
+        print(f"Searching for {input_per} files for {dataset}:{prod}")
+    if input_per in ['D','DD']:
+        files = get_prod_files(prod,dataset=dataset,dataset_version=version,dataset_map=dataset_map,period=None,data_type=None,verbose=verbose)
+    else:
+        files = get_prod_files(prod,dataset=dataset,dataset_version=version,dataset_map=dataset_map,period=input_per,data_type="STATS",verbose=verbose)
+
+    if not files:
+        print(f"No {input_per} files found for {dataset}:{prod}")
+        return []
+
+    ds_parsed = parse_dataset_info(files[0])
+    if ds_parsed['dataset_type'] is 'SOURCE':
+        infile_dates = get_source_file_dates(files)
+
+
+
 
 def run_stats_pipeline(prods,
                        dataset=None,
@@ -181,10 +149,11 @@ def run_stats_pipeline(prods,
                        time_dim='time',
                        version=None,
                        dataset_map=None,
+                       is_running=True,
                        verbose=False
 ):
     
-    from utilities import get_prod_files,product_defaults, get_nc_prod, get_dates
+    from utilities import product_defaults, get_nc_prod, get_dates
     """
     Runs a multi-product, multi-period stats pipeline.
 
@@ -198,25 +167,17 @@ def run_stats_pipeline(prods,
 
     Parameters
     ----------
-    prods : str or list of str
-        Single product name or list of product names (e.g. 'CHL', ['CHL','PSC']).
-    dataset : str, optional
-        Override dataset. Defaults to each product’s default from product_defaults().
-    periods : list of str, optional
-        Period codes to compute (e.g. ['D','W','M']). Defaults to
-        ['W','WEEK','M','MONTH','A','ANNUAL','DOY'].
-    subset : str, optional
-        Region subset (e.g. 'NES'). Passed through to get_prod_files() as data_type or map override.
-    daterange : str or tuple, optional
-        Date range spec to subset time (passed to get_dates()).
-    time_dim : str, default 'time'
-        Name of the time dimension in your NetCDF files.
-    version : str, optional
-        Dataset version override (passed through to get_prod_files).
-    dataset_map : str, optional
-        Dataset map override (passed through to get_prod_files)
-    verbose : bool, default False
-        If True, prints progress and provenance.
+    prods (str or list of str): Single product name or list of product names (e.g. 'CHL', ['CHL','PSC']).
+    dataset (str): Override dataset. Defaults to each product’s default from product_defaults() (optional).
+    periods (list of str): Period codes to compute (e.g. ['D','W','M']) (optional). 
+                           Defaults to ['W','WEEK','M','MONTH','A','ANNUAL','DOY'].
+    subset (str): Regional subset (e.g. 'NES') (optional). Passed through to get_prod_files() as data_type or map override.
+    daterange (str or tuple): Date range spec to subset time (optional). Passed to get_dates().
+    time_dim (str): Name of the time dimension in your NetCDF files (default is 'time').
+    version (str): Dataset version override (optional). Passed through to get_prod_files().
+    dataset_map (str): Dataset map override (optional). Passed through to get_prod_files().
+    verbose (bool): If True, prints progress and provenance (default is False).
+        
 
     Returns
     -------
@@ -242,20 +203,11 @@ def run_stats_pipeline(prods,
             dataset = prods_map[prod][1]
         # Loop through the periods
         for per in periods:
-            per_map = get_period_info(per)
-            input_per = per_map['input_period_code']
             
-            # Find the input files
-            if verbose:
-                print(f"Searching for {input_per} files for {dataset}:{prod}")
-            if input_per in ['D','DD']:
-                files = get_prod_files(prod,dataset=dataset,dataset_version=version,dataset_map=dataset_map,period=None,data_type=None,verbose=verbose)
-            else:
-                files = get_prod_files(prod,dataset=dataset,dataset_version=version,dataset_map=dataset_map,period=input_per,data_type="STATS",verbose=verbose)
-
-            if not files:
-                print(f"No {input_per} files found for {dataset}:{prod}")
-                continue
+            # Create stats period map
+            stats_map = stats_period_map(prod, per, dataset=dataset, dataset_version=version,dataset_map=dataset_map, subset=subset, is_running=is_running, verbose=verbose)
+            
+            
             
             # Open dataset
             ds = xr.open_mfdataset(files, combine="by_coords")
