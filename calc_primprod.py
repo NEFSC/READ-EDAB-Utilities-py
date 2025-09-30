@@ -6,6 +6,9 @@ import time
 import numpy as np
 from datetime import datetime
 
+from utilities.bootstrap.environment import bootstrap_environment
+
+
 from utilities import regrid_wrapper, subset_dataset
 from utilities import get_daylength
 from utilities import get_nc_prod

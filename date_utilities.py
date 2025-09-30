@@ -2,6 +2,38 @@ from datetime import datetime, date, timedelta
 import numpy as np
 from pathlib import Path
 import re
+from utilities.bootstrap.environment import bootstrap_environment
+env = bootstrap_environment(verbose=False)
+
+"""
+Purpose:
+    DATE_UTILITIES is a collection of utility functions for handling file paths, directories, and permissions.
+
+Main Functions:
+    - format_date: 
+    - get_dates: Create normalized date lists from different date inputs and output a list of dates in multiple formats
+    - get_source_file_dates: Extract standardized date strings from source data filenames.
+    - get_current_utc_timestamp: Returns current UTC time in ISO 8601 format: 'YYYY-MM-DDTHH:MM:SSZ' 
+    - format_iso_duration: Convert float days to ISO 8601 duration string.
+
+
+Helper Functions:
+    - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes
+    
+Copywrite: 
+    Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
+    Northeast Fisheries Science Center, Narragansett Laboratory.
+    This software may be used, copied, or redistributed as long as it is not sold and this copyright notice is reproduced on each copy made.
+    This routine is provided AS IS without any express or implied warranties whatsoever.
+
+Author:
+    This program was written on August 01, 2025 by Kimberly J. W. Hyde, Northeast Fisheries Science Center | NOAA Fisheries | U.S. Department of Commerce, 28 Tarzwell Dr, Narragansett, RI 02882
+  
+Modification History
+    Aug 01, 2025 - KJWH: Initial code written
+    Sep 18, 2025 - KJWH: Updated documentation
+"""
+
 
 def format_date(dt, fmt):
     if fmt == "yyyymmdd":
@@ -89,8 +121,6 @@ def get_dates(dates,format='yyyymmdd'):
         current += step
     return out
 
-
-
 def get_source_file_dates(files, format="yyyymmdd", placeholder=None):
     """
     Extract standardized date strings from source data filenames.
@@ -99,7 +129,7 @@ def get_source_file_dates(files, format="yyyymmdd", placeholder=None):
         files (list): List of filenames to extract dates from.
         format (str): Output date format. Options: 'yyyymmdd', 'yyyy-mm-dd', 'datetime', etc.
         placeholder: Value to return when a filename doesn't match any known pattern.
-                    Default is None, but can be set to '' or 'NA' as needed.
+                     Default is None, but can be set to '' or 'NA' as needed.
     
     Returns:
         list: One formatted date per input filename (or placeholder if no match)
@@ -144,11 +174,15 @@ def get_source_file_dates(files, format="yyyymmdd", placeholder=None):
     return out
 
 def get_current_utc_timestamp() -> str:
-    """ Returns current UTC time in ISO 8601 format: 'YYYY-MM-DDTHH:MM:SSZ' """
+    """ 
+      Returns current UTC time in ISO 8601 format: 'YYYY-MM-DDTHH:MM:SSZ' 
+    """
     return datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
 def format_iso_duration(days: float) -> str:
-    """Convert float days to ISO 8601 duration string."""
+    """
+    Convert float days to ISO 8601 duration string.
+    """
     whole_days = int(np.floor(days))
     fractional_day = days - whole_days
     seconds = int(round(fractional_day * 86400))  # 86400 seconds in a day

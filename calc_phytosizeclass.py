@@ -9,7 +9,7 @@ import xarray as xr
 import pandas
 import numpy as np
 
-from bootstrap.environment import bootstrap_environment
+from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 from utilities import regrid_wrapper, subset_dataset
@@ -357,6 +357,10 @@ def run_psc_pipeline(chl_dataset=None,
         overwrite (bool): If True, reprocess even if output is up-to-date
         verbose (bool): If True, print progress
         logfile (str): Optional file to log the progress
+    
+    Example:
+        run_psc_pipeine() # Uses the default datasets and will process the full daterange
+        run_psc_pipeline(sst_dataset="CORALSST",daterange=['19980101','19980131']) # specifies a dataset and a daterange
 
     """
     subset = subset or "NES"  # Default to NES if None provided

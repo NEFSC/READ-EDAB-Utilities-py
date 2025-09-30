@@ -6,11 +6,12 @@ import xarray as xr
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from .file_utilities import parse_dataset_info
-from .date_utilities import get_dates
 
-from bootstrap.environment import bootstrap_environment
+from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
+
+from utilities import parse_dataset_info
+from utilities import get_dates
 
 def map_subset_defaults():
     """
@@ -26,7 +27,8 @@ def map_subset_defaults():
     # The default source data location and product for each dataset
     subset_map_info = {
         'NES': {'lat_min':34.0,'lat_max':46.0,'lon_min':-79.0,'lon_max':-61.0},
-        'NWA': {'lat_min':22.5,'lat_max':48.5,'lon_min':-82.5,'lon_max':-51.5}
+        'NWA': {'lat_min':22.5,'lat_max':48.5,'lon_min':-82.5,'lon_max':-51.5},
+        'GLOBAL': {'lat_min':-90.0,'lat_max':90.0,'lon_min':-180.0,'lon_max':-180.0}
     }
 
     return subset_map_info
