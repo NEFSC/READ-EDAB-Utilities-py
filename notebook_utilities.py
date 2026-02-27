@@ -14,7 +14,8 @@ def init_notebook_environment(verbose=False):
     resources_root = {
         "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
         "nefscsatdata": "/mnt/EDAB_Resources",
-        "guihyde": "/mnt/EDAB_Resources"
+        "guihyde": "/mnt/EDAB_Resources",
+        'Mac.localdomain': "/Users/kimberly.hyde/Documents/nadata/RESOURCES"
     }
 
     base_path = resources_root.get(hostname)

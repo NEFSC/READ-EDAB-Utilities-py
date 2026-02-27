@@ -51,7 +51,9 @@ def format_date(dt, fmt):
             return dt
         else:
             raise TypeError(f"Expected date or datetime, got {type(dt)}")
-    else:
+    try:
+        return dt.strftime(fmt)
+    except Exception:
         raise ValueError(f"Unknown format: {fmt}")
     
 def get_dates(dates,format='yyyymmdd'):
