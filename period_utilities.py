@@ -16,6 +16,7 @@ Main Functions:
     - get_token_lengths: Return canonical token length mapping for period parsing.
     - period_info: Returns a dictionary mapping period codes to metadata for statistical processing.
     - get_period_info: Returns a dictionary of named fields for a given period code from the period_info dictionary
+    - check_period: Validates a single period string
     - get_period_dates: Extracts the period encoded in a filename (e.g. 'M_202204' or 'DD3_20220401_20220403') and returns the start and end dates of that period.
     - get_period_sets: Generate period tokens (e.g. M_YYYYMM, W_YYYYWW) for a given date range or list of dates.
     
@@ -27,12 +28,8 @@ Helper Functions:
     - seg_value_for (in get_period_dates): Map token -> segment value (1-based occurrence).
     - parse_yyyymmdd (in get_period_dates): Parses a date segment (YYYYMMDD) into a date object.
     - parse_yyyymm (in get_period_dates): Parses a date segment (YYYYMM) into start and end date objects.
-    - parse_yyyy (in get_period_dates): Parses a date segment (YYYY) into start and end date objects.
-    - parse_iso_week_to_range (in get_period_dates): Parses ISO week codes into start and end date objects.
     - token_indices (in get_period_dates): Convenience function to get token index list for a token.
     - fail (in get_period_dates): Helper to record failure and optionally diagnostics.
-    
-    
 
 Copywrite: 
     Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
@@ -52,6 +49,12 @@ Modification History
                          Added SEA and SEASON seasonal parsing logic and fixed regex error
 
 """
+
+def is_leap_year(year):
+    """Return True if year is a leap year."""
+    year = int(year)
+    return (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0))
+
 # Canonical token length map used by build_regex(), check_period(), validators, etc.
 def get_token_lengths():
     """Return canonical token length mapping for period parsing."""
@@ -83,6 +86,7 @@ def period_info(help=False):
         8) Date format (e.g. a single start date or start and end dates)
         9) Number of date segments
         10) Period description
+        11) Span type
     """
     fields = {
         "0) groupby": "xarray groupby key used for statistical aggregation",
@@ -95,56 +99,57 @@ def period_info(help=False):
         "7) file_format": "filename pattern for this period (period code plus the date format)",
         "8) date_format": "description of date format in filename (e.g. YYYY, YYYYMM, YYYYMMDD_YYYYMMDD)",
         "9) n_date_segments": "number of date segments in the filename (e.g. 1 for YYYYMM, 2 for YYYYMMDD_YYYYMMDD)",
-        "10) description": "human-readable description of the type of data associate with the period"
+        "10) description": "human-readable description of the type of data associate with the period",
+        "11) span_type": "categorization of the period span (e.g. 'Daily', 'Running 3-day', 'Seasonal block')",
     }
 
     if help:
         return fields
         
     return {
-        'D':      ('time','D',False,False,False,'P1D','time','D_YYYYMMDD','YYYYMMDD',1,'Daily'),
-        'DD':     ('time','D',True, False,False,'PnD','time','DD_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of daily data'),
-        'DOY':    ('doy','D',False,False,True,'','time.dt.dayofyear','DOY_DDD_YYYY_YYYY','DOY',3,'Climatological day of year'),
-        'DOYS':   ('doy','D',False,False,True,'','time.dt.dayofyear','DOYS_YYYY_YYYY','YYYY',2,'Combined climatological days of year'),
+        'D':      ('time','D',False,False,False,'P1D','time','D_YYYYMMDD','YYYYMMDD',1,'Daily','day'),
+        'DD':     ('time','D',True, False,False,'PnD','time','DD_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of daily data','day'),
+        'DOY':    ('doy','D',False,False,True,'','time.dt.dayofyear','DOY_DDD_YYYY_YYYY','DOY',3,'Climatological day of year','climatology_doy'),
+        'DOYS':   ('doy','D',False,False,True,'','time.dt.dayofyear','DOYS_YYYY_YYYY','YYYY',2,'Combined climatological days of year','climatology_doys'),
 
-        'D3':     ('day3','D',False,True, False,'P3D',None,'D3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 3-day'),
-        'DD3':    ('day3','D',True, True, False,'P3D',None,'DD3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 3-day data'),
+        'D3':     ('day3','D',False,True, False,'P3D',None,'D3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 3-day','running'),
+        'DD3':    ('day3','D',True, True, False,'P3D',None,'DD3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 3-day data','range'),
 
-        'D8':     ('day8','D',False,True, False,'P8D',None,'D8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 8-day'),
-        'DD8':    ('day8','D',True, True, False,'P8D',None,'DD8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 8-day data'),
+        'D8':     ('day8','D',False,True, False,'P8D',None,'D8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 8-day','running'),
+        'DD8':    ('day8','D',True, True, False,'P8D',None,'DD8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 8-day data','range'),
 
-        'W':      ('week','D',False,False,False,'P1W','time.dt.isocalendar().week','W_YYYYWW','YYYYWW',1,'Weekly (ISO week format)'),
-        'WW':     ('week','D',True, False,False,'P1W','time.dt.isocalendar().week','WW_YYYYWW_YYYYWW','YYYYWW',2,'Range of weekly data (ISO week format)'),
-        'WEEK':   ('week','W',False,False,True,'','time.dt.isocalendar().week','WEEK_WW_YYYY_YYYY','YYYY',3,'Climatological ISO week'),
-        'WEEKS':  ('week','W',False,False,True,'','time.dt.isocalendar().week','WEEKS_YYYY_YYYY','YYYY',2,'Combined climatological ISO week'),
+        'W':     ('week','D',False,False,False,'P1W','time.dt.isocalendar().week','W_YYYYWW','YYYYWW',1,'Weekly (ISO week format)','week'),
+        'WW':    ('week','D',True, False,False,'P1W','time.dt.isocalendar().week','WW_YYYYWW_YYYYWW','YYYYWW',2,'Range of weekly data','range'),
+        'WEEK':  ('week','W',False,False,True,'','time.dt.isocalendar().week','WEEK_WW_YYYY_YYYY','YYYY',3,'Climatological ISO week','climatology_week'),
+        'WEEKS': ('week','W',False,False,True,'','time.dt.isocalendar().week','WEEKS_YYYY_YYYY','YYYY',2,'Combined climatological ISO week','climatology_week'),
 
-        'M':      ('month','D',False,False,False,'P1M','time.dt.month','M_YYYYMM','YYYYMM',1,'Monthly'),
-        'MM':     ('month','D',True, False,False,'P1M','time.dt.month','MM_YYYYMM_YYYYMM','YYYYMM',2,'Range of monthly data'),
-        'MONTH':  ('month','M',False,False,True,'P1M','time.dt.month','MONTH_MM_YYYY_YYYY','YYYY',3,'Climatological month'),
-        'MONTHS': ('month','M',False,False,True,'P1M','time.dt.month','MONTHS_YYYY_YYYY','YYYY',2,'Combined climatological month'),
+        'M':      ('month','D',False,False,False,'P1M','time.dt.month','M_YYYYMM','YYYYMM',1,'Monthly','month'),
+        'MM':     ('month','D',True, False,False,'P1M','time.dt.month','MM_YYYYMM_YYYYMM','YYYYMM',2,'Range of monthly data','range'),
+        'MONTH':  ('month','M',False,False,True,'P1M','time.dt.month','MONTH_MM_YYYY_YYYY','YYYY',3,'Climatological month','climatology_month'),
+        'MONTHS': ('month','M',False,False,True,'P1M','time.dt.month','MONTHS_YYYY_YYYY','YYYY',2,'Combined climatological month','climatology_month'),
 
-        'M3':     ('month3','M',False,True, False,'P3M',None,'M3_YYYYMM_YYYYMM','YYYYMM',2,'Running 3-month'),
-        'MM3':    ('month3','M',True, True, False,'P3M',None,'MM3_YYYYMM_YYYYMM','YYYYMM',2,'Range of running 3-month'),
+        'M3':   ('month3','M',False,True, False,'P3M',None,'M3_YYYYMM_YYYYMM','YYYYMM',2,'Running 3-month','running'),
+        'MM3':  ('month3','M',True, True, False,'P3M',None,'MM3_YYYYMM_YYYYMM','YYYYMM',2,'Range of running 3-month','range'),
 
-        'JFM': ('sea','M',False,False,False,'P3M','time.dt.season','JFM_YYYY','YYYY',1,'Seasonal block JFM'),
-        'AMJ': ('sea','M',False,False,False,'P3M','time.dt.season','AMJ_YYYY','YYYY',1,'Seasonal block AMJ'),
-        'JAS': ('sea','M',False,False,False,'P3M','time.dt.season','JAS_YYYY','YYYY',1,'Seasonal block JAS'),
-        'OND': ('sea','M',False,False,False,'P3M','time.dt.season','OND_YYYY','YYYY',1,'Seasonal block OND'),
-        'SEA': ('sea','M',False,False,False,'P3M','time.dt.season','SEA_YYYY','YYYY',1,'Seasonal blocks for a single year (JFM/AMJ/JAS/OND)'),
+        'JFM': ('sea','M',False,False,False,'P3M','time.dt.season','JFM_YYYY','YYYY',1,'Seasonal block JFM','season'),
+        'AMJ': ('sea','M',False,False,False,'P3M','time.dt.season','AMJ_YYYY','YYYY',1,'Seasonal block AMJ','season'),
+        'JAS': ('sea','M',False,False,False,'P3M','time.dt.season','JAS_YYYY','YYYY',1,'Seasonal block JAS','season'),
+        'OND': ('sea','M',False,False,False,'P3M','time.dt.season','OND_YYYY','YYYY',1,'Seasonal block OND','season'),
+        'SEA': ('sea','M',False,False,False,'P3M','time.dt.season','SEA_YYYY','YYYY',1,'Seasonal blocks for a single year','season'),
 
-        'SJFM': ('sea','SEAJFM',False,False,True,'P3M','time.dt.season','SEASONJFM_YYYY_YYYY','YYYY',2,'Climatological seasonal JFM'),
-        'SAMJ': ('sea','SEAAMJ',False,False,True,'P3M','time.dt.season','SEASONAMJ_YYYY_YYYY','YYYY',2,'Climatological seasonal AMJ'),
-        'SJAS': ('sea','SEAJAS',False,False,True,'P3M','time.dt.season','SEASONJAS_YYYY_YYYY','YYYY',2,'Climatological seasonal JAS'),
-        'SOND': ('sea','SEAOND',False,False,True,'P3M','time.dt.season','SEASONOND_YYYY_YYYY','YYYY',2,'Climatological seasonal OND'),
-        'SEASON': ('season','SEA',False,False,True,'P3M','time.dt.season','SEASON_YYYY_YYYY','YYYY',2,'Combined climatological season'),
+        'SJFM': ('sea','SEAJFM',False,False,True,'P3M','time.dt.season','SEASONJFM_YYYY_YYYY','YYYY',2,'Climatological seasonal JFM','climatology_season'),
+        'SAMJ': ('sea','SEAAMJ',False,False,True,'P3M','time.dt.season','SEASONAMJ_YYYY_YYYY','YYYY',2,'Climatological seasonal AMJ','climatology_season'),
+        'SJAS': ('sea','SEAJAS',False,False,True,'P3M','time.dt.season','SEASONJAS_YYYY_YYYY','YYYY',2,'Climatological seasonal JAS','climatology_season'),
+        'SOND': ('sea','SEAOND',False,False,True,'P3M','time.dt.season','SEASONOND_YYYY_YYYY','YYYY',2,'Climatological seasonal OND','climatology_season'),
+        'SEASON': ('season','SEA',False,False,True,'P3M','time.dt.season','SEASON_YYYY_YYYY','YYYY',2,'Combined climatological season','climatology_season'),
 
-        'A':      ('annual','M',False,False,False,'P1Y','time.dt.year','A_YYYY','YYYY',1,'Annual (monthly inputs)'),
-        'AA':     ('annual','M',True, False,False,'P1Y','time.dt.year','AA_YYYY_YYYY','YYYY',2,'Range of annual (monthly inputs)'),
-        'ANNUAL': ('annual','A',False,False,True,'P1Y','time.dt.year','ANNUAL_YYYY_YYYY','YYYY',2,'Climatological annual'),
+        'A':      ('annual','M',False,False,False,'P1Y','time.dt.year','A_YYYY','YYYY',1,'Annual (monthly inputs)','year'),
+        'AA':     ('annual','M',True, False,False,'P1Y','time.dt.year','AA_YYYY_YYYY','YYYY',2,'Range of annual','range'),
+        'ANNUAL': ('annual','A',False,False,True,'P1Y','time.dt.year','ANNUAL_YYYY_YYYY','YYYY',2,'Climatological annual','climatology_year'),
 
-        'Y':      ('year','D',False,False,False,'P1Y','time.dt.year','Y_YYYY','YYYY',1,'Yearly (daily inputs)'),
-        'YY':     ('year','D',True, False,False,'P1Y','time.dt.year','YY_YYYY_YYYY','YYYY',2,'Range of yearly (daily inputs)'),
-        'YEAR':   ('year','Y',False,False,True,'PnY','time.dt.year','YEAR_YYYY_YYYY','YYYY',2,'Climatological year'),
+        'Y':      ('year','D',False,False,False,'P1Y','time.dt.year','Y_YYYY','YYYY',1,'Yearly (daily inputs)','year'),
+        'YY':     ('year','D',True, False,False,'P1Y','time.dt.year','YY_YYYY_YYYY','YYYY',2,'Range of yearly','range'),
+        'YEAR':   ('year','Y',False,False,True,'PnY','time.dt.year','YEAR_YYYY_YYYY','YYYY',2,'Climatological year','climatology_year'),
     }
 
 def period_regex_debug(filename, period_map=None):
@@ -241,7 +246,8 @@ def get_period_info(period_code=None):
             file_format,
             date_format,
             n_date_segments,
-            description
+            description,
+            span_type
         ) = info
 
         pattern, parts = build_regex(code, file_format, date_format, n_date_segments)
@@ -258,6 +264,7 @@ def get_period_info(period_code=None):
             "date_format": date_format,
             "n_date_segments": n_date_segments,
             "description": description,
+            "span_type":span_type,
             "regex": pattern,
             "file_format_parts": parts,
         }
@@ -270,8 +277,7 @@ def get_period_info(period_code=None):
 
     return {code: build_info(code, info) for code, info in raw_map.items()}
 
-from pathlib import Path
-from datetime import date, timedelta
+
 
 def check_period(period_base, diagnostics=False, placeholder="NA"):
     """
@@ -386,6 +392,41 @@ def check_period(period_base, diagnostics=False, placeholder="NA"):
         "match_obj": match_obj,
     }
 
+def extract_period_code(filename):
+    """
+    Extract the period code, the full period, and date segments from a filename.
+    Assumes the period code is the first token in the filename. 
+    
+    Parameters:
+        filename (str): The filename to extract the period code from.
+
+    Returns:
+        The extracted period code (str), the full period (str) and the date segments, or (None,None,None) if no valid code is found.
+    """
+
+    TOKEN_REGEX = re.compile(
+        r"^([A-Z0-9]+)"          # period code (M, D3, DOY, etc.)
+        r"_(\d{3,8})"            # first numeric segment
+        r"(?:_(\d{3,8}))?"       # optional second segment
+        r"(?:_(\d{3,8}))?"       # optional third segment (DOY)
+    )
+
+    base = Path(filename).name
+
+    m = TOKEN_REGEX.match(base)
+    if not m:
+        return None, None, None
+
+    code = m.group(1)
+    segs = [g for g in m.groups()[1:] if g]  # numeric segments
+
+    full_token = code + "_" + "_".join(segs)
+    valid = check_period(full_token)
+
+    if not valid.get("ok"):
+        return None, None, None
+
+    return code, full_token, segs
 
 def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
     """
@@ -406,8 +447,6 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
       - seg_value_for (in get_period_dates): Map token -> segment value (1-based occurrence).
       - parse_yyyymmdd (in get_period_dates): Parses a date segment (YYYYMMDD) into a date object.
       - parse_yyyymm (in get_period_dates): Parses a date segment (YYYYMM) into start and end date objects.
-      - parse_yyyy (in get_period_dates): Parses a date segment (YYYY) into start and end date objects.
-      - parse_iso_week_to_range (in get_period_dates): Parses ISO week codes into start and end date objects.
       - token_indices (in get_period_dates): Convenience function to get token index list for a token.
       - fail (in get_period_dates): Helper to record failure and optionally diagnostics.
     
@@ -453,24 +492,6 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
         except Exception:
             raise ValueError("Invalid YYYYMM")
 
-    # helper function: parse YYYY -> (start_date, end_date)
-    def parse_yyyy(s):
-        try:
-            y = int(s)
-            return date(y, 1, 1), date(y, 12, 31)
-        except Exception:
-            raise ValueError("Invalid YYYY")
-
-    # helper function: parse YYYYWW (year+week) or WW (week only)
-    def parse_iso_week_to_range(year, week):
-        # returns (monday_date, sunday_date) for given ISO year/week
-        try:
-            start = date.fromisocalendar(year, week, 1)
-            end = date.fromisocalendar(year, week, 7)
-            return start, end
-        except Exception:
-            raise ValueError("Invalid ISO week for the specified year")
-
     # helper function (convenience): get token index list for a token
     def token_indices(token):
         return [i for i, t in enumerate(parts) if t == token]
@@ -478,8 +499,8 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
     # 1. Cache token and period metadata and precompile regexes
     TOKEN_LENGTHS = get_token_lengths()   # once at module import
     period_map = get_period_info()
-    codes_sorted = sorted(period_map.keys(), key=lambda x: -len(x))
 
+    original_input = files
     if isinstance(files, str):
         files = [files]
 
@@ -489,17 +510,24 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
 
     # 2. Process each file
     for fname in files:
-        base = Path(fname).stem
-
+        
         # Helper functgion: fail() bound to this fname so diagnostics record the correct file
         def fail(msg):
             results.append((placeholder, placeholder))
             if diagnostics:
                 errors.append((fname, msg))
             return True
+        
+        base = Path(fname).stem
+        percode,fullperiod,segments = extract_period_code(base)
+        if not percode:
+            if diagnostics:
+                errors.append(f"Invalid period token in '{fname}'")
+            results.append((placeholder, placeholder))
+            continue
 
         # 3. Check that the the input period is valid
-        res = check_period(base, diagnostics=diagnostics, placeholder=placeholder)
+        res = check_period(fullperiod, diagnostics=diagnostics, placeholder=placeholder)
         if not res.get("ok"):
             # record the error message if diagnostics requested
             if diagnostics:
@@ -510,14 +538,10 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
 
         # 4. Unpack normalized pieces for semantic handling
         matched_code = res["matched_code"]
-        #info = res["info"]
         parts = res["parts"]
         segments = res["segments"]
-        #match_obj = res["match_obj"]
 
-
-        # 4. Period specific handlers
-        
+        # 5. Period specific handlers
         # DAILY single date: D
         if matched_code == "D":
             try:
@@ -866,19 +890,18 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
 
         # Seasons (single year): JFM/AMJ/JAS/OND/SEA (SEA_YYYY))
         if matched_code in ("JFM","AMJ","JAS","OND","SEA"):
-            # these are single-year seasonal blocks: file_format usually YYYY
             try:
                 sy = int(seg_value_for("YYYY", 1))
             except ValueError:
                 if fail(f"{matched_code} Invalid format for this period code"):
                     continue
-            # map season to month ranges
+            # Map season to month ranges
             season_map = {
                 "JFM": (1,3),
                 "AMJ": (4,6),
                 "JAS": (7,9),
                 "OND": (10,12),
-                "SEA": (1,12),  # SEA for full-year blocks (if you want different semantics adjust)
+                "SEA": (1,12),  # SEA for all 4 seasons within a single file
             }
             if matched_code not in season_map:
                 if fail(f"Unknown seasonal code: {matched_code}"):
@@ -1008,16 +1031,23 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
         if fail("Unknown or unhandled period code"):
             continue
 
+    # --- Final return normalization ---
+    if isinstance(original_input, str):
+        # Single token → return a 2‑tuple
+        if diagnostics:
+            return results[0], errors
+        return results[0]
+
+    # Otherwise: list input → return list of tuples
     return (results, errors) if diagnostics else results
     
 
 def get_period_sets(
         period_code, 
+        files=None,
         start=None, 
         end=None, 
         dates=None, 
-        period_tokens=None,
-        files=None, 
         date_format="%Y%m%d",
         running=True,
         climatology_range=(1991,2020),
@@ -1028,18 +1058,18 @@ def get_period_sets(
 
     Parameters
         - period_code (str): Period code to generate (e.g. 'M', 'W', 'A', 'Y').
+        - files (list[str], optional): list of filenames that start with period tokens (e.g., 'M_202201-chl.nc').
         - start (str or datetime, optional): Start date in YYYYMMDD format or datetime object.
         - end (str or datetime, optional): End date in YYYYMMDD format or datetime object.
         - dates (list[str|datetime], optional): list of dates to infer range from.
         - period_tokens (list[str], optional): list of existing period tokens (e.g., ['M_200001', ...]).
-        - files (list[str], optional): list of filenames that start with period tokens (e.g., 'M_202201-chl.nc').
         - date_format (str): format used for input date strings and for token construction.
         - running (bool): for running-window codes (D3, M3), whether to produce sliding windows.
         - climatology_range (tuple): default climatology years (start_year, end_year).
         - diagnostics (bool): if True, return (outputs, diagnostics_list).
 
     Returns
-        - list of str: List of period tokens like ['M_202005', 'M_202006', ...]
+        - a period map that show the list of input periods/dates/files for each output period
     
     Helper functions
         - to_dt(x): Convert input string or datetime to datetime object.
@@ -1059,15 +1089,6 @@ def get_period_sets(
         if isinstance(x, datetime):
             return x
         return datetime.strptime(x, date_format)
-    
-    def token_prefix_from_file(fname):
-        """Return the token prefix and the matched token (if any) using get_period_info() regexes."""
-        base = Path(fname).name
-        for pfx, info in get_period_info().items():
-            m = info["regex"].match(base)
-            if m:
-                return pfx, m.groupdict(), base
-        return None, None, base
     
     def run_get_period_dates(period_token, date_format="%Y%m%d", diagnostics=False):
         """
@@ -1159,105 +1180,636 @@ def get_period_sets(
                 cur += relativedelta(months=3)
         return toks
 
+    def generate_periods(span_type, start_dt, end_dt, climatology_range):
+        """
+        Dispatch to the correct span generator based on span_type.
+        Returns a list of period tuples.
+        """
 
-    # 1. Input normalization
-    diagnostics_list = []
-    input_prefix = None
-    input_items = []  # canonical list of inputs (dates -> D_ tokens; period_tokens -> tokens; files -> filenames)
+        if span_type == "climatology_doy":
+            return generate_climatology_doy(start_dt, end_dt)
+        
+        if span_type == "week":
+            return generate_weeks(start_dt, end_dt)
 
-    # 2. Get start and end date ranges (from either the input period tokens, the input files, or the start/end/dates )
+        if span_type == "month":
+            return generate_months(start_dt, end_dt)
+
+        if span_type == "season":
+            return generate_seasons(start_dt, end_dt)
+
+        if span_type == "year":
+            return generate_annual(start_dt, end_dt)
+
+        # --- Climatology ---
+        y1, y2 = climatology_range
+
+        if span_type == "climatology_month":
+            return generate_climatology_months(y1, y2)
+
+        if span_type == "climatology_doys":
+            return generate_climatology_doys(y1, y2)
+
+        if span_type == "climatology_season":
+            return generate_climatology_seasons(y1, y2)
+
+        raise NotImplementedError(f"Unknown span type '{span_type}'.")
+
+    def generate_climatology_doy(clim_start, clim_end):
+        """
+        Generate (doy,) tuples for climatological DOY.
+        Always 365 (or 366) subperiods.
+        """
+        days = 366 if is_leap_year(clim_start) else 365
+        return [(d,) for d in range(1, days + 1)]
     
-    # 2A. Look for input period tokens
-    if period_tokens:
-        # parse tokens to spans and set input_prefix
-        spans = []
+    def generate_climatology_doys(clim_start, clim_end):
+        # No subperiods — one combined file
+        return [("ALL_DOYS",)]
+    
+    def generate_weeks(start_dt, end_dt):
+        """
+        Generate (year, week) tuples for all ISO weeks between start_dt and end_dt.
+        """
+        start = datetime.strptime(start_dt, "%Y%m%d")
+        end   = datetime.strptime(end_dt, "%Y%m%d")
+
+        # Snap start to Monday of its ISO week
+        start_iso = start.isocalendar()
+        current = start - timedelta(days=start_iso.weekday)
+
+        # Snap end to Monday of its ISO week
+        end_iso = end.isocalendar()
+        end_week_start = end - timedelta(days=end_iso.weekday)
+
+        periods = []
+
+        while current <= end_week_start:
+            iso = current.isocalendar()
+            year, week = iso.year, iso.week
+            periods.append((year, week))
+            current += timedelta(days=7)
+
+        return periods
+    
+    def generate_climatology_week(clim_start, clim_end):
+        # ISO weeks: 52 or 53
+        weeks = 53 if iso_year_has_53_weeks(clim_start) else 52
+        return [(w,) for w in range(1, weeks + 1)]
+    
+    def generate_climatology_weeks(clim_start, clim_end):
+        return [("ALL_WEEKS",)]
+
+    def generate_months(start_dt, end_dt):
+        """
+        Generate (year, month) tuples for all months between start_dt and end_dt.
+        start_dt and end_dt are strings in YYYYMMDD format.
+        """
+        # Parse into datetime objects
+        start = datetime.strptime(start_dt, "%Y%m%d")
+        end   = datetime.strptime(end_dt, "%Y%m%d")
+
+        # Snap to first day of start month
+        current = start.replace(day=1)
+
+        # Snap end to first day of its month
+        end_month = end.replace(day=1)
+
+        periods = []
+
+        while current <= end_month:
+            periods.append((current.year, current.month))
+
+            # Move to next month
+            if current.month == 12:
+                current = current.replace(year=current.year + 1, month=1)
+            else:
+                current = current.replace(month=current.month + 1)
+
+        return periods
+    
+    def generate_climatology_month(clim_start, clim_end):
+        """
+        Generate (month,) tuples for climatological months.
+        Always 12 subperiods: 1–12.
+        """
+        return [(m,) for m in range(1, 13)]
+    
+    def generate_climatology_months(clim_start, clim_end):
+        return [("ALL_MONTHS",)]
+
+    def generate_seasons(start_dt, end_dt):
+        """
+        Generate (year, season_code) tuples for JFM, AMJ, JAS, OND.
+        """
+        start = datetime.strptime(start_dt, "%Y%m%d")
+        end   = datetime.strptime(end_dt, "%Y%m%d")
+
+        # Snap to first month of its season
+        def season_start_month(m):
+            if m in (1,2,3): return 1
+            if m in (4,5,6): return 4
+            if m in (7,8,9): return 7
+            return 10
+
+        current = start.replace(month=season_start_month(start.month), day=1)
+        end_season = end.replace(month=season_start_month(end.month), day=1)
+
+        periods = []
+
+        while current <= end_season:
+            m = current.month
+            if m == 1:  code = "JFM"
+            elif m == 4: code = "AMJ"
+            elif m == 7: code = "JAS"
+            else:        code = "OND"
+
+            periods.append((current.year, code))
+
+            # Advance 3 months
+            if m == 10:
+                current = current.replace(year=current.year + 1, month=1)
+            else:
+                current = current.replace(month=m + 3)
+
+        return periods
+    
+    def generate_climatology_seasons(clim_start, clim_end):
+        """
+        Generate (season_code,) tuples for climatological seasons.
+        """
+        return [("JFM",), ("AMJ",), ("JAS",), ("OND",)]
+    
+    def generate_climatology_seasons(clim_start, clim_end):
+        return [("ALL_SEASONS",)]
+
+    def generate_annual(start_dt, end_dt):
+        """
+        Generate (annual,) tuples for all years between start_dt and end_dt.
+        """
+        start = datetime.strptime(start_dt, "%Y%m%d")
+        end   = datetime.strptime(end_dt, "%Y%m%d")
+
+        periods = []
+        for year in range(start.year, end.year + 1):
+            periods.append((year,))
+        return periods
+    
+    def generate_years(start_dt, end_dt):
+        return generate_annual(start_dt, end_dt)
+    
+    def generate_climatology_annual(clim_start, clim_end):
+        return [("ANNUAL",)]
+    
+    def generate_climatology_year(clim_start, clim_end):
+        return [("YEAR",)]
+
+    def format_period_token(target_code, period_tuple, period_map, climatology_range=None):
+        """
+        Format an output period token using the file_format template
+        from period_info().
+        """
+        info = period_map[target_code]
+        template = info['file_format']
+        span_type = info['span_type']
+
+        parts = list(period_tuple)
+
+        # --- WEEK ---
+        if span_type == "week":
+            year, week = parts
+            return (template
+                    .replace("YYYY", f"{year:04d}")
+                    .replace("WW", f"{week:02d}"))
+
+        # --- MONTH ---
+        if span_type == "month":
+            year, month = parts
+            return (template
+                    .replace("YYYY", f"{year:04d}")
+                    .replace("MM", f"{month:02d}"))
+
+        # --- SEASON ---
+        if span_type == "season":
+            year, season_code = parts
+            return (template
+                    .replace("YYYY", f"{year:04d}")
+                    .replace("SEA", season_code)
+                    .replace("SEASON", season_code))
+
+        # --- YEAR (A, Y) ---
+        if span_type == "year":
+            year = parts[0]
+            return template.replace("YYYY", f"{year:04d}")
+
+        # --- CLIMATOLOGY ---
+        if span_type.startswith("climatology"):
+
+            if climatology_range is None:
+                raise ValueError("Climatology range must be provided to format_period_token().")
+
+            y1, y2 = climatology_range
+
+            # --- Special case: DOY climatology ---
+            if span_type == "climatology_doy":
+                doy = int(parts[0])   # period_tuple = (doy,)
+                return (template
+                        .replace("DDD", f"{doy:03d}")
+                        .replace("YYYY", f"{y1:04d}")
+                        .replace("YYYY2", f"{y2:04d}"))
+
+            # --- Special case: DOYS (combined) ---
+            if span_type == "climatology_doys":
+                return (template
+                        .replace("YYYY", f"{y1:04d}")
+                        .replace("YYYY2", f"{y2:04d}"))
+
+            # --- All other climatologies (month, week, season, annual) ---
+            sub = parts[-1]
+            token = (template
+                    .replace("YYYY", f"{y1:04d}")
+                    .replace("YYYY2", f"{y2:04d}"))
+
+            if isinstance(sub, int):
+                if "MM" in template:
+                    token = token.replace("MM", f"{sub:02d}")
+                if "DDD" in template:
+                    token = token.replace("DDD", f"{sub:03d}")
+            else:
+                token = token.replace("SEA", sub).replace("SEASON", sub)
+
+            return token
+
+        raise NotImplementedError(f"Span type '{span_type}' not implemented.")
+
+
+    def map_inputs_to_period(span_type, period_tuple, spans):
+        """
+        Dispatch to the correct input-mapping function based on span_type.
+        """
+        if span_type == "doy":
+            return map_inputs_to_doy(period_tuple, spans)
+        
+        if span_type == "week":
+            return map_inputs_to_week(period_tuple, spans)
+
+        if span_type == "month":
+            return map_inputs_to_month(period_tuple, spans)
+
+        if span_type == "season":
+            return map_inputs_to_season(period_tuple, spans)
+
+        if span_type == "year":
+            return map_inputs_to_year(period_tuple, spans)
+
+        # --- Climatology ---
+        if span_type == "climatology_doy":
+            return map_inputs_to_climatology_doy(period_tuple, spans)
+        if span_type == "climatology_doys":
+            return map_inputs_to_climatology_doys(period_tuple, spans)
+
+        if span_type == "climatology_week":
+            return map_inputs_to_climatology_week(period_tuple, spans)
+        if span_type == "climatology_weeks":
+            return map_inputs_to_climatology_weeks(period_tuple, spans)
+
+        if span_type == "climatology_month":
+            return map_inputs_to_climatology_month(period_tuple, spans)
+        if span_type == "climatology_months":
+            return map_inputs_to_climatology_months(period_tuple, spans)
+
+        if span_type == "climatology_season":
+            return map_inputs_to_climatology_season(period_tuple, spans)
+        if span_type == "climatology_seasons":
+            return map_inputs_to_climatology_seasons(period_tuple, spans)
+
+        if span_type == "climatology_year":
+            return map_inputs_to_climatology_year(period_tuple, spans)
+
+        raise NotImplementedError(f"Unknown span type '{span_type}'.")
+   
+    def map_inputs_to_climatology_doy(period_tuple, spans):
+        """
+        period_tuple = (doy,)
+        spans = [(sdt, edt, token), ...]
+        Match all inputs whose DOY equals the target DOY.
+        """
+        doy = period_tuple[0]
+        matched = []
+
+        for sdt, edt, token in spans:
+            s = datetime.strptime(sdt, "%Y%m%d")
+            # DOY climatology uses the *start date* DOY
+            if s.timetuple().tm_yday == doy:
+                matched.append(token)
+
+        return matched
+    
+    def map_inputs_to_climatology_doys(period_tuple, spans):
+        """
+        DOYS: include all input tokens.
+        """
+        return [token for _, _, token in spans]
+
+    def map_inputs_to_week(period_tuple, spans):
+        year, week = period_tuple
+
+        # Compute Monday of the ISO week
+        # ISO week: Monday = 1, Sunday = 7
+        # Use the ISO calendar trick: week 1 always contains Jan 4
+        week_start = datetime.fromisocalendar(year, week, 1)
+        week_end   = datetime.fromisocalendar(year, week, 7)
+
+        matched = []
+        for sdt, edt, token in spans:
+            s = datetime.strptime(sdt, "%Y%m%d")
+            e = datetime.strptime(edt, "%Y%m%d")
+            if e >= week_start and s <= week_end:
+                matched.append(token)
+
+        return matched
+    
+    def map_inputs_to_climatology_week(period_tuple, spans):
+        """
+        period_tuple = (week,)
+        Match all inputs whose ISO week equals the target week.
+        """
+        week = period_tuple[0]
+        matched = []
+
+        for sdt, edt, token in spans:
+            s = datetime.strptime(sdt, "%Y%m%d")
+            if s.isocalendar().week == week:
+                matched.append(token)
+
+        return matched
+    
+    def map_inputs_to_climatology_weeks(period_tuple, spans):
+        return [token for _, _, token in spans]
+    
+    def map_inputs_to_month(period_tuple, spans):
+        year, month = period_tuple
+
+        month_start = datetime(year, month, 1)
+        if month == 12:
+            month_end = datetime(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            month_end = datetime(year, month + 1, 1) - timedelta(days=1)
+
+        matched = []
+        for sdt, edt, token in spans:
+            s = datetime.strptime(sdt, "%Y%m%d")
+            e = datetime.strptime(edt, "%Y%m%d")
+            if e >= month_start and s <= month_end:
+                matched.append(token)
+
+        return matched
+    
+    def map_inputs_to_climatology_month(period_tuple, spans):
+        """
+        period_tuple = (month,)
+        Match all inputs whose month equals the target month.
+        """
+        month = period_tuple[0]
+        matched = []
+
+        for sdt, edt, token in spans:
+            s = datetime.strptime(sdt, "%Y%m%d")
+            if s.month == month:
+                matched.append(token)
+
+        return matched
+
+    def map_inputs_to_climatology_months(period_tuple, spans):
+        return [token for _, _, token in spans]
+
+    def map_inputs_to_season(period_tuple, spans):
+        year, season_code = period_tuple
+
+        if season_code == "JFM":
+            months = (1, 2, 3)
+        elif season_code == "AMJ":
+            months = (4, 5, 6)
+        elif season_code == "JAS":
+            months = (7, 8, 9)
+        else:  # OND
+            months = (10, 11, 12)
+
+        season_start = datetime(year, months[0], 1)
+
+        if season_code == "OND":
+            season_end = datetime(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            season_end = datetime(year, months[-1] + 1, 1) - timedelta(days=1)
+
+        matched = []
+        for sdt, edt, token in spans:
+            s = datetime.strptime(sdt, "%Y%m%d")
+            e = datetime.strptime(edt, "%Y%m%d")
+            if e >= season_start and s <= season_end:
+                matched.append(token)
+
+        return matched
+   
+    def map_inputs_to_climatology_season(period_tuple, spans):
+        """
+        period_tuple = (season_code,)
+        Match all inputs whose month falls in the season.
+        """
+        season_code = period_tuple[0]
+
+        if season_code == "JFM":
+            months = (1, 2, 3)
+        elif season_code == "AMJ":
+            months = (4, 5, 6)
+        elif season_code == "JAS":
+            months = (7, 8, 9)
+        else:  # OND
+            months = (10, 11, 12)
+
+        matched = []
+        for sdt, edt, token in spans:
+            s = datetime.strptime(sdt, "%Y%m%d")
+            if s.month in months:
+                matched.append(token)
+
+        return matched
+
+    def map_inputs_to_climatology_seasons(period_tuple, spans):
+        return [token for _, _, token in spans]
+    
+    def map_inputs_to_year(period_tuple, spans):
+        year = period_tuple[0]
+
+        year_start = datetime(year, 1, 1)
+        year_end   = datetime(year, 12, 31)
+
+        matched = []
+        for sdt, edt, token in spans:
+            s = datetime.strptime(sdt, "%Y%m%d")
+            e = datetime.strptime(edt, "%Y%m%d")
+            if e >= year_start and s <= year_end:
+                matched.append(token)
+
+        return matched
+
+    def map_inputs_to_climatology_annual(period_tuple, spans):
+        return [token for _, _, token in spans]
+    
+    def map_inputs_to_climatology_year(period_tuple, spans):
+        return [token for _, _, token in spans]
+    
+    """
+    STEP 1: Normalize inputs and validate the requested output period code.
+    """
+    # --- Establish climatology range  if the input is None ---
+    if climatology_range is None:
+        climatology_range = (1991, 2020)
+    
+    # --- Normalize period_code to a single code (not iterable) ---
+    if isinstance(period_code, str):
+        target_code = period_code
+    else:
+        raise ValueError("period_code must be a single string (e.g. 'M', 'W', 'A').")
+
+    # --- Load period metadata ---
+    period_map = get_period_info()
+
+    if target_code not in period_map:
+        raise ValueError(f"Unsupported target period code: '{target_code}'")
+
+    target_info = period_map[target_code]
+    expected_input_code = target_info["input_period_code"]
+
+    # --- Prepare canonical input list ---
+    input_items = []      # canonical list of tokens or filenames
+    input_prefix = None   # the prefix of the input items (D, M, W, etc.)
+    start_dt = None
+    end_dt = None
+    diagnostics_list = [] # collects warnings, non-fatal errors
+
+    """
+    STEP 2: Determine input type and extract input date span.
+    """
+
+    # --- Initialize spans for Step 3 ---
+    spans = []
+    input_items = []
+
+    # --- Case 1: Input file strings -------------------------------------
+    if files:
         prefixes = set()
-        for tok in period_tokens:
-            try:
-                sdt, edt = parse_token_span(tok)
-            except Exception as e:
-                raise ValueError(f"Failed to parse input token '{tok}': {e}")
+
+        for tok in files:
+            results, errors = get_period_dates(tok, diagnostics=True)
+            if errors:
+                raise ValueError(errors[0])
+            
+            sdt, edt = results
             spans.append((sdt, edt, tok))
             prefixes.add(tok.split("_", 1)[0])
             input_items.append(tok)
+
         if len(prefixes) > 1:
             raise ValueError(f"Mixed input period prefixes not supported: {sorted(prefixes)}")
-        input_prefix = next(iter(prefixes))
-        start_dt = min(s[0] for s in spans)
-        end_dt = max(s[1] for s in spans)
-    
-    #2B. Look for input files
-    elif files:
-        # files should start with period tokens; map files to tokens
-        spans = []
-        prefixes = set()
-        for f in files:
-            pfx, gd, base = token_prefix_from_file(f)
-            if not pfx:
-                diagnostics_list.append((f, "No period token found at start of filename"))
-                continue
-            prefixes.add(pfx)
-            # reconstruct token from matched groups (use same formatting as regex expects)
-            info = get_period_info()[pfx]
-            # build token string from groups
-            if info["n_date_segments"] == 1:
-                token_str = f"{pfx}_{gd['start']}"
-            else:
-                token_str = f"{pfx}_{gd['start']}_{gd['end']}"
-            try:
-                sdt, edt = parse_token_span(token_str)
-            except Exception as e:
-                diagnostics_list.append((f, f"Failed to parse token from filename: {e}"))
-                continue
-            spans.append((sdt, edt, token_str, f))
-            input_items.append(f)  # keep file-level mapping
-        if not spans:
-            raise ValueError("No valid period tokens found in provided files.")
-        if len(prefixes) > 1:
-            raise ValueError(f"Mixed input period prefixes not supported for files: {sorted(prefixes)}")
-        input_prefix = next(iter(prefixes))
-        start_dt = min(s[0] for s in spans)
-        end_dt = max(s[1] for s in spans)
-    #2C. Otherwise look for a list of dates or start and end dates
-    else:
-        # 2Ci List of dates
-        if dates:
-            parsed = [d if isinstance(d, datetime) else to_dt(d) for d in dates]
-            start_dt = min(parsed)
-            end_dt = max(parsed)
-            # convert dates to D_ tokens for mapping
-            cur = start_dt
-            while cur <= end_dt:
-                input_items.append(f"D_{cur.strftime(date_format)}")
-                cur += timedelta(days=1)
-            input_prefix = "D"
-        # 2Cii Start and end dates
-        elif start and end:
-            start_dt = start if isinstance(start, datetime) else to_dt(start)
-            end_dt = end if isinstance(end, datetime) else to_dt(end)
-            if start_dt > end_dt:
-                raise ValueError("Start date must be before or equal to end date.")
-            cur = start_dt
-            while cur <= end_dt:
-                input_items.append(f"D_{cur.strftime(date_format)}")
-                cur += timedelta(days=1)
-            input_prefix = "D"
-        else:
-            raise ValueError("Provide either period_tokens, files, or start/end/dates.")
 
-    
-    # 3. Validate target code
-    info_map = get_period_info()
-    if period_code not in info_map:
-        raise ValueError(f"Unsupported target period code: {period_code}")
-    target_info = info_map[period_code]
+        input_prefix = next(iter(prefixes))
+        if input_prefix != expected_input_code:
+            raise ValueError(
+                f"Cannot generate '{target_code}' from '{input_prefix}' inputs; "
+                f"expected input period code is '{expected_input_code}'.")
+        
+        start_dt = min(s[0] for s in spans)
+        end_dt   = max(s[1] for s in spans)
 
-    # If inputs were raw dates, only allow codes whose input_period_code == 'D'
-    if input_prefix is None:
+    # --- Case 2: Raw dates list ---------------------------------------------
+    elif dates:
+        # Parse all dates into datetime objects
+        parsed = [d if isinstance(d, datetime) else to_dt(d) for d in dates]
+        start_dt_dt = min(parsed)
+        end_dt_dt   = max(parsed)
+
+        # Convert to canonical strings for Step 3
+        start_dt = start_dt_dt.strftime("%Y%m%d")
+        end_dt   = end_dt_dt.strftime("%Y%m%d")
+
+        # Build spans and input_items
+        cur = start_dt_dt
+        while cur <= end_dt_dt:
+            sdt = cur.strftime("%Y%m%d")
+            edt = sdt
+            token = f"D_{sdt}"
+            spans.append((sdt, edt, token))
+            input_items.append(token)
+            cur += timedelta(days=1)
+
         input_prefix = "D"
-    if input_prefix == "D" and target_info["input_period_code"] != "D":
-        raise ValueError(f"Cannot generate '{code}' from raw dates; its input_period_code is '{target_info['input_period_code']}' (only 'D' allowed).")
 
+    # --- Case 3: Start/end date range ---------------------------------------
+    elif start and end:
+        start_dt_dt = start if isinstance(start, datetime) else to_dt(start)
+        end_dt_dt   = end   if isinstance(end,   datetime) else to_dt(end)
+
+        if start_dt_dt > end_dt_dt:
+            raise ValueError("Start date must be before or equal to end date.")
+
+        start_dt = start_dt_dt.strftime("%Y%m%d")
+        end_dt   = end_dt_dt.strftime("%Y%m%d")
+
+        # Build spans and input_items
+        cur = start_dt_dt
+        while cur <= end_dt_dt:
+            sdt = cur.strftime("%Y%m%d")
+            edt = sdt
+            token = f"D_{sdt}"
+            spans.append((sdt, edt, token))
+            input_items.append(token)
+            cur += timedelta(days=1)
+
+        input_prefix = "D"
+
+    else:
+        raise ValueError("Provide either period_tokens, files, or start/end/dates.")
+
+    # --- Enforce raw-date restriction ---------------------------------------
+    if input_prefix == "D" and expected_input_code != "D":
+        raise ValueError(
+            f"Cannot generate '{target_code}' from raw dates; "
+            f"its input_period_code is '{expected_input_code}' (only 'D' allowed)."
+        )
+
+    """Step 3: Generate output periods for the full date span """
+
+    info = period_map[target_code]
+    span_type = info["span_type"]
+    periods = generate_periods(span_type, start_dt, end_dt, climatology_range)
+
+    period_map_out = {}
+
+    for p in periods:
+        token = format_period_token(target_code, p, period_map, climatology_range)
+        inputs = map_inputs_to_period(span_type, p, spans)
+        period_map_out[token] = {"inputs": inputs}
+
+
+
+
+    #periods = generate_periods(span_type, start_dt, end_dt, climatology_range)
+    #tokens  = [format_period_token(target_code, p) for p in periods]
+    #inputs  = [map_inputs_to_period(info["input_period_code"], p, input_items)]
+
+    return {
+        "target_code": target_code,
+        "expected_input_code": expected_input_code,
+        "input_items": input_items,
+        "input_prefix": input_prefix,
+        "start_dt": start_dt,
+        "end_dt": end_dt,
+        "period_map": period_map_out,   # <-- NEW
+        "diagnostics": diagnostics_list,
+    }
+
+    
     # -------------------------
     # Produce outputs
     # -------------------------
@@ -1471,6 +2023,7 @@ def get_period_sets(
         return (outputs, diagnostics_list) if diagnostics else outputs
 
     # 3) Otherwise produce list of individual tokens of the requested code across the span
+    code = period_code
     if code == "D":
         toks = []
         cur = start_dt
