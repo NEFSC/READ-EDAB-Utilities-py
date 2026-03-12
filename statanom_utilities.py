@@ -1,7 +1,10 @@
+import os
 import xarray as xr
 import numpy as np
 from datetime import datetime
+from collections import defaultdict
 from utilities.bootstrap.environment import bootstrap_environment
+from utilities import get_period_info, get_period_sets, get_prod_files
 env = bootstrap_environment(verbose=False)
 
 """
@@ -48,7 +51,7 @@ def get_groupby_hint(period_code):
             - key: xarray groupby key or rolling window size
             - notes: optional clarification
     """
-    info = period_info().get(period_code)
+    info = get_period_info(period_code)
     if not info:
         return {'method': 'unknown', 'key': None, 'notes': f'Unrecognized period code: {period_code}'}
 
@@ -96,133 +99,108 @@ def compute_stats(grouped, var_name, time_dim, label):
         f"{var_name}_{label}_var":    grouped.var(dim=time_dim, skipna=True),
     })
        
-def stats_period_map(prod, period, dataset=None, dates=None, version=None, dataset_map=None, subset=None, is_running=True, verbose=False):
+def build_stats_map(prod, period, output_dir,
+                    dataset=None, daterange=None,climatology_range=None,
+                    dataset_version=None, dataset_map=None,
+                    subset=None, is_running=True, overwrite=False, verbose=False):
     """
-    Constructs a stats period file path map using get_prod_files.
-
-    Parameters:
-        prod (str): Product to conduct the stats on.
-        period (str): The period code for the output stats file.
-        dataset (str): Override dataset. Defaults to each product’s default from product_defaults() (optional).
-        dates (list of str): List of input dates (YYYYMMDD) to process.
-        version (str): Dataset version override passed through to get_prod_files (optional)).
-        dataset_map (str): Dataset map override passed through to get_prod_files (optional).
-        subset (str): The subset region (e.g. NES, NWA) to subset the data 
-        is_running (bolean): To override the D3 and D8 running stats.
-        verbose (bool): If True, prints progress and provenance (default is False).
-
-    Returns:
-        dict: Mapping of output period dates
+    Unified stats pipeline:
+      1) Find input files
+      2) Generate period map via get_period_sets()
+      3) Build output filenames
+      4) Compare mtimes to determine if stats need updating
     """
-    from utilities import get_prod_files, get_period_info, parse_dataset_info, get_file_dates
-    per_map = get_period_info(period)
-    input_per = per_map['input_period_code']
-
-    # Turn off the is_running_mean option in in the period map if the default is to create a running_mean (e.g. D3 and D8 periods)
-    if not is_running:
-        if per_map['is_running_mean']:
-            per_map['is_running_mean'] = False
     
-    # Find the input files
+    # ---------------------------------------------------------
+    # 1. Determine expected input period (D, M, etc.)
+    # ---------------------------------------------------------
+    per_info = get_period_info(period)
+    input_per = per_info["input_period_code"]
+
+    # Disable running means if requested
+    if not is_running and per_info["is_running_mean"]:
+        per_info["is_running_mean"] = False
+
+    # ---------------------------------------------------------
+    # 2. Find input files
+    # ---------------------------------------------------------
     if verbose:
         print(f"Searching for {input_per} files for {dataset}:{prod}")
-    if input_per in ['D','DD']:
-        files = get_prod_files(prod,dataset=dataset,dataset_version=version,dataset_map=dataset_map,period=None,data_type=None,verbose=verbose)
+
+    if input_per == "D":
+        files = get_prod_files(prod,
+            dataset=dataset,
+            dataset_version=dataset_version,
+            dataset_map=dataset_map,
+            period=None,
+            data_type=None,
+            verbose=verbose
+        )
     else:
-        files = get_prod_files(prod,dataset=dataset,dataset_version=version,dataset_map=dataset_map,period=input_per,data_type="STATS",verbose=verbose)
+        files = get_prod_files(
+            prod,
+            dataset=dataset,
+            dataset_version=dataset_version,
+            dataset_map=dataset_map,
+            period=input_per,
+            data_type="STATS",
+            verbose=verbose
+        )
 
     if not files:
-        print(f"No {input_per} files found for {dataset}:{prod}")
-        return []
+        if verbose:
+            print(f"No {input_per} files found for {dataset}:{prod}")
+        return {}
 
-    # Get the dates of the input files
-    ds_parsed = parse_dataset_info(files[0])
-    infile_dates = get_file_dates(files)
+    # ---------------------------------------------------------
+    # 3. Build period map using get_period_sets()
+    # ---------------------------------------------------------
+    period_sets = get_period_sets(period, files=files, daterange=daterange, climatology_range=climatology_range)
+    pm = period_sets["period_map"]
 
-    # Create output periods based on the range of input dates
+    # ---------------------------------------------------------
+    # 4. Build stats map with mtime comparison
+    # ---------------------------------------------------------
+    stats_map = {}
 
-
-import os
-from datetime import datetime
-from collections import defaultdict
-
-def build_stat_file_map(files, period_code, output_dir, date_format="%Y%m%d", verbose=False):
-    """
-    Builds a map of output period → (input files, output path, is_up_to_date)
-
-    Parameters
-    ----------
-    files : list of str
-        Input file paths.
-    period_code : str
-        Output period code (e.g. 'D3', 'M3', 'SEA').
-    output_dir : str
-        Directory where stat files will be written.
-    date_format : str
-        Format of date strings in filenames.
-    verbose : bool
-        If True, print status messages.
-
-    Returns
-    -------
-    dict
-        Mapping of period → dict with keys:
-            - 'inputs': list of input file paths
-            - 'output': output stat file path
-            - 'is_up_to_date': bool
-    """
-    # Extract start dates from input files
-    dates = get_source_file_dates(files, format="yyyymmdd", placeholder=None)
-    file_map = {d: f for d, f in zip(dates, files) if d}
-
-    # Get output periods
-    period_spans = get_period_sets(period_code, dates=dates, running=True)
-
-    stat_map = {}
-    for period in period_spans:
-        _, start, end = period.split("_")
-        inputs = [
-            f for d, f in file_map.items()
-            if start <= d <= end
-        ]
-        if not inputs:
-            continue
+    for out_period, info in pm.items():
+        input_files = info["input_files"]
 
         # Build output filename
-        filename = f"{period}-STAT.nc"
-        output_path = os.path.join(output_dir, filename)
+        out_name = f"{out_period}-STATS.nc"
+        out_path = os.path.join(output_dir, out_name)
 
-        # Check freshness
-        if os.path.exists(output_path):
-            output_mtime = os.path.getmtime(output_path)
-            input_mtimes = [os.path.getmtime(f) for f in inputs]
-            is_up_to_date = all(output_mtime > m for m in input_mtimes)
+        # Determine freshness
+        if os.path.exists(out_path):
+            out_mtime = os.path.getmtime(out_path)
+            in_mtimes = [os.path.getmtime(f) for f in input_files]
+            is_up_to_date = all(out_mtime > m for m in in_mtimes)
         else:
             is_up_to_date = False
 
-        if verbose:
-            status = "✅ up-to-date" if is_up_to_date else "⏳ needs update"
-            print(f"{period}: {status} ({len(inputs)} files)")
+        if overwrite:
+            is_up_to_date = False
 
-        stat_map[period] = {
-            "inputs": inputs,
-            "output": output_path,
+        if verbose:
+            status = "✓ up-to-date" if is_up_to_date else "⏳ needs update"
+            print(f"{out_period}: {status} ({len(input_files)} inputs)")
+
+        stats_map[out_period] = {
+            "inputs": input_files,
+            "output": out_path,
             "is_up_to_date": is_up_to_date
         }
 
-    return stat_map
+    return stats_map
 
 
 
 
 def run_stats_pipeline(prods,
-                       dataset=None,
-                       periods=None,
+                       dataset=None, version=None, dataset_map=None,
+                       periods=None, daterange=None, climatology_range=None,
                        subset=None,
-                       daterange=None,
                        time_dim='time',
-                       version=None,
-                       dataset_map=None,
                        is_running=True,
                        verbose=False
 ):
@@ -265,11 +243,11 @@ def run_stats_pipeline(prods,
         periods = ['W','WEEK','M','MONTH','A','ANNUAL','DOY']
     
     # Load PERIOD and PRODUCT defaults
-    period_map = period_info()
+    period_map = get_period_info()
     prods_map = product_defaults()
         
     # Loop through prods
-    for prod in [prods]:
+    for prod in prods:
         prod = prod.upper().strip()
 
         # If prod not provided use the dataset default
@@ -279,14 +257,17 @@ def run_stats_pipeline(prods,
         for per in periods:
             
             # Create stats period map
-            stats_map = stats_period_map(prod, per, dataset=dataset, dataset_version=version,dataset_map=dataset_map, subset=subset, is_running=is_running, verbose=verbose)
-            
-            
-            
+            build_stats_map(prod, period, output_dir,dataset=dataset, daterange=daterange,
+                    dataset_version=None, dataset_map=None,
+                    subset=None, is_running=True, overwrite=False, verbose=False):
+
+            # Is it better to loop through the output files or use the groupby stats? 
+
             # Open dataset
             ds = xr.open_mfdataset(files, combine="by_coords")
             ds = xr.decode_cf(ds)
 
+            # Check that the time coordinate exists in the file
             if time_dim not in ds.dims and time_dim not in ds.coords:
                 raise ValueError(
                     f"Time dimension '{time_dim}' not found in {dataset}:{prod} "
