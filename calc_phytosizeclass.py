@@ -25,7 +25,7 @@ from utilities import get_summary_metadata
 from utilities import get_default_metadata
 from utilities import get_source_metadata
 from utilities import parse_dataset_info
-from utilities import get_source_file_dates, get_prod_files, get_dates, make_product_output_dir
+from utilities import get_source_file_dates, get_prod_files, get_dates
 
 
 """
@@ -115,8 +115,9 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
     sst_map = {d: f for d, f in zip(sst_dates, sst_files) if d}
 
     # Build PSC file map
-    output_dir = make_product_output_dir('CHL','PSC',dataset=chl_dataset,subset=subset)
-    print(output_dir)
+    #output_dir = make_product_output_dir('CHL','PSC',dataset=chl_dataset,subset=subset)
+    output_dir = get_prod_files('PSC',dataset=chl_dataset,map=subset,getfilepath=True,make_dir=True)
+    
     info = parse_dataset_info(output_dir)
     psc_map = {}
     for date in chl_dates:

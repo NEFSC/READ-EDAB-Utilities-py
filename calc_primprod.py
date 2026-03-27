@@ -23,7 +23,7 @@ from utilities import get_summary_metadata
 from utilities import get_default_metadata
 from utilities import get_source_metadata
 from utilities import parse_dataset_info
-from utilities import get_source_file_dates, get_prod_files, get_dates, make_product_output_dir
+from utilities import get_source_file_dates, get_prod_files, get_dates
 
 
 """
@@ -132,7 +132,8 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
     par_map = {d: f for d, f in zip(par_dates, par_files) if d}
     #ppd_map = {d: f for d, f in zip(ppd_dates, ppd_files) if d}
     # Build PPD file map
-    output_dir = make_product_output_dir('CHL','PPD',dataset=chl_dataset,subset=subset)
+    #output_dir = make_product_output_dir('CHL','PPD',dataset=chl_dataset,subset=subset)
+    output_dir = get_prod_files('PPD',dataset=chl_dataset,map=subset,getfilepath=True,make_dir=True)
     ppd_map = {}
     for date in chl_dates:
         filename = f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_map']}-PPD.nc"

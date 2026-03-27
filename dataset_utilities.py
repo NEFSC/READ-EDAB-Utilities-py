@@ -8,6 +8,7 @@ Purpose:
 
 Main Functions:
     - dataset_defaults: Returns the default/primary datatype location and product for each "source" dataset
+    - get_default_dataset_product: Returns the default product (e.g., SST, CHL) for a given dataset.
     - get_datasets_source: Checks for the first valid input data directory from a given dictionary.
     - get_dataset_products: Searches for products within the given SOURCE and PRODUCTS paths for a dataset
     - parse_dataset_info: Extracts structured metadata from a full dataset path.
@@ -28,11 +29,16 @@ Author:
   
 Modification History
     Sep 18, 2025 - KJWH: Moved dataset specific functions from file_utilities to dataset_utitlities
+    Mar 16, 2026 - KJWH: Updated parse_dataset_info(). 
+                            • It can now parse mixed file types 
+                            • It now caches dataset information to reduce overhead when working with a large number of files
+                            • It validates the dataset by matching it with the default datasets 
+
 """
 
 def dataset_defaults():
     """
-    Returns the default/primary datatype location and product for each "source" dataset
+    Returns the default/primary version, datatype and main product EDAB datasets
 
     Parameters:
         No inputs
@@ -48,6 +54,7 @@ def dataset_defaults():
         'AVHRR': ('V5.3','GLOBAL_4KM', 'SST'),
         'CORALSST': ('V3.1','GLOBAL_5KM', 'SST'),
         'GLOBCOLOUR': ('V4.2.1','GLOBAL_4KM', 'CHL'),
+        'GLORYS': ('V12','GLOBAL_9KM','BTEMP'),
         'MUR': ('V4.1','GLOBAL_1KM', 'SST'),
         'OCCCI': ('V6.0','GLOBAL_4KM', 'CHL'),
         'OISST': ('V2','GLOBAL_25KM', 'SST'),
@@ -55,6 +62,32 @@ def dataset_defaults():
     }
 
     return dataset_info_map
+
+def get_default_dataset_product(dataset_name):
+    """
+    Return the default product (e.g., SST, CHL) for a given dataset.
+
+    Parameters:
+        dataset_name (str): Name of the dataset (e.g., 'OCCCI', 'ACSPO').
+
+    Returns:
+        The default product name for the specified dataset (str).
+
+    Raises
+        KeyError - If the dataset is unknown.
+        ValueError - If the dataset entry does not contain a product field.
+    """
+    info = dataset_defaults()
+    if dataset_name not in info:
+        raise KeyError(f"Unknown dataset '{dataset_name}'. "
+                       f"Available datasets: {list(info.keys())}")
+    entry = info[dataset_name]
+    if len(entry) < 3:
+        raise ValueError(
+            f"Dataset '{dataset_name}' does not contain a product entry. "
+            f"Expected tuple of length ≥ 3, got: {entry}"
+        )
+    return entry[2]
 
 def get_datasets_source(preferred=None,verbose=False):
     """
@@ -196,7 +229,7 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
         return None
     
     # Extract nested SOURCE and OUTPUT paths
-    # Dynamically find the first key containing 'SOURCE'
+    # Dynamically find the first key containing 'SOURCE' and 'OUTPUT'
     source_data_path = next(
         (path for key, path in all_sources[dataset].items() if "SOURCE" in key),
         None
@@ -270,7 +303,7 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
     return results
 
 def resolve_dataset_map(dataset_products,
-                        actual_prod,
+                        prod=None,
                         data_type=None,
                         default_map=None,
                         period=None,
@@ -289,7 +322,7 @@ def resolve_dataset_map(dataset_products,
     dataset_products : dict
         Nested dictionary of dataset structure returned by get_dataset_products().
         Format: {dataset_type: {map_folder: {product: path}}}
-    actual_prod : str
+    prod : str
         The product name to locate (e.g., 'CHL', 'PSC').
     data_type : str, optional
         Explicit map type to filter by (e.g., 'DAILY', 'STATS', 'ANOMS').
@@ -315,11 +348,14 @@ def resolve_dataset_map(dataset_products,
         If multiple folders contain the product and no resolution strategy succeeds.
     """
 
+    if prod == None:
+        prod = 'CHL'
+
     candidate_maps = []
     for dtype in dataset_products:
         for map_key, prod_dict in dataset_products[dtype].items():
-            if actual_prod in prod_dict:
-                candidate_maps.append((map_key, prod_dict[actual_prod]))
+            if prod in prod_dict:
+                candidate_maps.append((map_key, prod_dict[prod]))
 
     if not candidate_maps:
         return None, None
@@ -364,7 +400,7 @@ def resolve_dataset_map(dataset_products,
 
         # ❌ Ambiguity remains — raise error
         maps_found = [m[0] for m in candidate_maps]
-        raise ValueError(f"❌ Ambiguous product location: '{actual_prod}' found in multiple maps ({maps_found}). Please specify dataset_map.")
+        raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple maps ({maps_found}). Please specify dataset_map.")
 
     # ✅ Single match — return directly
     if verbose:
@@ -373,7 +409,7 @@ def resolve_dataset_map(dataset_products,
 
 
 
-def parse_dataset_info(path, base=None):
+def parse_dataset_info(pathlist, base=None):
     """
     Extract structured metadata from a full dataset path.
     
@@ -383,37 +419,52 @@ def parse_dataset_info(path, base=None):
 
     Returns:
         dict: metadata including source name, version, resolution, product
+
+    Updates:
+
     """
    
+    dataset_info = dataset_defaults()
+
     if base is None:
         base = env["dataset_path"]
     
-    # Handle list of files
-    if isinstance(path, (list, tuple)):
-        if len(path) == 0:
-            raise ValueError("Empty path list provided.")
-        dirnames = {os.path.dirname(p) for p in path}
-        if len(dirnames) > 1:
-            raise ValueError(f"Files span multiple directories: {dirnames}")
-        path = path[0]  # Use first file after validation
-
-    # Normalize to relative path
-    path = os.path.abspath(path)
     base = os.path.abspath(base)
-    relative = path[len(base):].lstrip(os.sep) if path.startswith(base) else path
-
-    parts = relative.split(os.sep)
     
-    if len(parts) < 4:
-        raise ValueError(f"Insufficient path depth: {path}")
+    # Use a cache to avoid re-parsing the same directory structure multiple times
+    dir_cache = {}
+    results = []
 
-    return {
-        "dataset": parts[0],       # OCCCI, CORALSST, etc.
-        "version": parts[1],      # V6.0, V3.1, etc.
-        "dataset_type": parts[2],  # SOURCE, EDAB_PRODUCTS, etc.
-        "dataset_map": parts[3], # NES_4KM_DAILY, etc.
-        "product": parts[4] if len(parts) > 4 else "UNKNOWN"  # CHL, SST, PAR
-    }
+    # Ensure we are working with a list
+    paths = pathlist if isinstance(pathlist, (list, tuple)) else [pathlist]
+
+    for path in paths:
+        # Get directory name - this is the fastest way to categorize files
+        dirname = os.path.dirname(path)
+        if dirname not in dir_cache:
+            # Only perform the expensive string splitting when we see a new directory
+            abs_dir = os.path.abspath(dirname)
+            relative = abs_dir[len(base):].lstrip(os.sep) if abs_dir.startswith(base) else abs_dir
+            parts = relative.split(os.sep)
+
+            if parts and parts[0].upper() in dataset_info:
+                dir_cache[dirname] = {
+                    "dataset": parts[0] if len(parts) > 0 else "UNKNOWN",
+                    "version": parts[1] if len(parts) > 1 else "UNKNOWN",
+                    "dataset_type": parts[2] if len(parts) > 2 else "UNKNOWN",
+                    "dataset_map": parts[3] if len(parts) > 3 else "UNKNOWN",
+                    "product": parts[4] if len(parts) > 4 else "UNKNOWN"
+                }
+            else:
+                dir_cache[dirname] = {
+                    "dataset": "UNKNOWN",
+                    "version": "UNKNOWN",
+                    "dataset_type": "UNKNOWN",
+                    "dataset_map": "UNKNOWN",
+                    "product": "UNKNOWN"
+                }
+        results.append(dir_cache[dirname])
+    return results
 
 """
 def get_dataset_vars(src_ds, requested=None, name=None, min_ndim=2):

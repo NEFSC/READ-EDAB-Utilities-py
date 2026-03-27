@@ -1,11 +1,28 @@
 import os
 import xarray as xr
 import numpy as np
+import warnings
 from datetime import datetime
+import time
+from contextlib import contextmanager
 from collections import defaultdict
+import resource
+import platform
+import traceback
+import gc
+import dask
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import get_period_info, get_period_sets, get_prod_files
+from utilities import product_defaults, get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
 env = bootstrap_environment(verbose=False)
+
+xr.set_options(file_cache_maxsize=1) # Don't keep any unnecessary files open in the background
+"""
+dask.config.set({'distributed.worker.memory.target': 0.6, 
+                 'distributed.worker.memory.spill': 0.7,
+                 'distributed.worker.memory.pause': 0.8,
+                 'distributed.worker.memory.terminate': 0.95})
+"""
 
 """
 STATANOM_UTILITIES creates statistic and anomaly outputs from gridded satellite or modeled data. 
@@ -34,7 +51,16 @@ Modification History
     
 """
 
-    
+def boost_file_limits():
+    """Raises the system limit for open file handles (Linux/Mac only)."""
+    if platform.system() != 'Windows':
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        # Try to set it to 4096, but don't exceed the 'hard' system limit
+        new_limit = min(4096, hard)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
+        print(f"🚀 System: File handle limit boosted to {new_limit}")
+
+
 def get_groupby_hint(period_code):
     """
     Returns the appropriate xarray groupby hint or rolling strategy for a given statistical period code.
@@ -88,31 +114,44 @@ def apply_grouping(da, period_code, time_dim='time'):
 
     return grouped
 
-def compute_stats(grouped, var_name, time_dim, label):
-    return xr.Dataset({
-        f"{var_name}_{label}_mean":   grouped.mean(dim=time_dim, skipna=True),
-        f"{var_name}_{label}_min":    grouped.min(dim=time_dim, skipna=True),
-        f"{var_name}_{label}_max":    grouped.max(dim=time_dim, skipna=True),
-        f"{var_name}_{label}_median": grouped.median(dim=time_dim, skipna=True),
-        f"{var_name}_{label}_std":    grouped.std(dim=time_dim, skipna=True),
-        f"{var_name}_{label}_sum":    grouped.sum(dim=time_dim, skipna=True),
-        f"{var_name}_{label}_var":    grouped.var(dim=time_dim, skipna=True),
-    })
        
-def build_stats_map(prod, period, output_dir,
+def build_stats_map(prod, period, output_dir=None,
                     dataset=None, daterange=None,climatology_range=None,
                     dataset_version=None, dataset_map=None,
-                    subset=None, is_running=True, overwrite=False, verbose=False):
+                    subset=None, is_running=True, overwrite=False, 
+                    data_type="STATS",verbose=False):
     """
     Unified stats pipeline:
-      1) Find input files
-      2) Generate period map via get_period_sets()
-      3) Build output filenames
-      4) Compare mtimes to determine if stats need updating
+      1) Resolve or Create Output Directory
+      2) Find input files
+      3) Generate period map via get_period_sets()
+      4) Build stats map with mtime comparison for 'freshness'
     """
     
     # ---------------------------------------------------------
-    # 1. Determine expected input period (D, M, etc.)
+    # 1. Resolve Output Directory (if not provided)
+    # ---------------------------------------------------------
+    if output_dir is None:
+        if verbose:
+            print(f"🔍 Resolving output directory for {prod} ({period})...")
+        
+        # Use get_prod_files to 'discover' the new path.
+        # Set make_dir=True to create the directory if it does not exist.
+        output_dir = get_prod_files(
+            prod,
+            dataset=dataset,
+            dataset_version=dataset_version,
+            dataset_map=dataset_map,
+            map_region=subset,         # Use 'subset' to override region (GLOBAL -> NES)
+            period=period,      # This triggers Step 7 logic for CLIMS/STATS
+            data_type=data_type,
+            getfilepath=True,
+            make_dir=True,      # Create the folder if it doesn't exist
+            verbose=verbose
+        )
+        print(f"🔍 DEBUG: Output directory for {prod} ({period}) is {output_dir}")
+    # ---------------------------------------------------------
+    # 2. Determine expected input period (D, M, etc.)
     # ---------------------------------------------------------
     per_info = get_period_info(period)
     input_per = per_info["input_period_code"]
@@ -122,30 +161,23 @@ def build_stats_map(prod, period, output_dir,
         per_info["is_running_mean"] = False
 
     # ---------------------------------------------------------
-    # 2. Find input files
+    # 3. Find input files
     # ---------------------------------------------------------
+    search_period = None if input_per == "D" else input_per
+    search_type = None if input_per == "D" else "STATS"
+    
     if verbose:
         print(f"Searching for {input_per} files for {dataset}:{prod}")
 
-    if input_per == "D":
-        files = get_prod_files(prod,
-            dataset=dataset,
-            dataset_version=dataset_version,
-            dataset_map=dataset_map,
-            period=None,
-            data_type=None,
-            verbose=verbose
-        )
-    else:
-        files = get_prod_files(
-            prod,
-            dataset=dataset,
-            dataset_version=dataset_version,
-            dataset_map=dataset_map,
-            period=input_per,
-            data_type="STATS",
-            verbose=verbose
-        )
+    
+    files = get_prod_files(prod,
+        dataset=dataset,
+        dataset_version=dataset_version,
+        dataset_map=dataset_map,
+        period=search_period,
+        data_type=search_type,
+        verbose=verbose
+    )
 
     if not files:
         if verbose:
@@ -153,7 +185,7 @@ def build_stats_map(prod, period, output_dir,
         return {}
 
     # ---------------------------------------------------------
-    # 3. Build period map using get_period_sets()
+    # 4. Build period map using get_period_sets()
     # ---------------------------------------------------------
     period_sets = get_period_sets(period, files=files, daterange=daterange, climatology_range=climatology_range)
     pm = period_sets["period_map"]
@@ -162,25 +194,26 @@ def build_stats_map(prod, period, output_dir,
     # 4. Build stats map with mtime comparison
     # ---------------------------------------------------------
     stats_map = {}
+    total_tasks = len(pm)
+    up_to_date_count = 0
 
     for out_period, info in pm.items():
         input_files = info["input_files"]
 
         # Build output filename
-        out_name = f"{out_period}-STATS.nc"
+        out_name = f"{out_period}-{prod}-{data_type}.nc"
+        print(f"DEBUG: output_dir={output_dir}, out_name={out_name}")
         out_path = os.path.join(output_dir, out_name)
 
         # Determine freshness
-        if os.path.exists(out_path):
+        is_up_to_date = False
+        if os.path.exists(out_path) and not overwrite:
             out_mtime = os.path.getmtime(out_path)
-            in_mtimes = [os.path.getmtime(f) for f in input_files]
-            is_up_to_date = all(out_mtime > m for m in in_mtimes)
-        else:
-            is_up_to_date = False
+            is_up_to_date = all(out_mtime > os.path.getmtime(f) for f in input_files) 
 
-        if overwrite:
-            is_up_to_date = False
-
+        if is_up_to_date:
+            up_to_date_count += 1
+        
         if verbose:
             status = "✓ up-to-date" if is_up_to_date else "⏳ needs update"
             print(f"{out_period}: {status} ({len(input_files)} inputs)")
@@ -191,31 +224,219 @@ def build_stats_map(prod, period, output_dir,
             "is_up_to_date": is_up_to_date
         }
 
+    # ---------------------------------------------------------
+    # 6. Final Summary Report
+    # ---------------------------------------------------------
+    needs_update_count = total_tasks - up_to_date_count
+    completion_pct = (up_to_date_count / total_tasks * 100) if total_tasks > 0 else 0
+
+    print("-" * 60)
+    print(f"📊 STATS SUMMARY: {prod} | {period} | {subset or 'GLOBAL'}")
+    print(f"📁 Output Dir: {output_dir}")
+    print(f"✅ Up-to-date:  {up_to_date_count}/{total_tasks} ({completion_pct:.1f}%)")
+    print(f"⏳ To process:  {needs_update_count} files")
+    print("-" * 60)
+    
     return stats_map
 
 
+def process_single_stat(task, prod, per, verbose, **kwargs):
+        """
+        Processes a single statistical task: opens files, resolves product keys,
+        applies spatial subsetting, computes statistics, and saves to NetCDF.
 
-
-def run_stats_pipeline(prods,
-                       dataset=None, version=None, dataset_map=None,
-                       periods=None, daterange=None, climatology_range=None,
-                       subset=None,
-                       time_dim='time',
-                       is_running=True,
-                       verbose=False
-):
+        Args:
+            task (dict): Dictionary containing 'inputs' (list of paths) and 'output' (path).
+            prod (str): The logical product name (e.g., 'SST').
+            per (str): The time period label (e.g., 'M', 'W').
+            verbose (bool): If True, prints progress updates.
+            **kwargs: Includes 'debug', 'subset', and 'dataset' fallbacks.
+        """
+        
+        boost_file_limits()
     
-    from utilities import product_defaults, get_nc_prod, get_dates
+        @contextmanager
+        def timer(label, debug=False):
+            start = time.perf_counter()
+            yield
+            if debug:  # <--- Check this line!
+                elapsed = time.perf_counter() - start
+                print(f"    ⏱️ {label}: {elapsed:.2f}s")
+
+        # 1. Extract variables from the inputs
+        debug = kwargs.get('debug', False)
+        subset = kwargs.get('subset')
+        out_path = task['output']
+        output_period = per
+        input_files = task['inputs']
+        max_retries = 3    
+
+        # 2. Initialize to None so the finally block doesn't crash
+        ds = None
+        stats_ds = None
+
+        # --- 🔄 RETRY LOOP ---
+        for attempt in range(max_retries):
+
+            # 3. Open the dataset
+            try:                
+                with timer(f"xr.open_mfdataset (Attempt {attempt+1})", debug=debug): # 'with' ensures file handles are released automatically, even on crash.
+                    ds = xr.open_mfdataset(
+                        task['inputs'], 
+                        combine="by_coords",
+                        decode_timedelta=True,
+                        chunks={'time': 1, 'lat': 'auto', 'lon': 'auto'}, 
+                        parallel=False,  # 🚨 CRITICAL: Parallel opening often crashes HDF5 on Mac
+                        engine='netcdf4',
+                        coords='minimal', # Don't waste RAM on redundant coords
+                        compat='override' # Assume all files have the same grid (Fastest)
+                    )
+                        #decode_coords=True,
+                        #chunks={'time': -1}, 
+                        #parallel=True  # parallel=True to speed up coordinate coordinate decoding
+                    
+                break # All files opened successfully
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    if verbose: print(f"  ⚠️  Hiccup on {per} (Attempt {attempt+1}). Retrying in 2s...")
+                    time.sleep(2)
+                    
+                else:
+                    # All retries failed - identify the specific bad file
+                    print(f"❌ FATAL: Could not open all files for {output_period} after {max_retries} attempts.")
+                    corrupt_files = corrupt_file_detector(input_files)
+                    if corrupt_files:
+                        raise RuntimeError(f"Corrupt files found: {corrupt_files}")
+                    else:
+                        raise RuntimeError(f"Handle Error (No corruption detected): {e}")
+        
+
+        # 4. Resolve metadata and prep data
+        try:
+            # 4A. Resolve dataset name for product mapping
+            try: 
+                input_fp = file_parser(input_files[0])
+                ds_name = input_fp[0]['dataset']
+            except Exception as e:
+                if debug: print(f"DEBUG: Failed to parse dataset from files: {e}")
+                ds_name = kwargs.get('dataset') # Fallback
+
+            # 4B. Resolve Variable Name (e.g., 'SST' -> 'sea_surface_temperature')
+            prod_key = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)                
+            da = ds[prod_key]
+            if debug: print(f"dataset product key = {prod_key}")
+                
+            # 4C. Spatial Subsetting & Integrity Check
+            if subset:
+                if verbose: print(f"Subsetting to region: {subset}")
+                da = subset_dataset(da, subset)
+                if da.size == 0:
+                    # This happens if the subset coordinates don't overlap with the file at all
+                    print(f"⚠️ ERROR: Subset '{subset}' resulted in 0 pixels.")
+                    if debug:
+                        # Provide helpful context for why it failed
+                        lon_min, lon_max = ds.lon.min().values, ds.lon.max().values
+                        lat_min, lat_max = ds.lat.min().values, ds.lat.max().values
+                        print(f"    DEBUG: File Extent: Lon({lon_min:.2f} to {lon_max:.2f}), Lat({lat_min:.2f} to {lat_max:.2f})")
+                    return # Skip this task          
+                if debug: print(f"    DEBUG: Subset successful. New Shape: {da.shape}")
+            
+            # 4D. Final Safety Check: Ensure there is data to process
+            if da.size == 0:
+                print(f"⚠️ Warning: DataArray is empty for {prod} after subsetting. Skipping.")
+                return # Exit this task early
+            
+            # 5. Compute the statistics
+            with timer("compute_stats (Graph Building)", debug=debug):
+                stats_ds = compute_stats(da, prod, time_dim='time', label=per, **kwargs)
+            
+            # 6. Write the netcdf file to disk 
+            with timer("stats_ds.to_netcdf (Disk I/O)", debug=debug):
+                #stats_ds.to_netcdf(out_path,engine='netcdf4')
+                with dask.config.set(scheduler='single-threaded'):
+                    stats_ds.to_netcdf(out_path)
+                if verbose: print(f"  ✅ Saved: {os.path.basename(out_path)}")
+                if verbose: print("  🧊 Cooling down for 1.5s...")
+                time.sleep(1.5)
+                        
+        except Exception as e:
+            if debug: raise e # Crash and show traceback in debug mode
+            print(f"❌ Error processing {out_path}: {e}")
+
+        # 7. Clean up all data handles 
+        finally: 
+            try:
+                if 'ds' in locals() and ds is not None: ds.close()
+                if 'stats_ds' in locals() and stats_ds is not None: stats_ds.close()
+            except:
+                pass
+        gc.collect()
+
+def compute_stats(data, var_name, time_dim, label,stats=None, **kwargs):
+    """
+    Computes statistics on a DataArray.
+    
+    stats: list or str. 
+           Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count'
+           Groupings: 'fast' (mean, min, max, count), 'full' (all)
+    """
+    
+    # 1. Define the Available Library
+    stats_library = {
+        'mean':   lambda x: x.mean(dim=time_dim, skipna=True),
+        'min':    lambda x: x.min(dim=time_dim, skipna=True),
+        'max':    lambda x: x.max(dim=time_dim, skipna=True),
+        'median': lambda x: x.median(dim=time_dim, skipna=True),
+        'std':    lambda x: x.std(dim=time_dim, skipna=True),
+        'sum':    lambda x: x.sum(dim=time_dim, skipna=True),
+        'var':    lambda x: x.var(dim=time_dim, skipna=True),
+        'count':  lambda x: x.notnull().sum(dim=time_dim)
+    }
+
+    # 2. Resolve the "Requested" stats
+    if stats is None or stats == 'full':
+        requested = list(stats_library.keys())
+    elif stats == 'fast':
+        requested = ['mean', 'min', 'max', 'count']
+    elif isinstance(stats, str):
+        requested = [stats]
+    else:
+        requested = stats # Assume it's a list: ['mean', 'std']
+
+    # 3. Build the Dataset
+    results = {}
+    for s in requested:
+        if s in stats_library:
+            # Create a clean name: e.g., SST_M_mean
+            col_name = f"{var_name}_{label}_{s}"
+            results[col_name] = stats_library[s](data)
+        else:
+            print(f"⚠️ Warning: Statistics '{s}' is not recognized. Skipping.")
+
+    return xr.Dataset(results)
+
+def run_stats_pipeline(prods, periods=None, **kwargs):
+                       #dataset=None, version=None, dataset_map=None,
+                       #periods=None, daterange=None, climatology_range=None,
+                       #subset=None,
+                       #time_dim='time',
+                       #is_running=True,
+                       #verbose=False):
+    
+    
     """
     Runs a multi-product, multi-period stats pipeline.
 
     For each product in `prods` and each period code in `periods`, this function:
       1. Determines dataset defaults (via product_defaults).
-      2. Locates raw (D/'DD') or derived stats files (all other periods).
+      2. Locates daily (D) source or derived stats files (all other periods).
       3. Opens and subsets those files in time.
       4. Applies xarray grouping or rolling based on period code.
       5. Computes summary statistics (mean, min, max, etc.).
       6. Returns a dict of xr.Dataset results keyed by (prod, period).
+      7. Adds metadata
+      8. Saves output .nc files
 
     Parameters
     ----------
@@ -236,76 +457,112 @@ def run_stats_pipeline(prods,
     results : dict
         {(prod, period): xr.Dataset} of computed statistics.
     """
+
     # Normalize inputs
-    if isinstance(prods, str):
-        prods = [prods]
-    if periods is None:
-        periods = ['W','WEEK','M','MONTH','A','ANNUAL','DOY']
+    if isinstance(prods, str): prods = [prods.upper().strip()]
+    if periods is None: periods = ['W','M','A']
+
+    verbose = kwargs.pop('verbose', False)
+    debug   = kwargs.get('debug', False) # Get it, but don't pop yet if others need it
+
+    # --- 🛡️ THE WARNING FILTER ---
+    # This block controls the "NaN chatter" from Dask/NumPy
+    if not debug:
+        # Hide "All-NaN slice" and "Divide by Zero" warnings
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
+        # Tell NumPy to be quiet about math errors in the background
+        np.seterr(all='ignore')
+        if verbose: print("🤫 Quiet Mode: RuntimeWarnings are hidden.")
+    else:
+        # If Debug is True, we want to see every single warning
+        warnings.filterwarnings('default', category=RuntimeWarning)
+        np.seterr(all='warn')
+        print("🔍 Debug Mode: RuntimeWarnings are visible.")
     
-    # Load PERIOD and PRODUCT defaults
-    period_map = get_period_info()
-    prods_map = product_defaults()
-        
+
+    
+    debug   = kwargs.pop('debug', False)  # 🛠 New Debug Flag
+    dataset = kwargs.pop('dataset',None)
+    subset  = kwargs.get('subset', 'GLOBAL')
+    
+    # 📋 Initialize an error log for the entire run
+    failed_tasks = []
+    failed_months = []   # Track which output files weren't created
+    all_corrupt_inputs = [] # Track specific source files that are broken
+    
     # Loop through prods
     for prod in prods:
-        prod = prod.upper().strip()
-
-        # If prod not provided use the dataset default
-        if not dataset:
-            dataset = prods_map[prod][1]
         # Loop through the periods
-        for per in periods:
+        for period in periods:
+            if verbose:
+                print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
             
             # Create stats period map
-            build_stats_map(prod, period, output_dir,dataset=dataset, daterange=daterange,
-                    dataset_version=None, dataset_map=None,
-                    subset=None, is_running=True, overwrite=False, verbose=False):
-
-            # Is it better to loop through the output files or use the groupby stats? 
-
-            # Open dataset
-            ds = xr.open_mfdataset(files, combine="by_coords")
-            ds = xr.decode_cf(ds)
-
-            # Check that the time coordinate exists in the file
-            if time_dim not in ds.dims and time_dim not in ds.coords:
-                raise ValueError(
-                    f"Time dimension '{time_dim}' not found in {dataset}:{prod} "
-                    f"({datetime.now()})"
-                )
-
-            # Check that the time resolution matches the input period
-
-            # Subset the data based on the input daterange
-            if daterange:
-                dates = get_dates(daterange)
-                ds = ds.sel({time_dim: slice(min(dates), max(dates))})
-
-            # Check that the prod exists in the dataset and extract the dataset product
-            if prod not in ds.data_vars:
-                ncprod = get_nc_prod(ds_name, prod)
-                if ncprod in ds.data_vars:
-                    prod_key = ncprod
-                else:
-                    raise ValueError(
-                        f"Variable '{prod}' not in dataset. "
-                        f"Available: {list(ds.data_vars)} ({datetime.now()})"
-                    )
-            else:
-                prod_key = prod
-
-            da = ds[prod_key]
-
-            # Apply grouping
-            grouped = apply_grouping(da, per, time_dim)
+            stats_map = build_stats_map(prod, period, 
+                                        dataset=dataset,
+                                        verbose=verbose,
+                                        **kwargs
+            )
             
-            # Compute stats
-            stats = compute_stats(grouped, prod, time_dim, label=per)
+                # --- Error Handling for Empty Maps ---
+            if not stats_map:
+                print(f"❌ ERROR: No processing tasks generated for {prod} ({period}).")
+                print(f"   Check: Does {dataset} have {prod} data for the requested daterange?")
+                print(f"   Check: Is the 'subset' ({subset}) correct for this dataset?")
+                continue # Move to the next period/product
+            
+            # 2. Loop through the output tasks in the map
+            for out_period, task in stats_map.items():
+                                
+                # SKIP if already up to date
+                if task['is_up_to_date']:
+                    if verbose: print(f"  ⏭ Skipping {out_period} (Up-to-date)")
+                    continue
+                
+                # SKIP if there are no input files to process
+                if not task['inputs'] or len(task['inputs']) == 0:
+                    if verbose: print(f"  ⚠️ Skipping {out_period}: No source files found for this period.")
+                    continue
+                
+                try:
+                    process_single_stat(task, prod, period, verbose, **kwargs)
+                
+                except Exception as e:
+                    error_info = f"{out_period}: {str(e)}"
+                    failed_tasks.append(error_info)
+                    
+                    print(f"\n❌ Error on {out_period}:")
+                    if debug:
+                        # This prints the "Red Text" traceback without stopping the script
+                        traceback.print_exc() 
+                    else:
+                        print(f"  ⚠️  {e}")
+                        print(f"  ⏩ Skipping {out_period} and moving to next task.")
 
-            if verbose:
-                print(f"✅ Completed stats for {prod}, period '{per}'")
+                if verbose:
+                    print(f"  🛠 Finished attempt for {out_period} ({len(task['inputs'])} files)")    
+                    
+
+    # --- FINAL SUMMARY REPORT ---
+    print("\n" + "="*60)
+    print("🏁 PIPELINE FINISHED SUMMARY")
+    print("="*60)
     
-            return stats
+    if not failed_months and not all_corrupt_inputs:
+        print("✨ Success! All files processed with 0 errors.")
+    else:
+        if failed_months:
+            print(f"\n📂 OUTPUT FILES NOT CREATED ({len(failed_months)}):")
+            for m in failed_months:
+                print(f"  • {m}")
+
+        if all_corrupt_inputs:
+            print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED:")
+            for err in all_corrupt_inputs:
+                print(f"  • {err}")
+            print("\n💡 ACTION: Delete the corrupt files listed above and re-run the pipeline.")
+    
+    print("="*60)
 
 
 

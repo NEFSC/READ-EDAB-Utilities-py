@@ -1025,7 +1025,7 @@ def date_to_daily_period(date_str):
 
     return f"D_{date_str}"
 
-def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range_by_year=False):
+def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range_by_year=True):
     """
     Generate all period tokens for a given period code and date range.
 
