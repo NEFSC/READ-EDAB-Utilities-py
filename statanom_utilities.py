@@ -174,6 +174,7 @@ def build_stats_map(prod, period, output_dir=None,
         dataset=dataset,
         dataset_version=dataset_version,
         dataset_map=dataset_map,
+        map_region=subset,
         period=search_period,
         data_type=search_type,
         verbose=verbose
@@ -351,8 +352,16 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
             with timer("compute_stats (Graph Building)", debug=debug):
                 stats_ds = compute_stats(da, prod, time_dim='time', label=per, **kwargs)
             
+            # 6. Add dimensions to the stats dataset
+            if 'time' not in stats_ds.coords:
+                # Assign it as a coordinate so the file isn't "timeless"
+                reference_time = da.time.values[0] # Use the first time from the original input 'da'
+                stats_ds = stats_ds.expand_dims('time').assign_coords(time=[reference_time])
+            
             # 6. Write the netcdf file to disk 
             with timer("stats_ds.to_netcdf (Disk I/O)", debug=debug):
+                
+                
                 #stats_ds.to_netcdf(out_path,engine='netcdf4')
                 with dask.config.set(scheduler='single-threaded'):
                     stats_ds.to_netcdf(out_path)

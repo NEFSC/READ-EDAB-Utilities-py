@@ -312,7 +312,7 @@ def resolve_dataset_map(dataset_products,
     """
     Resolves the appropriate dataset_map folder for a given product within a dataset structure.
 
-    This function searches across all dataset types (e.g., 'SOURCE', 'EDAB_PRODUCTS') and identifies
+    This function searches across all dataset types (e.g., 'SOURCE', 'PRODUCTS') and identifies
     which map folder (e.g., 'NES_4KM_DAILY', 'GLOBAL_4KM_STATS') contains the requested product.
     It supports filtering by explicit data_type (e.g., 'DAILY', 'STATS', 'ANOMS') and fallback logic
     based on period codes (e.g., 'M', 'D3', 'YEAR').

@@ -314,59 +314,51 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
     
     # --- Step 7: Handle PRODUCTS/STATS/CLIMS/ANOMS Logic ---
     transformed_path = False
-    should_transform = False
-    if period and period not in ['D', 'DD']:
-        should_transform = True
-    if map_region or resolution or data_type:
-        should_transform = True
-    
-    #if period and dataset_map:
-    if should_transform and dataset_map:
-        # Get period metadata
-        p_info = get_period_info(period)
-        
-        # Determine the correct suffix
-        if p_info and p_info.get('is_climatology'):
-            suffix = 'CLIMS'
-        elif period in ['D', 'DD']:
-            suffix = 'DAILY'
-        else:
-            suffix = 'STATS' # Default for ranges/means/months that aren't clims
-        
-        # Manually override for anomalies if requested
-        if kwargs.get('data_type') == 'ANOMS' or 'ANOM' in period:
-            suffix = 'ANOMS'
-
-        # Reconstruct the map folder name (e.g., GLOBAL_4KM_DAILY -> GLOBAL_4KM_STATS)
+    if getfilepath and (kwargs.get('map_region') or kwargs.get('resolution')):
         try:
-            # Parse existing map name to get original inputs (e.g., GLOBAL_4KM_DAILY)
+            # Get suffix from period_info
+            p_info = get_period_info(period)
+            if p_info and p_info[4]: # is_climatology
+                suffix = 'CLIMATOLOGY' if dataset == 'OCCCI' else 'CLIMS'
+            elif period in ['D', 'DD']:
+                suffix = 'DAILY'
+            else:
+                suffix = 'STATS'
+
+            # Manually override for anomalies if requested
+            if kwargs.get('data_type') == 'ANOMS' or (period and 'ANOM' in period):
+                suffix = 'ANOMS'
+
+            # --- Your Original Reconstruction Logic ---
             parts = dataset_map.split('_')
             
-            # Apply Region override (Use 'map' if provided or keep original)
+            # Use map_region/resolution overrides if provided, else keep original
             region = map_region.upper() if map_region else parts[0]
             
-            # Apply Resolution override (Use 'resolution' if provided or keep original)
             if resolution:
                 res_val = str(resolution).upper()
                 resolution_str = res_val if 'KM' in res_val else f"{res_val}KM"
             else:
                 resolution_str = parts[1]
             
-            # Construct the new map_resolution_datatype folder name
             new_map = f"{region}_{resolution_str}_{suffix}"
 
-            # Transform the new physical path
+            # --- Transform the physical path ---
             res_info = parse_dataset_info(path)
             if res_info:
                 info = res_info[0]
+                # Replace the map (e.g., GLOBAL_4KM_DAILY -> NES_2KM_STATS)
                 path = path.replace(info["dataset_map"], new_map)
-                path = path.replace(f'/{info["dataset_type"]}/', "/PRODUCTS/") # Ensure it is pointing to the PRODUCTS top-level directory
+                # Ensure we redirect to /PRODUCTS/ for any derived data
+                if suffix != 'DAILY':
+                    path = path.replace(f'/{info["dataset_type"]}/', "/PRODUCTS/")
             
             dataset_map = new_map 
             transformed_path = True
             verbose_trace(f"📂 Transformed path to {suffix}: {path}", verbose)
         except Exception as e:
             verbose_trace(f"⚠ Path transformation failed: {e}", verbose)
+        
     
     if not dataset_map or not path:
         print(f"⚠ No valid dataset_map found for product '{prod}' with data_type='{data_type}'")

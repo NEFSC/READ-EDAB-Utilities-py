@@ -1811,6 +1811,7 @@ def get_period_sets(
 
                 # Convert to daily period token
                 tok = date_to_daily_period(raw_date)
+                full = tok
             
             results, errors = get_period_dates(tok, diagnostics=True)
             if errors:
@@ -1819,7 +1820,7 @@ def get_period_sets(
             sdt, edt = results
             spans.append((sdt, edt, tok, file))
             input_items.append(tok)
-            prefixes.add(tok.split("_", 1)[0])
+            prefixes.add(full.split("_", 1)[0])
             
 
         if len(prefixes) > 1:
@@ -1936,14 +1937,23 @@ def get_period_sets(
     # Clamp data_start_year to climatology range
     if target_info['is_climatology']: 
         y_clim_start, y_clim_end = climatology_range
-        codes, fulls, seglists, yearslists = extract_period_code([tok for _,_,tok in spans])
-        all_years = [y for years in yearslists for y in years]
-        data_start_year = min(all_years)
-        data_end_year   = max(all_years)        
-        y1 = max([data_start_year, y_clim_start])
-        y2 = min([data_end_year,y_clim_end])
-        start_dt = f"{y1:04d}0101"
-        end_dt   = f"{y2:04d}1231"
+        codes, fulls, seglists, yearslists = extract_period_code([tok for _,_,tok,_ in spans])
+        all_years = vectorized_spans["years"]
+        if len(all_years) > 0:
+            data_start_year = int(np.min(all_years))
+            data_end_year   = int(np.max(all_years))
+                  
+            # --- Clamp the years to the Climatology Range ---
+            y1 = max([data_start_year, y_clim_start]) # The later of (Data Start vs Baseline Start)
+            y2 = min([data_end_year, y_clim_end]) # The earlier of (Data End vs Baseline End)
+            
+            # Re-assign the start/end strings for the output period generation
+            start_dt = f"{y1:04d}0101"
+            end_dt   = f"{y2:04d}1231"
+        else:
+            # Fallback if no years were found
+            start_dt = f"{y_clim_start:04d}0101"
+            end_dt   = f"{y_clim_end:04d}1231"
     
     elif daterange is not None: # Subset input dates based on the daterange
         
