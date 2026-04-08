@@ -14,6 +14,9 @@ import dask
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import get_period_info, get_period_sets, get_prod_files
 from utilities import product_defaults, get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
+from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
+from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value,get_source_metadata
+
 env = bootstrap_environment(verbose=False)
 
 xr.set_options(file_cache_maxsize=1) # Don't keep any unnecessary files open in the background
@@ -275,9 +278,14 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         # 2. Initialize to None so the finally block doesn't crash
         ds = None
         stats_ds = None
+        input_files = task['inputs'].copy()
+        corrupt_files_found = []
 
         # --- 🔄 RETRY LOOP ---
         for attempt in range(max_retries):
+            if not input_files:
+                if verbose: print(f"❌ FATAL: All input files for {per} are corrupt or missing.")
+                return False, corrupt_files_found
 
             # 3. Open the dataset
             try:                
@@ -292,36 +300,55 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                         coords='minimal', # Don't waste RAM on redundant coords
                         compat='override' # Assume all files have the same grid (Fastest)
                     )
-                        #decode_coords=True,
-                        #chunks={'time': -1}, 
-                        #parallel=True  # parallel=True to speed up coordinate coordinate decoding
-                    
-                break # All files opened successfully
-            
+
+                break # Success! All files opened successfully. Escape the retry loop
+                
             except Exception as e:
+
+                # If NOT on the last attempt, try to find the bad files and retry
                 if attempt < max_retries - 1:
                     if verbose: print(f"  ⚠️  Hiccup on {per} (Attempt {attempt+1}). Retrying in 2s...")
-                    time.sleep(2)
+
+                    # Find the bad files
+                    bad_files_info = corrupt_file_detector(input_files)    
                     
-                else:
-                    # All retries failed - identify the specific bad file
-                    print(f"❌ FATAL: Could not open all files for {output_period} after {max_retries} attempts.")
-                    corrupt_files = corrupt_file_detector(input_files)
-                    if corrupt_files:
-                        raise RuntimeError(f"Corrupt files found: {corrupt_files}")
+                    if bad_files_info:
+                        bad_paths = [info[0] for info in bad_files_info] # Isolate the paths so we can remove them
+                        
+                        # Format for the summary report: "filepath (Error)"
+                        formatted_bad = [f"{p} ({err})" for p, err in bad_files_info]
+                        corrupt_files_found.extend(formatted_bad)
+                        
+                        # 🎯 PURGE bad files from the input list for the next attempt
+                        input_files = [f for f in input_files if f not in bad_paths]
+                        
+                        if verbose: print(f"  🗑️ Removed {len(bad_paths)} corrupt files. Retrying...")
                     else:
-                        raise RuntimeError(f"Handle Error (No corruption detected): {e}")
+                        # It failed, but not because of file corruption (e.g., RAM or Dask issue)
+                        if verbose: print(f"  ⚠️  No corrupt files detected. Retrying in 2s...")
+                        time.sleep(2)
+                else: 
+                    pass # Let it fall out of the loop if the LAST attemp still failed
+        
+        # 🚨 SAFE EXIT: If ds is still None after all retries, fail cleanly.
+        if 'ds' not in locals() or ds is None:
+            if verbose: print(f"❌ FATAL: All retries exhausted. Could not open dataset for {per}.")
+            return False, corrupt_files_found
         
 
         # 4. Resolve metadata and prep data
         try:
             # 4A. Resolve dataset name for product mapping
             try: 
+                print(f"parsing {input_files[0]}")
                 input_fp = file_parser(input_files[0])
-                ds_name = input_fp[0]['dataset']
+                ds_name = input_fp[0]['dataset'] 
+                ds_version = input_fp[0].dataset_version
+                print(f"dataset name = {ds_name}, dataset version = {ds_version}")
             except Exception as e:
                 if debug: print(f"DEBUG: Failed to parse dataset from files: {e}")
                 ds_name = kwargs.get('dataset') # Fallback
+                ds_version = kwargs.get('dataset_version') # Fallback
 
             # 4B. Resolve Variable Name (e.g., 'SST' -> 'sea_surface_temperature')
             prod_key = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)                
@@ -340,24 +367,123 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                         lon_min, lon_max = ds.lon.min().values, ds.lon.max().values
                         lat_min, lat_max = ds.lat.min().values, ds.lat.max().values
                         print(f"    DEBUG: File Extent: Lon({lon_min:.2f} to {lon_max:.2f}), Lat({lat_min:.2f} to {lat_max:.2f})")
-                    return # Skip this task          
+                    return False, corrupt_files_found  # Skip this task          
                 if debug: print(f"    DEBUG: Subset successful. New Shape: {da.shape}")
             
             # 4D. Final Safety Check: Ensure there is data to process
             if da.size == 0:
                 print(f"⚠️ Warning: DataArray is empty for {prod} after subsetting. Skipping.")
-                return # Exit this task early
+                return False, corrupt_files_found # Exit this task early
             
             # 5. Compute the statistics
             with timer("compute_stats (Graph Building)", debug=debug):
-                stats_ds = compute_stats(da, prod, time_dim='time', label=per, **kwargs)
+                stats_ds = compute_stats(da, prod, time_dim='time', **kwargs)
             
-            # 6. Add dimensions to the stats dataset
+            # 6. Add variable attributes
+            encoding = {}
+            for var_name in stats_ds.data_vars:
+                var = stats_ds[var_name]
+                fill_value = get_fill_value(var)
+
+                # 🎯 FIX: Use fillna() instead of an undefined valid_mask
+                var_masked = var.fillna(fill_value)
+
+                # If dtype is float64 or float32, cast as float32
+                if np.issubdtype(var_masked.dtype, np.floating):
+                    var_masked = var_masked.astype("float32")
+                    encoding[var_name] = {
+                        "_FillValue": np.float32(fill_value),
+                        "dtype": "float32",
+                        "zlib": True,
+                        "complevel": 4
+                    }
+                else:
+                    encoding[var_name] = {
+                        "_FillValue": fill_value,
+                        "zlib": True,
+                        "complevel": 4
+                    }
+
+                # Assign masked and casted data back
+                stats_ds[var_name] = var_masked
+                
+                # Extract the stat type from the variable name (e.g., "CHL_mean" -> "mean")
+                stat_type = var_name.split('_')[-1]
+                
+                # Use the new helper function to build stat-modified attributes
+                stats_ds[var_name].attrs = build_stat_attributes(prod, stat_type, _FillValue=fill_value)
+                
+                # 🎯 Extract the stat type from the variable name (e.g., "CHL_M_mean" -> "mean")
+                stat_type = var_name.split('_')[-1]
+                
+                # Use the new helper function to build stat-modified attributes
+                stats_ds[var_name].attrs = build_stat_attributes(prod, stat_type, _FillValue=fill_value)
+            
+            # 7. Add dimensions to the stats dataset
             if 'time' not in stats_ds.coords:
                 # Assign it as a coordinate so the file isn't "timeless"
-                reference_time = da.time.values[0] # Use the first time from the original input 'da'
+                reference_time = da.time.values[0] 
                 stats_ds = stats_ds.expand_dims('time').assign_coords(time=[reference_time])
             
+            # 8. Add Global Metadata
+            attrs = get_default_metadata(sheet="General")
+            attrs = attrs | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
+            
+            # Pass the processed stats dataset to fetch accurate bounds and time ranges
+            attrs = attrs | get_geospatial_metadata(dataset=stats_ds)
+            attrs = attrs | get_temporal_metadata(ds=stats_ds)
+
+            # Product Specific Attributes
+            try:
+                base_prod_attrs = build_product_attributes(prod)
+                attrs["product_name"] = base_prod_attrs.get("long_name", prod)
+            except ValueError as e:
+                attrs["product_name"] = prod
+                if debug: print(f"⚠️ {e}")
+
+            try:
+                attrs = attrs | get_summary_metadata(prod)
+            except ValueError as e:
+                if debug: print(f"⚠️ Skipping summary metadata: {e}")
+
+            try:
+                attrs["references"] = get_reference_metadata(prod, refs_only=True)
+            except ValueError as e:
+                if debug: print(f"⚠️ Skipping reference metadata: {e}")
+
+            # 🎯 Refined History Statement
+            input_files = task.get('inputs', [])
+            num_files = len(input_files)
+            
+            if num_files > 0:
+                first_file = os.path.basename(input_files[0])
+                last_file = os.path.basename(input_files[-1])
+                file_stmt = f"Derived from {num_files} input files ranging from {first_file} to {last_file}."
+            else:
+                file_stmt = "No input files provided."
+
+            new_history = (
+                f"{get_current_utc_timestamp()} "
+                f"{attrs['product_name']} statistics were calculated using xarray. "
+                f"{file_stmt} Missing dates or masked pixels were excluded from the aggregation."
+            )
+            
+            # Safely append to existing history if it exists
+            attrs["history"] = f"{attrs['history']}\n{new_history}" if attrs.get("history") else new_history
+                        
+            # 🎯 Source Metadata
+            try:
+                # Make sure dataset and dataset_version variables are defined in your scope
+                # Merges the flat dict returned by get_source_metadata into attrs
+                source_meta = get_source_metadata(ds_name, dataset_version=ds_version, source_prefix="source")
+                attrs = attrs | source_meta
+            except Exception as e:
+                if debug: print(f"⚠️ Warning extracting source metadata: {e}")
+            
+            # Assign global attributes
+            stats_ds.attrs = attrs
+
+                      
             # 6. Write the netcdf file to disk 
             with timer("stats_ds.to_netcdf (Disk I/O)", debug=debug):
                 
@@ -370,8 +496,12 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 time.sleep(1.5)
                         
         except Exception as e:
-            if debug: raise e # Crash and show traceback in debug mode
             print(f"❌ Error processing {out_path}: {e}")
+            if debug: 
+                import traceback
+                traceback.print_exc()
+                #raise e # Crash and show traceback in debug mode
+            return False, corrupt_files_found
 
         # 7. Clean up all data handles 
         finally: 
@@ -381,14 +511,18 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
             except:
                 pass
         gc.collect()
+        return True, corrupt_files_found
 
-def compute_stats(data, var_name, time_dim, label,stats=None, **kwargs):
+def compute_stats(data, var_name, time_dim, label=None, stats=None, **kwargs):
     """
     Computes statistics on a DataArray.
     
+    label: str or None. If provided, included in the output variable name.
     stats: list or str. 
-           Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count'
-           Groupings: 'fast' (mean, min, max, count), 'full' (all)
+           Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count', 'gmean', 'gstd'
+           Groupings: 'fast' (mean, min, max, count)
+                      'full' (all standard linear stats)
+                      'log'  (full + gmean, gstd)
     """
     
     # 1. Define the Available Library
@@ -400,25 +534,37 @@ def compute_stats(data, var_name, time_dim, label,stats=None, **kwargs):
         'std':    lambda x: x.std(dim=time_dim, skipna=True),
         'sum':    lambda x: x.sum(dim=time_dim, skipna=True),
         'var':    lambda x: x.var(dim=time_dim, skipna=True),
-        'count':  lambda x: x.notnull().sum(dim=time_dim)
+        'count':  lambda x: x.notnull().sum(dim=time_dim),
+        
+        # Log-based statistics (Geometric Mean & Std) - Use .where(x > 0) to prevent log(0) or log(negative) errors
+        'gmean':  lambda x: np.exp(np.log(x.where(x > 0)).mean(dim=time_dim, skipna=True)),
+        'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).std(dim=time_dim, skipna=True))
     }
+
+    # Define standard grouping
+    standard_stats = ['mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count']
 
     # 2. Resolve the "Requested" stats
     if stats is None or stats == 'full':
-        requested = list(stats_library.keys())
+        requested = standard_stats
     elif stats == 'fast':
         requested = ['mean', 'min', 'max', 'count']
+    elif stats == 'log':
+        requested = standard_stats + ['gmean', 'gstd']
     elif isinstance(stats, str):
         requested = [stats]
     else:
-        requested = stats # Assume it's a list: ['mean', 'std']
+        requested = stats # Assume it's a user-provided list
 
     # 3. Build the Dataset
     results = {}
     for s in requested:
         if s in stats_library:
-            # Create a clean name: e.g., SST_M_mean
-            col_name = f"{var_name}_{label}_{s}"
+            # Conditionally include the label in the variable name if provided
+            if label:
+                col_name = f"{var_name}_{label}_{s}"
+            else:
+                col_name = f"{var_name}_{s}"
             results[col_name] = stats_library[s](data)
         else:
             print(f"⚠️ Warning: Statistics '{s}' is not recognized. Skipping.")
@@ -495,8 +641,9 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     subset  = kwargs.get('subset', 'GLOBAL')
     
     # 📋 Initialize an error log for the entire run
+    successful_tasks = []
     failed_tasks = []
-    failed_months = []   # Track which output files weren't created
+    skipped_tasks = []
     all_corrupt_inputs = [] # Track specific source files that are broken
     
     # Loop through prods
@@ -526,6 +673,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                 # SKIP if already up to date
                 if task['is_up_to_date']:
                     if verbose: print(f"  ⏭ Skipping {out_period} (Up-to-date)")
+                    skipped_tasks.append(out_period)
                     continue
                 
                 # SKIP if there are no input files to process
@@ -534,7 +682,16 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                     continue
                 
                 try:
-                    process_single_stat(task, prod, period, verbose, **kwargs)
+                    success, corrupt_files = process_single_stat(task, prod, period, verbose, **kwargs)
+                    
+                    # If any corrupt files were found, add them to the main list
+                    if corrupt_files:
+                        all_corrupt_inputs.extend(corrupt_files)
+                    
+                    if success:
+                        successful_tasks.append(out_period)
+                    else:
+                        failed_tasks.append(out_period)
                 
                 except Exception as e:
                     error_info = f"{out_period}: {str(e)}"
@@ -542,7 +699,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                     
                     print(f"\n❌ Error on {out_period}:")
                     if debug:
-                        # This prints the "Red Text" traceback without stopping the script
+                        import traceback
                         traceback.print_exc() 
                     else:
                         print(f"  ⚠️  {e}")
@@ -557,13 +714,20 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     print("🏁 PIPELINE FINISHED SUMMARY")
     print("="*60)
     
-    if not failed_months and not all_corrupt_inputs:
+    total_processed = len(successful_tasks) + len(failed_tasks)
+
+    if not failed_tasks and not all_corrupt_inputs:
         print("✨ Success! All files processed with 0 errors.")
     else:
-        if failed_months:
-            print(f"\n📂 OUTPUT FILES NOT CREATED ({len(failed_months)}):")
-            for m in failed_months:
-                print(f"  • {m}")
+        print(f"⚠️ Pipeline finished with ERRORS.")
+        print(f"✅ Successfully processed: {len(successful_tasks)}")
+        print(f"⏭  Skipped (up-to-date): {len(skipped_tasks)}")
+        print(f"❌ Failed tasks: {len(failed_tasks)}")
+        
+        if failed_tasks:
+            print(f"\n📂 FAILED TASKS (Output not created):")
+            for task in failed_tasks:
+                print(f"  • {task}")
 
         if all_corrupt_inputs:
             print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED:")

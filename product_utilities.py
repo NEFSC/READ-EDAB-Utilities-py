@@ -314,23 +314,44 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
     
     # --- Step 7: Handle PRODUCTS/STATS/CLIMS/ANOMS Logic ---
     transformed_path = False
-    if getfilepath and (kwargs.get('map_region') or kwargs.get('resolution')):
+    
+    # 🎯 TRIGGER LOGIC:
+    # Transform if we are writing an output path (getfilepath=True)
+    # OR if we are searching for derived products (period is 'M', 'MONTH', etc.)
+    # OR if a derived data_type was explicitly requested
+    
+    is_derived_period = period and period not in ['D', 'DD']
+    is_derived_type = data_type in ['STATS', 'ANOMS', 'CLIMS']
+    
+    #if getfilepath and (kwargs.get('map_region') or kwargs.get('resolution')):
+    if getfilepath or is_derived_period or is_derived_type:    
         try:
             # Get suffix from period_info
-            p_info = get_period_info(period)
-            if p_info and p_info[4]: # is_climatology
-                suffix = 'CLIMATOLOGY' if dataset == 'OCCCI' else 'CLIMS'
+            p_info = get_period_info(period) if period else None
+            
+            # 🎯 Safely check for climatology (handles both dicts and tuples)
+            is_clim = False
+            if isinstance(p_info, dict):
+                is_clim = p_info.get('is_climatology', False)
+            elif isinstance(p_info, tuple) and len(p_info) > 4:
+                is_clim = p_info[4]
+            
+            # Determine Suffix (Daily, Stats, or Climatology)
+            if is_clim: 
+                suffix = 'CLIMS'
             elif period in ['D', 'DD']:
                 suffix = 'DAILY'
+            elif is_derived_type:
+                suffix = data_type
             else:
                 suffix = 'STATS'
 
             # Manually override for anomalies if requested
-            if kwargs.get('data_type') == 'ANOMS' or (period and 'ANOM' in period):
+            if data_type == 'ANOMS' or (period and 'ANOM' in period):
                 suffix = 'ANOMS'
 
-            # --- Your Original Reconstruction Logic ---
-            parts = dataset_map.split('_')
+            # --- Reconstruction Logic ---
+            parts = dataset_map.split('_') if dataset_map else ['GLOBAL', '4KM']
             
             # Use map_region/resolution overrides if provided, else keep original
             region = map_region.upper() if map_region else parts[0]
@@ -339,7 +360,7 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
                 res_val = str(resolution).upper()
                 resolution_str = res_val if 'KM' in res_val else f"{res_val}KM"
             else:
-                resolution_str = parts[1]
+                resolution_str = parts[1] if len(parts) > 1 else '4KM'
             
             new_map = f"{region}_{resolution_str}_{suffix}"
 
@@ -349,8 +370,10 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
                 info = res_info[0]
                 # Replace the map (e.g., GLOBAL_4KM_DAILY -> NES_2KM_STATS)
                 path = path.replace(info["dataset_map"], new_map)
-                # Ensure we redirect to /PRODUCTS/ for any derived data
-                if suffix != 'DAILY':
+                
+                # Ensure we redirect to /PRODUCTS/ for any derived data 
+                # OR if we are subsetting a region (e.g. GLOBAL -> NES)
+                if suffix != 'DAILY' or region != parts[0]:
                     path = path.replace(f'/{info["dataset_type"]}/', "/PRODUCTS/")
             
             dataset_map = new_map 

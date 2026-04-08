@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import xarray as xr
 import stat
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import parse_dataset_info, extract_period_code, get_period_info, get_period_dates
@@ -225,25 +226,28 @@ def set_file_permissions(filepath,desired_permissions=0o664):
         print(f"An unexpected error occurred: {e}")
 
 def corrupt_file_detector(file_list):
-    """Deep-dives into a list of files to find the specific 'bad' one."""
+    """Deep-dives into a list of files to find specific 'bad' ones."""
     issues = []
     for f in file_list:
         # Check 1: Does it exist?
         if not os.path.exists(f):
-            issues.append(f"{f} (File Missing)")
+            # 🎯 CHANGED: Now appending a tuple (filepath, error_reason)
+            issues.append((f, "File Missing"))
             continue
         
         # Check 2: Can we read it? (Permissions)
         if not os.access(f, os.R_OK):
-            issues.append(f"{f} (Permission Denied)")
+            # 🎯 CHANGED: Tuple
+            issues.append((f, "Permission Denied"))
             continue
 
         # Check 3: Is it a valid NetCDF?
         try:
-            with xr.open_dataset(f, engine='netcdf4') as test:
-                # Trigger a load of the coordinates and one data point
+            with xr.open_dataset(f, engine='netcdf4', decode_timedelta=False) as test:
+                # Trigger a load of the coordinates to ensure it's not truncated
                 _ = test.coords.to_dataset().load()
         except Exception as e:
-            issues.append(f"{f} (Corrupt/Invalid: {str(e)})")
+            # 🎯 CHANGED: Tuple
+            issues.append((f, f"Corrupt/Invalid: {str(e)}"))
             
     return issues
