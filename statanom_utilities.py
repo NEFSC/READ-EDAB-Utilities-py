@@ -339,20 +339,34 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         # 4. Resolve metadata and prep data
         try:
             # 4A. Resolve dataset name for product mapping
-            try: 
-                print(f"parsing {input_files[0]}")
+            try:
                 input_fp = file_parser(input_files[0])
-                ds_name = input_fp[0]['dataset'] 
-                ds_version = input_fp[0].dataset_version
-                print(f"dataset name = {ds_name}, dataset version = {ds_version}")
+                ds_name = input_fp[0].get('dataset') 
+                ds_version = input_fp[0].get('dataset_version')
+                
             except Exception as e:
-                if debug: print(f"DEBUG: Failed to parse dataset from files: {e}")
-                ds_name = kwargs.get('dataset') # Fallback
-                ds_version = kwargs.get('dataset_version') # Fallback
+                print(f"⚠️ Error with file parsing: {e}")                
+                ds_name = kwargs.get('dataset', 'UNKNOWN') 
+                ds_version = kwargs.get('dataset_version', 'UNKNOWN') 
+
+            if ds_name: ds_name = ds_name.upper()
 
             # 4B. Resolve Variable Name (e.g., 'SST' -> 'sea_surface_temperature')
-            prod_key = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)                
-            da = ds[prod_key]
+            mean_var_name = f"{prod}_mean"             # e.g., 'SST_mean'             
+            # Prioritize the 'mean' variable if reading derived stats (e.g., monthly files)
+            if mean_var_name in ds.data_vars:
+                prod_key = mean_var_name
+                if verbose: print(f"  🎯 Derived data detected: Using '{prod_key}' for calculations.")
+            else:
+                prod_key = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)
+            
+            # Extract the DataArray safely
+            try:
+                da = ds[prod_key]
+            except KeyError:
+                raise KeyError(f"❌ Data variable not found. Looked for '{mean_var_name}' and '{prod_key}'. "
+                               f"Available variables: {list(ds.data_vars.keys())}")
+                
             if debug: print(f"dataset product key = {prod_key}")
                 
             # 4C. Spatial Subsetting & Integrity Check
@@ -482,15 +496,19 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
             
             # Assign global attributes
             stats_ds.attrs = attrs
-
                       
             # 6. Write the netcdf file to disk 
             with timer("stats_ds.to_netcdf (Disk I/O)", debug=debug):
                 
-                
-                #stats_ds.to_netcdf(out_path,engine='netcdf4')
-                with dask.config.set(scheduler='single-threaded'):
-                    stats_ds.to_netcdf(out_path)
+                import warnings
+                # 🎯 Temporarily mute the expected NaN math warnings during the save step
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    
+                    # Force single-threaded execution to prevent Mac HDF5/NetCDF crashes
+                    with dask.config.set(scheduler='single-threaded'):
+                        stats_ds.to_netcdf(out_path)
+                        
                 if verbose: print(f"  ✅ Saved: {os.path.basename(out_path)}")
                 if verbose: print("  🧊 Cooling down for 1.5s...")
                 time.sleep(1.5)
@@ -615,7 +633,10 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
 
     # Normalize inputs
     if isinstance(prods, str): prods = [prods.upper().strip()]
-    if periods is None: periods = ['W','M','A']
+    if periods is None: 
+        periods = ['W', 'M', 'A']
+    elif isinstance(periods, str):
+        periods = [periods]
 
     verbose = kwargs.pop('verbose', False)
     debug   = kwargs.get('debug', False) # Get it, but don't pop yet if others need it
@@ -633,8 +654,6 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         warnings.filterwarnings('default', category=RuntimeWarning)
         np.seterr(all='warn')
         print("🔍 Debug Mode: RuntimeWarnings are visible.")
-    
-
     
     debug   = kwargs.pop('debug', False)  # 🛠 New Debug Flag
     dataset = kwargs.pop('dataset',None)
