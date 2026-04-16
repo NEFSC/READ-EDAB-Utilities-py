@@ -314,13 +314,57 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
     
     # --- Step 7: Handle PRODUCTS/STATS/CLIMS/ANOMS Logic ---
     transformed_path = False
-    
-    # 🎯 TRIGGER LOGIC:
-    # Transform if we are writing an output path (getfilepath=True)
-    # OR if we are searching for derived products (period is 'M', 'MONTH', etc.)
-    # OR if a derived data_type was explicitly requested
-    
+    # 🎯 TRIGGER LOGIC: Transform if writing outputs or looking for derived periods
     is_derived_period = period and period not in ['D', 'DD']
+    if getfilepath or is_derived_period or data_type == 'ANOMS':    
+        try:
+            # Get period_info dictionary/tuple
+            p_info = get_period_info(period) if period else {}
+            folder_name = p_info.get('folder_name')
+            # Determine Suffix dynamically based entirely on period_info
+            if folder_name:
+                suffix = folder_name.upper() # e.g., 'MONTHLY', 'CLIMATOLOGY', 'WEEKLY'
+            else:
+                # Fail-safe: Use data_type if provided, otherwise default to 'DERIVED'
+                suffix = data_type.upper() if data_type else 'DERIVED'
+            
+            # Manually override for anomalies if requested
+            if data_type == 'ANOMS' or (period and 'ANOM' in period):
+                suffix = 'ANOMS'
+
+            # --- Reconstruction Logic ---
+            parts = dataset_map.split('_') if dataset_map else ['GLOBAL', '4KM']
+            
+            # Use map_region/resolution overrides if provided, else keep original
+            region = map_region.upper() if map_region else parts[0]
+            
+            if resolution:
+                res_val = str(resolution).upper()
+                resolution_str = res_val if 'KM' in res_val else f"{res_val}KM"
+            else:
+                resolution_str = parts[1] if len(parts) > 1 else '4KM'
+            
+            # 🎯 NEW MAP: e.g., NES_2KM_MONTHLY or NES_2KM_CLIMATOLOGY
+            new_map = f"{region}_{resolution_str}_{suffix}"
+
+            # --- Transform the physical path ---
+            res_info = parse_dataset_info(path)
+            if res_info:
+                info = res_info[0]
+                # Replace the old map string with the new elegant one
+                path = path.replace(info["dataset_map"], new_map)
+                
+                # Ensure we redirect to /PRODUCTS/ for any derived data 
+                # OR if we are subsetting a region (e.g. GLOBAL -> NES)
+                if suffix != 'DAILY' or region != parts[0]:
+                    path = path.replace(f'/{info["dataset_type"]}/', "/PRODUCTS/")
+            
+            dataset_map = new_map 
+            transformed_path = True
+            verbose_trace(f"📂 Transformed path to {suffix}: {path}", verbose)
+        except Exception as e:
+            verbose_trace(f"⚠ Path transformation failed: {e}", verbose)
+    """
     is_derived_type = data_type in ['STATS', 'ANOMS', 'CLIMS']
     
     #if getfilepath and (kwargs.get('map_region') or kwargs.get('resolution')):
@@ -381,7 +425,7 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
             verbose_trace(f"📂 Transformed path to {suffix}: {path}", verbose)
         except Exception as e:
             verbose_trace(f"⚠ Path transformation failed: {e}", verbose)
-        
+    """ 
     
     if not dataset_map or not path:
         print(f"⚠ No valid dataset_map found for product '{prod}' with data_type='{data_type}'")

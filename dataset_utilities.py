@@ -313,9 +313,8 @@ def resolve_dataset_map(dataset_products,
     Resolves the appropriate dataset_map folder for a given product within a dataset structure.
 
     This function searches across all dataset types (e.g., 'SOURCE', 'PRODUCTS') and identifies
-    which map folder (e.g., 'NES_4KM_DAILY', 'GLOBAL_4KM_STATS') contains the requested product.
-    It supports filtering by explicit data_type (e.g., 'DAILY', 'STATS', 'ANOMS') and fallback logic
-    based on period codes (e.g., 'M', 'D3', 'YEAR').
+    which map folder (e.g., 'NES_4KM_DAILY', 'GLOBAL_4KM_MONTHLY') contains the requested product.
+    It supports filtering by explicit data_type and fallback logic based on period codes (e.g., 'M', 'D3', 'YEAR').
 
     Parameters
     ----------
@@ -380,7 +379,36 @@ def resolve_dataset_map(dataset_products,
                     print(f"⚠ No map folder found for data_type='{data_type}'")
                 return None, None
 
-        # ✅ Otherwise, fall back to period-based logic
+        # ✅ Period-based logic (Using folder_name from period_inf0))
+        p_info = get_period_info(period) if period else {}
+        folder_name = p_info.get('folder_name')
+        if folder_name:
+            target_suffix = folder_name.upper()
+        else:
+            target_suffix = 'DERIVED'
+
+        # Try to find an exact match for the target period (e.g., _MONTHLY)
+        target_maps = [m for m in candidate_maps if m[0].endswith(f"_{target_suffix}")]
+
+        if target_maps:
+            if provenance_log is not None:
+                provenance_log['resolution_steps'].append(f"Matched {target_suffix} map for period '{period}' → {target_maps[0][0]}")
+            if verbose:
+                print(f"📊 Matched {target_suffix} map → {target_maps[0][0]}")
+            return target_maps[0]
+
+        # ✅ 3. Fallback to DAILY base map
+        # If the derived map doesn't exist yet, default to DAILY so the pipeline can transform it later
+        daily_maps = [m for m in candidate_maps if m[0].endswith('_DAILY')]
+        
+        if daily_maps:
+            if provenance_log is not None:
+                provenance_log['resolution_steps'].append(f"Defaulted to base DAILY map → {daily_maps[0][0]}")
+            if verbose:
+                print(f"📦 Defaulted to base DAILY map → {daily_maps[0][0]}")
+            return daily_maps[0]
+
+        """
         daily_maps = [m for m in candidate_maps if m[0].endswith('_DAILY')]
         stats_maps = [m for m in candidate_maps if m[0].endswith('_STATS')]
 
@@ -397,11 +425,11 @@ def resolve_dataset_map(dataset_products,
             if verbose:
                 print(f"📊 Defaulted to STATS map → {stats_maps[0][0]}")
             return stats_maps[0]
-
+        """
         # ❌ Ambiguity remains — raise error
         maps_found = [m[0] for m in candidate_maps]
         raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple maps ({maps_found}). Please specify dataset_map.")
-
+    
     # ✅ Single match — return directly
     if verbose:
         print(f"📦 Auto-resolved dataset_map → {candidate_maps[0][0]}")

@@ -183,6 +183,14 @@ def build_stats_map(prod, period, output_dir=None,
         verbose=verbose
     )
 
+    # Check if the list is empty FIRST!
+    if not files:
+        if verbose: print(f"⚠️ No input files found for {prod} ({period}). Returning empty map.")
+        return {} # Return an empty map so the pipeline cleanly skips it
+
+    fp = file_parser(files[0])
+    ds_name = fp[0].get('dataset') 
+
     if not files:
         if verbose:
             print(f"No {input_per} files found for {dataset}:{prod}")
@@ -205,7 +213,7 @@ def build_stats_map(prod, period, output_dir=None,
         input_files = info["input_files"]
 
         # Build output filename
-        out_name = f"{out_period}-{prod}-{data_type}.nc"
+        out_name = f"{out_period}-{ds_name}-{prod}-{subset or 'GLOBAL'}-{data_type}.nc"
         print(f"DEBUG: output_dir={output_dir}, out_name={out_name}")
         out_path = os.path.join(output_dir, out_name)
 

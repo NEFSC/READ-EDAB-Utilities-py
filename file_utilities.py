@@ -69,8 +69,10 @@ def file_parser(files):
     file_dates = get_file_dates(files)
 
     # 3. Extract period specific information if available
-    period_code, full_period, _, _ = extract_period_code(files)
-    
+    perinfo = extract_period_code(files)
+    percode = [info['code'] for info in perinfo]
+    fullperiod = [info['full_period'] for info in perinfo]
+        
     # 4. Loop through files to add information
     results = []
     
@@ -90,14 +92,14 @@ def file_parser(files):
         }
 
         # Add period info if it was found in Step 3        
-        if period_code is not None:
-            icode = period_code[i]
+        if percode is not None:
+            icode = percode[i]
             if icode is not None:
                 period_info = get_period_info(icode)
-                period_dates = get_period_dates(full_period[i])
+                period_dates = get_period_dates(fullperiod[i])
                 file_entry['period_details'] = {
                     'period_code': icode,
-                    'period_full_code': full_period[i],
+                    'period_full_code': fullperiod[i],
                     'metadata': get_period_info(icode)
                 }
         else:
