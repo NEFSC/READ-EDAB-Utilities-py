@@ -179,21 +179,6 @@ def get_nc_prod(dataset,product):
 
 def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=False, verbose=False, **kwargs):
     """
-    prod,
-    dataset=None,
-    dataset_version=None,
-    dataset_type=None,
-    dataset_map=None, 
-    map=None,
-    resolution=None,
-    data_type=None,
-    prod_type=None,
-    period=None,
-    getfilepath=False,
-    make_dir=False,
-    verbose=False):
-    """
-    """
     Retrieves NetCDF files for a specified product from a structured dataset directory.
 
     This function resolves the correct path based on product metadata, dataset defaults,
@@ -202,29 +187,29 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
 
     Parameters:
     ----------
-    prod : str
+    prod: str
         Product name (e.g. 'CHL', 'PSC', 'SST').
-    dataset : str, optional
+    dataset: str, optional
         Dataset name (e.g. 'OCCCI', 'ACSPO'). Defaults to product's default dataset.
-    dataset_version : str, optional
+    dataset_version: str, optional
         Version string (e.g. 'V6.0'). Defaults to dataset default.
-    dataset_type : str, optional
+    dataset_type: str, optional
         Type of dataset folder (e.g. 'SOURCE' or 'PRODUCTS'). Defaults to product default in product_defaults().
-    dataset_map : str, optional
+    dataset_map: str, optional
         Specific map folder (e.g. 'NES_4KM_DAILY'). If not provided, will be auto-resolved.
-    map : str, optional
+    map_region: str, optional
         Map region (e.g. 'NES', 'GLOBAL'). Used for fallback resolution.
-    resolution : str, optional
+    resolution: str, optional
         Resolution in km (e.g. '4', '25'). Used for fallback resolution.
-    type : str, optional
+    type: str, optional
         Data type (e.g. 'DAILY', 'STATS', 'ANOMS'). Used for fallback resolution.
-    prod_type : str, optional
+    prod_type: str, optional
         Subfolder under product (e.g. 'ANOMALY', 'CLIMATOLOGY').
-    period : str, optional
+    period: str, optional
         Period code (e.g. 'M', 'D3', 'YEAR'). Used to redirect to *_STATS folders.
-    getfilepath : bool, optional
+    getfilepath: bool, optional
         If True, returns the resolved path instead of listing files.
-    verbose : bool, optional
+    verbose: bool, optional
         If True, prints detailed resolution steps.
 
     Returns:

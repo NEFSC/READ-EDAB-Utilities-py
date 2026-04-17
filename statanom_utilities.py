@@ -221,7 +221,31 @@ def build_stats_map(prod, period, output_dir=None,
         is_up_to_date = False
         if os.path.exists(out_path) and not overwrite:
             out_mtime = os.path.getmtime(out_path)
-            is_up_to_date = all(out_mtime > os.path.getmtime(f) for f in input_files) 
+            
+            # Check 1: Does the output file have a newer mtime than ALL current inputs?
+            mtime_ok = all(out_mtime > os.path.getmtime(f) for f in input_files)
+            if mtime_ok:
+                # Check 2: Does the internal list of files perfectly match our current list?
+                try:
+                    # Use xarray to quickly peek at the attributes (no decoding saves time/RAM)
+                    import xarray as xr
+                    with xr.open_dataset(out_path, engine='netcdf4', decode_times=False, decode_coords=False) as existing_ds:
+                        stored_files_str = existing_ds.attrs.get('source_files', '')
+                        
+                    if stored_files_str:
+                        # Convert both to sets so order doesn't matter
+                        stored_basenames = set(f.strip() for f in stored_files_str.split(','))
+                        current_basenames = set(os.path.basename(f) for f in input_files)
+                        
+                        # If the sets match perfectly, it is truly up-to-date!
+                        is_up_to_date = (stored_basenames == current_basenames)
+                    else:
+                        # If the attribute doesn't exist (e.g., an old run), force an update
+                        is_up_to_date = False
+                        
+                except Exception as e:
+                    if verbose: print(f"  ⚠️ Could not read attributes of {out_name}: {e}. Forcing update.")
+                    is_up_to_date = False
 
         if is_up_to_date:
             up_to_date_count += 1
@@ -478,8 +502,10 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
             num_files = len(input_files)
             
             if num_files > 0:
-                first_file = os.path.basename(input_files[0])
-                last_file = os.path.basename(input_files[-1])
+                input_basenames = [os.path.basename(f) for f in input_files]
+                source_files_str = ", ".join(input_basenames)
+                first_file = input_basenames[0]
+                last_file = input_basenames[-1]
                 file_stmt = f"Derived from {num_files} input files ranging from {first_file} to {last_file}."
             else:
                 file_stmt = "No input files provided."
@@ -492,6 +518,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
             
             # Safely append to existing history if it exists
             attrs["history"] = f"{attrs['history']}\n{new_history}" if attrs.get("history") else new_history
+            stats_ds.attrs['source_files'] = source_files_str  
                         
             # 🎯 Source Metadata
             try:

@@ -26,7 +26,7 @@ def map_subset_defaults():
 
     # The default source data location and product for each dataset
     subset_map_info = {
-        'NES': {'lat_min':34.0,'lat_max':46.0,'lon_min':-79.0,'lon_max':-61.0},
+        'NES': {'lat_min':34.0,'lat_max':47.0,'lon_min':-79.0,'lon_max':-61.0},
         'NWA': {'lat_min':22.5,'lat_max':48.5,'lon_min':-82.5,'lon_max':-51.5},
         'GLOBAL': {'lat_min':-90.0,'lat_max':90.0,'lon_min':-180.0,'lon_max':-180.0}
     }
