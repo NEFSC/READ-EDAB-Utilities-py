@@ -11,6 +11,7 @@ import platform
 import traceback
 import gc
 import dask
+import concurrent.futures
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import get_period_info, get_period_sets, get_prod_files
 from utilities import product_defaults, get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
@@ -54,6 +55,28 @@ Modification History
     
 """
 
+class DualLogger:
+    """
+    Intercepts standard print statements and writes them to 
+    both the terminal and a persistent log file simultaneously.
+    """
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, "a", encoding="utf-8")
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush() # Force write to disk immediately (crucial for parallel processing)
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+        
+    def close(self):
+        self.log.close()
+
+
 def boost_file_limits():
     """Raises the system limit for open file handles (Linux/Mac only)."""
     if platform.system() != 'Windows':
@@ -62,60 +85,6 @@ def boost_file_limits():
         new_limit = min(4096, hard)
         resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
         print(f"🚀 System: File handle limit boosted to {new_limit}")
-
-
-def get_groupby_hint(period_code):
-    """
-    Returns the appropriate xarray groupby hint or rolling strategy for a given statistical period code.
-
-    Parameters:
-    ----------
-    period_code (str): The code representing the statistical period (e.g. 'D', 'W', 'M3', 'SEASON').
-
-    Returns:
-    -------
-    dict
-        Dictionary with keys:
-            - method: 'groupby', 'rolling', or 'custom'
-            - key: xarray groupby key or rolling window size
-            - notes: optional clarification
-    """
-    info = get_period_info(period_code)
-    if not info:
-        return {'method': 'unknown', 'key': None, 'notes': f'Unrecognized period code: {period_code}'}
-
-    _, _, is_range, is_running, is_climatology, iso_duration, groupby_key, *_ = info
-    
-    if is_running:
-        return {'method': 'rolling', 'key': groupby_key, 'notes': f'{period_code} uses rolling window'}
-    elif is_range:
-        return {'method': 'custom', 'key': None, 'notes': f'{period_code} is a range period'}
-    elif is_climatology:
-        return {'method': 'groupby', 'key': groupby_key, 'notes': f'{period_code} is climatological'}
-    elif groupby_key:
-        return {'method': 'groupby', 'key': groupby_key, 'notes': f'{period_code} uses standard groupby'}
-    else:
-        return {'method': 'custom', 'key': None, 'notes': f'{period_code} requires custom logic'}
-
-def apply_grouping(da, period_code, time_dim='time'):
-    """
-    Applies the appropriate grouping or rolling logic to a DataArray
-    based on the period_code.
-    """
-    hint = get_groupby_hint(period_code)
-    method = hint['method']
-    key = hint['key']
-
-    if method == 'groupby':
-        grouped = da.groupby(eval(f"da.{key}"))
-    elif method == 'rolling':
-        grouped = da.rolling({time_dim: key}, center=True)
-    elif method == 'custom':
-        raise NotImplementedError(f"Custom logic required for period '{period_code}'")
-    else:
-        raise ValueError(f"Unknown grouping method for period '{period_code}'")
-
-    return grouped
 
        
 def build_stats_map(prod, period, output_dir=None,
@@ -275,6 +244,109 @@ def build_stats_map(prod, period, output_dir=None,
     
     return stats_map
 
+def preprocess_dataset(ds, prod, verbose=False):
+    """
+    Intercepts an xarray Dataset to perform product-specific math 
+    and define the target variables before statistical aggregation.
+    """
+    target_vars = []
+    
+    if prod == 'PSC':
+        if verbose: print("  🧪 Pre-computing absolute PSC concentrations...")
+        
+        # 1. Check if we are looking at raw data or derived data
+        # If 'PSC_fmicro_mean' exists, skip because the math is already done
+        if 'PSC_fmicro_mean' in ds.data_vars:
+            target_vars = [v for v in ds.data_vars if v.endswith('_mean')]
+            
+        # Otherwise, this is a raw daily file. Do the math!
+        elif all(v in ds.data_vars for v in ['PSC_fmicro', 'PSC_fnano', 'PSC_fpico', 'CHL']):
+            # Calculate absolute fractions
+            ds['PSC_micro'] = ds['PSC_fmicro'] * ds['CHL']
+            ds['PSC_nano']  = ds['PSC_fnano']  * ds['CHL']
+            ds['PSC_pico']  = ds['PSC_fpico']  * ds['CHL']
+            
+            # Explicitly define which variables to run stats on
+            target_vars = [
+                'PSC_fmicro', 'PSC_fnano', 'PSC_fpico', 
+                'PSC_micro', 'PSC_nano', 'PSC_pico', 'CHL'
+            ]
+        else:
+            if verbose: print("  ⚠️ Missing required base variables for PSC math.")
+
+    else:
+        # --- DEFAULT BEHAVIOR for standard products like SST, CHL, etc. ---
+        mean_var_name = f"{prod}_mean"
+        
+        # Prioritize the 'mean' variable if we are reading derived stats
+        if mean_var_name in ds.data_vars:
+            target_vars = [mean_var_name]
+        else:
+            # Fallback to your original lookup logic
+            # (Assuming get_nc_prod is available here, or pass ds_name into this function)
+            target_vars = [prod if prod in ds.data_vars else get_nc_prod('dataset_name', prod)]
+
+    # Store the target variables as an attribute so the pipeline knows what to do
+    ds.attrs['pipeline_target_vars'] = target_vars
+    return ds
+
+def compute_stats(data, var_name, time_dim, label=None, stats=None, **kwargs):
+    """
+    Computes statistics on a DataArray.
+    
+    label: str or None. If provided, included in the output variable name.
+    stats: list or str. 
+           Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count', 'gmean', 'gstd'
+           Groupings: 'fast' (mean, min, max, count)
+                      'full' (all standard linear stats)
+                      'log'  (full + gmean, gstd)
+    """
+    
+    # 1. Define the Available Library
+    stats_library = {
+        'mean':   lambda x: x.mean(dim=time_dim, skipna=True),
+        'min':    lambda x: x.min(dim=time_dim, skipna=True),
+        'max':    lambda x: x.max(dim=time_dim, skipna=True),
+        'median': lambda x: x.median(dim=time_dim, skipna=True),
+        'std':    lambda x: x.std(dim=time_dim, skipna=True),
+        'sum':    lambda x: x.sum(dim=time_dim, skipna=True),
+        'var':    lambda x: x.var(dim=time_dim, skipna=True),
+        'count':  lambda x: x.notnull().sum(dim=time_dim),
+        
+        # Log-based statistics (Geometric Mean & Std) - Use .where(x > 0) to prevent log(0) or log(negative) errors
+        'gmean':  lambda x: np.exp(np.log(x.where(x > 0)).mean(dim=time_dim, skipna=True)),
+        'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).std(dim=time_dim, skipna=True))
+    }
+
+    # Define standard grouping
+    standard_stats = ['mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count']
+
+    # 2. Resolve the "Requested" stats
+    if stats is None or stats == 'full':
+        requested = standard_stats
+    elif stats == 'fast':
+        requested = ['mean', 'min', 'max', 'count']
+    elif stats == 'log':
+        requested = standard_stats + ['gmean', 'gstd']
+    elif isinstance(stats, str):
+        requested = [stats]
+    else:
+        requested = stats # Assume it's a user-provided list
+
+    # 3. Build the Dataset
+    results = {}
+    for s in requested:
+        if s in stats_library:
+            # Conditionally include the label in the variable name if provided
+            if label:
+                col_name = f"{var_name}_{label}_{s}"
+            else:
+                col_name = f"{var_name}_{s}"
+            results[col_name] = stats_library[s](data)
+        else:
+            print(f"⚠️ Warning: Statistics '{s}' is not recognized. Skipping.")
+
+    return xr.Dataset(results)
 
 def process_single_stat(task, prod, per, verbose, **kwargs):
         """
@@ -303,7 +375,6 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         debug = kwargs.get('debug', False)
         subset = kwargs.get('subset')
         out_path = task['output']
-        output_period = per
         input_files = task['inputs']
         max_retries = 3    
 
@@ -367,8 +438,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
             if verbose: print(f"❌ FATAL: All retries exhausted. Could not open dataset for {per}.")
             return False, corrupt_files_found
         
-
-        # 4. Resolve metadata and prep data
+        # 4. Resolve dataset, preprocess and loop through variables
         try:
             # 4A. Resolve dataset name for product mapping
             try:
@@ -383,6 +453,95 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
 
             if ds_name: ds_name = ds_name.upper()
 
+            # 4B. Preprocess data if needed (e.g. PSC files)
+            with timer("preprocess_dataset", debug=debug):
+                ds = preprocess_dataset(ds, prod, verbose=verbose)
+                
+            target_vars = ds.attrs.get('pipeline_target_vars', [])
+            
+            if not target_vars:
+                raise ValueError(f"❌ No valid variables found to process for {prod}.")
+
+            # 🎯 4C. Loop through target_vars
+            computed_datasets = []
+            
+            for var_name in target_vars:
+                if verbose: print(f"    📊 Extracting and preparing {var_name}...")
+
+                # Extract the single DataArray safely
+                try:
+                    da = ds[var_name]
+                except KeyError:
+                    print(f"⚠️ Warning: '{var_name}' not found. Skipping this variable.")
+                    continue
+
+                # Spatial Subsetting & Integrity Check
+                if subset:
+                    if verbose: print(f"      Subsetting {var_name} to region: {subset}")
+                    da = subset_dataset(da, subset)
+                    if da.size == 0:
+                        print(f"⚠️ Warning: Subset '{subset}' resulted in 0 pixels for {var_name}. Skipping.")
+                        continue # Skip this variable but try the others!
+                    
+                if da.size == 0:
+                    print(f"⚠️ Warning: DataArray is empty for {var_name}. Skipping.")
+                    continue
+                
+                # Compute the statistics for this specific variable
+                with timer(f"compute_stats ({var_name})", debug=debug):
+                    # 🚨 Pass 'var_name' into compute_stats so it names the outputs correctly 
+                    # (e.g. PSC_micro_mean instead of PSC_mean)
+                    var_stats_ds = compute_stats(da, var_name, time_dim='time', **kwargs)
+                
+                computed_datasets.append(var_stats_ds)
+
+            # Safety check: Did any variables successfully process?
+            if not computed_datasets:
+                print(f"⚠️ ERROR: No variables were successfully processed for {prod}.")
+                return False, corrupt_files_found
+
+            # 5. Merge dataset variables
+            stats_ds = xr.merge(computed_datasets)
+
+            # 6. Add variable attributes
+            encoding = {}
+            for out_var in stats_ds.data_vars:
+                var = stats_ds[out_var]
+                fill_value = get_fill_value(var)
+
+                # Use fillna() instead of an undefined valid_mask
+                var_masked = var.fillna(fill_value)
+
+                # If dtype is float64 or float32, cast as float32
+                if np.issubdtype(var_masked.dtype, np.floating):
+                    var_masked = var_masked.astype("float32")
+                    encoding[out_var] = {
+                        "_FillValue": np.float32(fill_value),
+                        "dtype": "float32",
+                        "zlib": True,
+                        "complevel": 4
+                    }
+                else:
+                    encoding[out_var] = {
+                        "_FillValue": fill_value,
+                        "zlib": True,
+                        "complevel": 4
+                    }
+
+                # Assign masked and casted data back
+                stats_ds[out_var] = var_masked
+                
+                # 🎯 Extract the stat type (e.g., "PSC_micro_mean" -> "mean")
+                stat_type = out_var.split('_')[-1]
+                
+                # Extract the base variable name for the attribute builder (e.g., "PSC_micro_mean" -> "PSC_micro")
+                # This ensures build_stat_attributes looks up the specific fraction's metadata!
+                base_var_name = out_var.replace(f"_{stat_type}", "")
+                
+                # Use the helper function to build stat-modified attributes using the specific variable name
+                stats_ds[out_var].attrs = build_stat_attributes(base_var_name, stat_type, _FillValue=fill_value)
+            
+            """
             # 4B. Resolve Variable Name (e.g., 'SST' -> 'sea_surface_temperature')
             mean_var_name = f"{prod}_mean"             # e.g., 'SST_mean'             
             # Prioritize the 'mean' variable if reading derived stats (e.g., monthly files)
@@ -464,7 +623,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 
                 # Use the new helper function to build stat-modified attributes
                 stats_ds[var_name].attrs = build_stat_attributes(prod, stat_type, _FillValue=fill_value)
-            
+            """
             # 7. Add dimensions to the stats dataset
             if 'time' not in stats_ds.coords:
                 # Assign it as a coordinate so the file isn't "timeless"
@@ -566,63 +725,8 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         gc.collect()
         return True, corrupt_files_found
 
-def compute_stats(data, var_name, time_dim, label=None, stats=None, **kwargs):
-    """
-    Computes statistics on a DataArray.
-    
-    label: str or None. If provided, included in the output variable name.
-    stats: list or str. 
-           Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count', 'gmean', 'gstd'
-           Groupings: 'fast' (mean, min, max, count)
-                      'full' (all standard linear stats)
-                      'log'  (full + gmean, gstd)
-    """
-    
-    # 1. Define the Available Library
-    stats_library = {
-        'mean':   lambda x: x.mean(dim=time_dim, skipna=True),
-        'min':    lambda x: x.min(dim=time_dim, skipna=True),
-        'max':    lambda x: x.max(dim=time_dim, skipna=True),
-        'median': lambda x: x.median(dim=time_dim, skipna=True),
-        'std':    lambda x: x.std(dim=time_dim, skipna=True),
-        'sum':    lambda x: x.sum(dim=time_dim, skipna=True),
-        'var':    lambda x: x.var(dim=time_dim, skipna=True),
-        'count':  lambda x: x.notnull().sum(dim=time_dim),
-        
-        # Log-based statistics (Geometric Mean & Std) - Use .where(x > 0) to prevent log(0) or log(negative) errors
-        'gmean':  lambda x: np.exp(np.log(x.where(x > 0)).mean(dim=time_dim, skipna=True)),
-        'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).std(dim=time_dim, skipna=True))
-    }
 
-    # Define standard grouping
-    standard_stats = ['mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count']
 
-    # 2. Resolve the "Requested" stats
-    if stats is None or stats == 'full':
-        requested = standard_stats
-    elif stats == 'fast':
-        requested = ['mean', 'min', 'max', 'count']
-    elif stats == 'log':
-        requested = standard_stats + ['gmean', 'gstd']
-    elif isinstance(stats, str):
-        requested = [stats]
-    else:
-        requested = stats # Assume it's a user-provided list
-
-    # 3. Build the Dataset
-    results = {}
-    for s in requested:
-        if s in stats_library:
-            # Conditionally include the label in the variable name if provided
-            if label:
-                col_name = f"{var_name}_{label}_{s}"
-            else:
-                col_name = f"{var_name}_{s}"
-            results[col_name] = stats_library[s](data)
-        else:
-            print(f"⚠️ Warning: Statistics '{s}' is not recognized. Skipping.")
-
-    return xr.Dataset(results)
 
 def run_stats_pipeline(prods, periods=None, **kwargs):
                        #dataset=None, version=None, dataset_map=None,
@@ -656,7 +760,6 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     daterange (str or tuple): Date range spec to subset time (optional). Passed to get_dates().
     time_dim (str): Name of the time dimension in your NetCDF files (default is 'time').
     version (str): Dataset version override (optional). Passed through to get_prod_files().
-    dataset_map (str): Dataset map override (optional). Passed through to get_prod_files().
     verbose (bool): If True, prints progress and provenance (default is False).
         
 
@@ -665,6 +768,16 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     results : dict
         {(prod, period): xr.Dataset} of computed statistics.
     """
+
+    # Set up the Log file
+    logfile = kwargs.pop('logfile', None)
+    original_stdout = sys.stdout # Save the original terminal output
+
+    if logfile:
+        sys.stdout = DualLogger(logfile)
+        print("\n" + "="*80)
+        print(f"🟢 PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*80)
 
     # Normalize inputs
     if isinstance(prods, str): prods = [prods.upper().strip()]
@@ -690,9 +803,11 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         np.seterr(all='warn')
         print("🔍 Debug Mode: RuntimeWarnings are visible.")
     
-    debug   = kwargs.pop('debug', False)  # 🛠 New Debug Flag
+    # Pull variables out of kwargs
+    debug   = kwargs.pop('debug', False) 
     dataset = kwargs.pop('dataset',None)
     subset  = kwargs.get('subset', 'GLOBAL')
+    parallel_runs = kwargs.pop('parallel_runs', 1) 
     
     # 📋 Initialize an error log for the entire run
     successful_tasks = []
@@ -714,54 +829,78 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                                         **kwargs
             )
             
-                # --- Error Handling for Empty Maps ---
+            # --- Error Handling for Empty Maps ---
             if not stats_map:
                 print(f"❌ ERROR: No processing tasks generated for {prod} ({period}).")
                 print(f"   Check: Does {dataset} have {prod} data for the requested daterange?")
                 print(f"   Check: Is the 'subset' ({subset}) correct for this dataset?")
                 continue # Move to the next period/product
             
-            # 2. Loop through the output tasks in the map
+            # 🎯 Gather all tasks that actually need to be run
+            tasks_to_run = []
             for out_period, task in stats_map.items():
-                                
-                # SKIP if already up to date
                 if task['is_up_to_date']:
                     if verbose: print(f"  ⏭ Skipping {out_period} (Up-to-date)")
                     skipped_tasks.append(out_period)
                     continue
                 
-                # SKIP if there are no input files to process
                 if not task['inputs'] or len(task['inputs']) == 0:
                     if verbose: print(f"  ⚠️ Skipping {out_period}: No source files found for this period.")
                     continue
                 
-                try:
-                    success, corrupt_files = process_single_stat(task, prod, period, verbose, **kwargs)
-                    
-                    # If any corrupt files were found, add them to the main list
-                    if corrupt_files:
-                        all_corrupt_inputs.extend(corrupt_files)
-                    
-                    if success:
-                        successful_tasks.append(out_period)
-                    else:
-                        failed_tasks.append(out_period)
-                
-                except Exception as e:
-                    error_info = f"{out_period}: {str(e)}"
-                    failed_tasks.append(error_info)
-                    
-                    print(f"\n❌ Error on {out_period}:")
-                    if debug:
-                        import traceback
-                        traceback.print_exc() 
-                    else:
-                        print(f"  ⚠️  {e}")
-                        print(f"  ⏩ Skipping {out_period} and moving to next task.")
+                tasks_to_run.append((out_period, task))
 
-                if verbose:
-                    print(f"  🛠 Finished attempt for {out_period} ({len(task['inputs'])} files)")    
+            # If everything was up to date, skip to the next product/period
+            if not tasks_to_run:
+                continue
+
+            # 🎯 Execute Tasks (Sequential or Parallel)
+            if parallel_runs == 1:
+                # --- SEQUENTIAL EXECUTION (Great for debugging) ---
+                for out_period, task in tasks_to_run:
+                    try:
+                        success, corrupt_files = process_single_stat(task, prod, period, verbose, **kwargs)
+                        if corrupt_files: all_corrupt_inputs.extend(corrupt_files)
+                        
+                        if success: successful_tasks.append(out_period)
+                        else: failed_tasks.append(out_period)
+                    except Exception as e:
+                        failed_tasks.append(f"{out_period}: {str(e)}")
+                        print(f"\n❌ Error on {out_period}:")
+                        if debug:
+                            import traceback
+                            traceback.print_exc() 
+                        else:
+                            print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
                     
+                    if verbose: print(f"  🛠 Finished attempt for {out_period}")
+            
+            else:
+                # --- PARALLEL EXECUTION ⚡ ---
+                if verbose: print(f"\n  ⚡ Launching {len(tasks_to_run)} tasks across {parallel_runs} parallel workers...")
+                
+                with concurrent.futures.ProcessPoolExecutor(parallel_runs=parallel_runs) as executor:
+                    # Submit all tasks to the pool
+                    future_to_period = {
+                        executor.submit(process_single_stat, task, prod, period, verbose, **kwargs): out_period
+                        for out_period, task in tasks_to_run
+                    }
+                    
+                    # Collect results as they finish (not necessarily in order!)
+                    for future in concurrent.futures.as_completed(future_to_period):
+                        out_period = future_to_period[future]
+                        try:
+                            success, corrupt_files = future.result()
+                            if corrupt_files: all_corrupt_inputs.extend(corrupt_files)
+                            
+                            if success:
+                                successful_tasks.append(out_period)
+                                if verbose: print(f"  ✅ [Parallel] Finished {out_period}")
+                            else:
+                                failed_tasks.append(out_period)
+                        except Exception as e:
+                            failed_tasks.append(f"{out_period}: {str(e)}")
+                            print(f"\n❌ [Parallel] Error on {out_period}:\n  ⚠️  {e}")
 
     # --- FINAL SUMMARY REPORT ---
     print("\n" + "="*60)
@@ -791,8 +930,12 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     
     print("="*60)
 
-
-
+    # Close the Log File and restore the terminal
+    if logfile:
+        print(f"\n🔴 PIPELINE RUN ENDED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*80 + "\n")
+        sys.stdout.close()
+        sys.stdout = original_stdout # Give control back to standard Python
     
 
 def get_climatology(ds, periods=['MONTH','WEEK','ANNUAL'],variable=None):
