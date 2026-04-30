@@ -121,7 +121,7 @@ def build_stats_map(prod, period, output_dir=None,
             make_dir=True,      # Create the folder if it doesn't exist
             verbose=verbose
         )
-        print(f"🔍 DEBUG: Output directory for {prod} ({period}) is {output_dir}")
+
     # ---------------------------------------------------------
     # 2. Determine expected input period (D, M, etc.)
     # ---------------------------------------------------------
@@ -183,7 +183,6 @@ def build_stats_map(prod, period, output_dir=None,
 
         # Build output filename
         out_name = f"{out_period}-{ds_name}-{prod}-{subset or 'GLOBAL'}-{data_type}.nc"
-        print(f"DEBUG: output_dir={output_dir}, out_name={out_name}")
         out_path = os.path.join(output_dir, out_name)
 
         # Determine freshness
@@ -541,89 +540,6 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 # Use the helper function to build stat-modified attributes using the specific variable name
                 stats_ds[out_var].attrs = build_stat_attributes(base_var_name, stat_type, _FillValue=fill_value)
             
-            """
-            # 4B. Resolve Variable Name (e.g., 'SST' -> 'sea_surface_temperature')
-            mean_var_name = f"{prod}_mean"             # e.g., 'SST_mean'             
-            # Prioritize the 'mean' variable if reading derived stats (e.g., monthly files)
-            if mean_var_name in ds.data_vars:
-                prod_key = mean_var_name
-                if verbose: print(f"  🎯 Derived data detected: Using '{prod_key}' for calculations.")
-            else:
-                prod_key = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)
-            
-            # Extract the DataArray safely
-            try:
-                da = ds[prod_key]
-            except KeyError:
-                raise KeyError(f"❌ Data variable not found. Looked for '{mean_var_name}' and '{prod_key}'. "
-                               f"Available variables: {list(ds.data_vars.keys())}")
-                
-            if debug: print(f"dataset product key = {prod_key}")
-                
-            # 4C. Spatial Subsetting & Integrity Check
-            if subset:
-                if verbose: print(f"Subsetting to region: {subset}")
-                da = subset_dataset(da, subset)
-                if da.size == 0:
-                    # This happens if the subset coordinates don't overlap with the file at all
-                    print(f"⚠️ ERROR: Subset '{subset}' resulted in 0 pixels.")
-                    if debug:
-                        # Provide helpful context for why it failed
-                        lon_min, lon_max = ds.lon.min().values, ds.lon.max().values
-                        lat_min, lat_max = ds.lat.min().values, ds.lat.max().values
-                        print(f"    DEBUG: File Extent: Lon({lon_min:.2f} to {lon_max:.2f}), Lat({lat_min:.2f} to {lat_max:.2f})")
-                    return False, corrupt_files_found  # Skip this task          
-                if debug: print(f"    DEBUG: Subset successful. New Shape: {da.shape}")
-            
-            # 4D. Final Safety Check: Ensure there is data to process
-            if da.size == 0:
-                print(f"⚠️ Warning: DataArray is empty for {prod} after subsetting. Skipping.")
-                return False, corrupt_files_found # Exit this task early
-            
-            # 5. Compute the statistics
-            with timer("compute_stats (Graph Building)", debug=debug):
-                stats_ds = compute_stats(da, prod, time_dim='time', **kwargs)
-            
-            # 6. Add variable attributes
-            encoding = {}
-            for var_name in stats_ds.data_vars:
-                var = stats_ds[var_name]
-                fill_value = get_fill_value(var)
-
-                # 🎯 FIX: Use fillna() instead of an undefined valid_mask
-                var_masked = var.fillna(fill_value)
-
-                # If dtype is float64 or float32, cast as float32
-                if np.issubdtype(var_masked.dtype, np.floating):
-                    var_masked = var_masked.astype("float32")
-                    encoding[var_name] = {
-                        "_FillValue": np.float32(fill_value),
-                        "dtype": "float32",
-                        "zlib": True,
-                        "complevel": 4
-                    }
-                else:
-                    encoding[var_name] = {
-                        "_FillValue": fill_value,
-                        "zlib": True,
-                        "complevel": 4
-                    }
-
-                # Assign masked and casted data back
-                stats_ds[var_name] = var_masked
-                
-                # Extract the stat type from the variable name (e.g., "CHL_mean" -> "mean")
-                stat_type = var_name.split('_')[-1]
-                
-                # Use the new helper function to build stat-modified attributes
-                stats_ds[var_name].attrs = build_stat_attributes(prod, stat_type, _FillValue=fill_value)
-                
-                # 🎯 Extract the stat type from the variable name (e.g., "CHL_M_mean" -> "mean")
-                stat_type = var_name.split('_')[-1]
-                
-                # Use the new helper function to build stat-modified attributes
-                stats_ds[var_name].attrs = build_stat_attributes(prod, stat_type, _FillValue=fill_value)
-            """
             # 7. Add dimensions to the stats dataset
             if 'time' not in stats_ds.coords:
                 # Assign it as a coordinate so the file isn't "timeless"
@@ -724,8 +640,6 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 pass
         gc.collect()
         return True, corrupt_files_found
-
-
 
 
 def run_stats_pipeline(prods, periods=None, **kwargs):

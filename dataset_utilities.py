@@ -1,5 +1,6 @@
 import os
 from utilities.bootstrap.environment import bootstrap_environment
+from utilities import get_period_info
 env = bootstrap_environment(verbose=False)
 
 """
@@ -379,7 +380,7 @@ def resolve_dataset_map(dataset_products,
                     print(f"⚠ No map folder found for data_type='{data_type}'")
                 return None, None
 
-        # ✅ Period-based logic (Using folder_name from period_inf0))
+        # ✅ Period-based logic (Using folder_name from period_info)
         p_info = get_period_info(period) if period else {}
         folder_name = p_info.get('folder_name')
         if folder_name:

@@ -63,7 +63,8 @@ def product_defaults():
         'SST_TEMP': ('SST','ACSPONRT', 'SOURCE'),
         'CHL_FRONTS': ('CHL_FRONTS','OCCCI', 'PRODUCT'),
         'SST_FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT'),
-        'FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT')
+        'FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT'),
+        'BTEMP': ('BTEMP','GLORYS','SOURCE')
     }
 
     return prod_info_map
@@ -123,6 +124,10 @@ def netcdf_product_defaults():
             'MOANA_PICO': 'picoeuk_moana',
             'PYTHO_CARBON': 'carbon_phyto',
             'FLH': 'nflh'
+        },
+        'GLORYS': {
+            'BTEMP': 'bottomT',
+            'BSAL': 'bottomS',
         },
         'TESTDATASET': {
             'SST_MEAN': 'sst_mean',
