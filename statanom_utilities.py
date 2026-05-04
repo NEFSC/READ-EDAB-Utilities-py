@@ -1,22 +1,25 @@
 import os
 import sys
-from tabnanny import verbose
+import re
 import xarray as xr
 import numpy as np
+import pandas as pd
 import warnings
+import traceback
+import concurrent.futures
 from datetime import datetime
 import time
 from contextlib import contextmanager
-from collections import defaultdict
 import resource
 import platform
-import traceback
+
 import gc
 import dask
-import concurrent.futures
+
+# Local utilities
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import get_period_info, get_period_sets, get_prod_files
-from utilities import product_defaults, get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
+from utilities import get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
 from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value,get_source_metadata
 
@@ -247,8 +250,8 @@ def build_stats_map(prod, period, output_dir=None,
 
 def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
     """
-    Intercepts an xarray Dataset to perform product-specific math 
-    and define the target variables before statistical aggregation.
+    Intercepts an xarray Dataset to perform product-specific mathematical transformations,
+    enforce unit consistency (e.g., Kelvin to Celsius), and define target variables before computing statistics. 
     """
     target_vars = []
     
@@ -281,8 +284,12 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
         
         # Prioritize the 'mean' variable if we are reading derived stats
         if mean_var_name in ds.data_vars:
-            target_vars = [mean_var_name]
+            # Rename existing stats products so the pipeline treats it as raw base data
+            if verbose: print(f" Renaming '{mean_var_name}' -> '{prod}'")
+            ds = ds.rename({mean_var_name: prod})
+            target_vars = [prod]
         else:            
+            # Look up the raw product variable name (e.g. sea_surface_temperature)
             raw_var = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)
             
             if raw_var:
@@ -317,14 +324,25 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
 
 def compute_stats(data, var_name, time_dim, label=None, stats=None, **kwargs):
     """
-    Computes statistics on a DataArray.
+    Computes summary statistics across the time dimension for a given DataArray.    
     
-    label: str or None. If provided, included in the output variable name.
-    stats: list or str. 
+    Parameters
+    ----------
+    da (xarray.DataArray) - The input data array to process.
+    var_name (str) - The base variable name (e.g., 'SST') to prefix the output variables.
+    time_dim (str, optional) - The dimension to reduce over (default is 'time').
+    label (str or None) - If provided, included in the output variable name.
+    stats (list or str) - The statistics to compute.
            Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count', 'gmean', 'gstd'
            Groupings: 'fast' (mean, min, max, count)
                       'full' (all standard linear stats)
                       'log'  (full + gmean, gstd)
+        
+    Returns
+    -------
+    xarray.Dataset
+        A dataset containing the computed statistical variables (mean, max, anomaly, etc.).
+    
     """
     
     # 1. Define the Available Library
@@ -410,272 +428,282 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         corrupt_files_found = []
 
         # --- 🔄 RETRY LOOP ---
-        for attempt in range(max_retries):
-            if not input_files:
-                if verbose: print(f"❌ FATAL: All input files for {per} are corrupt or missing.")
-                return False, corrupt_files_found
-
-            # 3. Open the dataset
-            try:                
-                with timer(f"xr.open_mfdataset (Attempt {attempt+1})", debug=debug): # 'with' ensures file handles are released automatically, even on crash.
-                    ds = xr.open_mfdataset(
-                        task['inputs'], 
-                        combine="by_coords",
-                        decode_timedelta=True,
-                        chunks={'time': 1, 'lat': 'auto', 'lon': 'auto'}, 
-                        parallel=False,  # 🚨 CRITICAL: Parallel opening often crashes HDF5 on Mac
-                        engine='netcdf4',
-                        coords='minimal', # Don't waste RAM on redundant coords
-                        compat='override' # Assume all files have the same grid (Fastest)
-                    )
-
-                break # Success! All files opened successfully. Escape the retry loop
-                
-            except Exception as e:
-
-                # If NOT on the last attempt, try to find the bad files and retry
-                if attempt < max_retries - 1:
-                    if verbose: print(f"  ⚠️  Hiccup on {per} (Attempt {attempt+1}). Retrying in 2s...")
-
-                    # Find the bad files
-                    bad_files_info = corrupt_file_detector(input_files)    
-                    
-                    if bad_files_info:
-                        bad_paths = [info[0] for info in bad_files_info] # Isolate the paths so we can remove them
-                        
-                        # Format for the summary report: "filepath (Error)"
-                        formatted_bad = [f"{p} ({err})" for p, err in bad_files_info]
-                        corrupt_files_found.extend(formatted_bad)
-                        
-                        # 🎯 PURGE bad files from the input list for the next attempt
-                        input_files = [f for f in input_files if f not in bad_paths]
-                        
-                        if verbose: print(f"  🗑️ Removed {len(bad_paths)} corrupt files. Retrying...")
-                    else:
-                        # It failed, but not because of file corruption (e.g., RAM or Dask issue)
-                        if verbose: print(f"  ⚠️  No corrupt files detected. Retrying in 2s...")
-                        time.sleep(2)
-                else: 
-                    pass # Let it fall out of the loop if the LAST attemp still failed
-        
-        # 🚨 SAFE EXIT: If ds is still None after all retries, fail cleanly.
-        if 'ds' not in locals() or ds is None:
-            if verbose: print(f"❌ FATAL: All retries exhausted. Could not open dataset for {per}.")
-            return False, corrupt_files_found
-        
-        # 4. Resolve dataset, preprocess and loop through variables
         try:
-            # 4A. Resolve dataset name for product mapping
-            try:
-                input_fp = file_parser(input_files[0])
-                ds_name = input_fp[0].get('dataset') 
-                ds_version = input_fp[0].get('dataset_version')
-                
-            except Exception as e:
-                print(f"⚠️ Error with file parsing: {e}")                
-                ds_name = kwargs.get('dataset', 'UNKNOWN') 
-                ds_version = kwargs.get('dataset_version', 'UNKNOWN') 
+            for attempt in range(max_retries):
+                if not input_files:
+                    if verbose: print(f"❌ FATAL: All input files for {per} are corrupt or missing.")
+                    return False, corrupt_files_found
 
-            if ds_name: ds_name = ds_name.upper()
+                # 3. Open the dataset
+                try:                
+                    with timer(f"xr.open_mfdataset (Attempt {attempt+1})", debug=debug): # 'with' ensures file handles are released automatically, even on crash.
+                        ds = xr.open_mfdataset(
+                            task['inputs'], 
+                            combine="by_coords",
+                            decode_timedelta=True,
+                            chunks={'time': 1, 'lat': 'auto', 'lon': 'auto'}, 
+                            parallel=False,  # 🚨 CRITICAL: Parallel opening often crashes HDF5 on Mac
+                            engine='netcdf4',
+                            coords='minimal', # Don't waste RAM on redundant coords
+                            compat='override' # Assume all files have the same grid (Fastest)
+                        )
 
-            # 4B. Preprocess data if needed (e.g. PSC files)
-            with timer("preprocess_dataset", debug=debug):
-                ds = preprocess_dataset(ds, prod, ds_name=ds_name, verbose=verbose)                
-            target_vars = ds.attrs.get('pipeline_target_vars', [])
-            
-            if not target_vars:
-                raise ValueError(f"❌ No valid variables found to process for {prod}.")
-
-            # 🎯 4C. Loop through target_vars
-            computed_datasets = []
-            
-            for var_name in target_vars:
-                if verbose: print(f"    📊 Extracting and preparing {var_name}...")
-
-                # Extract the single DataArray safely
-                try:
-                    da = ds[var_name]
-                except KeyError:
-                    print(f"⚠️ Warning: '{var_name}' not found. Skipping this variable.")
-                    continue
-
-                # Spatial Subsetting & Integrity Check
-                if subset:
-                    if verbose: print(f"      Subsetting {var_name} to region: {subset}")
-                    da = subset_dataset(da, subset)
-                    if da.size == 0:
-                        print(f"⚠️ Warning: Subset '{subset}' resulted in 0 pixels for {var_name}. Skipping.")
-                        continue # Skip this variable but try the others!
+                    break # Success! All files opened successfully. Escape the retry loop
                     
-                if da.size == 0:
-                    print(f"⚠️ Warning: DataArray is empty for {var_name}. Skipping.")
-                    continue
-                
-                # Compute the statistics for this specific variable
-                with timer(f"compute_stats ({var_name})", debug=debug):
-                    # 🚨 Pass 'var_name' into compute_stats so it names the outputs correctly 
-                    # (e.g. PSC_micro_mean instead of PSC_mean)
-                    var_stats_ds = compute_stats(da, var_name, time_dim='time', **kwargs)
-                
-                computed_datasets.append(var_stats_ds)
+                except Exception as e:
 
-            # Safety check: Did any variables successfully process?
-            if not computed_datasets:
-                print(f"⚠️ ERROR: No variables were successfully processed for {prod}.")
+                    # If NOT on the last attempt, try to find the bad files and retry
+                    if attempt < max_retries - 1:
+                        if verbose: print(f"  ⚠️  Hiccup on {per} (Attempt {attempt+1}). Retrying in 2s...")
+
+                        # Find the bad files
+                        bad_files_info = corrupt_file_detector(input_files)    
+                        
+                        if bad_files_info:
+                            bad_paths = [info[0] for info in bad_files_info] # Isolate the paths so we can remove them
+                            
+                            # Format for the summary report: "filepath (Error)"
+                            formatted_bad = [f"{p} ({err})" for p, err in bad_files_info]
+                            corrupt_files_found.extend(formatted_bad)
+                            
+                            # 🎯 PURGE bad files from the input list for the next attempt
+                            input_files = [f for f in input_files if f not in bad_paths]
+                            
+                            if verbose: print(f"  🗑️ Removed {len(bad_paths)} corrupt files. Retrying...")
+                        else:
+                            # It failed, but not because of file corruption (e.g., RAM or Dask issue)
+                            if verbose: print(f"  ⚠️  No corrupt files detected. Retrying in 2s...")
+                            time.sleep(2)
+                    else: 
+                        pass # Let it fall out of the loop if the LAST attemp still failed
+            
+            # 🚨 SAFE EXIT: If ds is still None after all retries, fail cleanly.
+            if 'ds' not in locals() or ds is None:
+                if verbose: print(f"❌ FATAL: All retries exhausted. Could not open dataset for {per}.")
+                return False, corrupt_files_found
+            
+            # 4. Resolve dataset, preprocess and loop through variables
+            try:
+                # 4A. Resolve dataset name for product mapping
+                try:
+                    input_fp = file_parser(input_files[0])
+                    ds_name = input_fp[0].get('dataset') 
+                    ds_version = input_fp[0].get('dataset_version')
+                    
+                except Exception as e:
+                    print(f"⚠️ Error with file parsing: {e}")                
+                    ds_name = kwargs.get('dataset', 'UNKNOWN') 
+                    ds_version = kwargs.get('dataset_version', 'UNKNOWN') 
+
+                if ds_name: ds_name = ds_name.upper()
+
+                # 4B. Preprocess data if needed (e.g. PSC files)
+                with timer("preprocess_dataset", debug=debug):
+                    ds = preprocess_dataset(ds, prod, ds_name=ds_name, verbose=verbose)                
+                target_vars = ds.attrs.get('pipeline_target_vars', [])
+                
+                if not target_vars:
+                    raise ValueError(f"❌ No valid variables found to process for {prod}.")
+
+                # 🎯 4C. Loop through target_vars
+                computed_datasets = []
+                
+                for var_name in target_vars:
+                    if verbose: print(f"    📊 Extracting and preparing {var_name}...")
+
+                    # Extract the single DataArray safely
+                    try:
+                        da = ds[var_name]
+                    except KeyError:
+                        print(f"⚠️ Warning: '{var_name}' not found. Skipping this variable.")
+                        continue
+
+                    # Spatial Subsetting & Integrity Check
+                    if subset:
+                        if verbose: print(f"      Subsetting {var_name} to region: {subset}")
+                        da = subset_dataset(da, subset)
+                        if da.size == 0:
+                            print(f"⚠️ Warning: Subset '{subset}' resulted in 0 pixels for {var_name}. Skipping.")
+                            continue # Skip this variable but try the others!
+                        
+                    if da.size == 0:
+                        print(f"⚠️ Warning: DataArray is empty for {var_name}. Skipping.")
+                        continue
+                    
+                    # Compute the statistics for this specific variable
+                    with timer(f"compute_stats ({var_name})", debug=debug):
+                        # 🚨 Pass 'var_name' into compute_stats so it names the outputs correctly 
+                        # (e.g. PSC_micro_mean instead of PSC_mean)
+                        var_stats_ds = compute_stats(da, var_name, time_dim='time', **kwargs)
+                    
+                    computed_datasets.append(var_stats_ds)
+
+                # Safety check: Did any variables successfully process?
+                if not computed_datasets:
+                    print(f"⚠️ ERROR: No variables were successfully processed for {prod}.")
+                    return False, corrupt_files_found
+
+                # 5. Merge dataset variables
+                stats_ds = xr.merge(computed_datasets)
+
+                # 6. Add variable attributes
+                encoding = {}
+                for out_var in stats_ds.data_vars:
+                    var = stats_ds[out_var]
+                    fill_value = get_fill_value(var)
+
+                    # Use fillna() instead of an undefined valid_mask
+                    var_masked = var.fillna(fill_value)
+
+                    # If dtype is float64 or float32, cast as float32
+                    if np.issubdtype(var_masked.dtype, np.floating):
+                        var_masked = var_masked.astype("float32")
+                        encoding[out_var] = {
+                            "_FillValue": np.float32(fill_value),
+                            "dtype": "float32",
+                            "zlib": True,
+                            "complevel": 4
+                        }
+                    else:
+                        encoding[out_var] = {
+                            "_FillValue": fill_value,
+                            "zlib": True,
+                            "complevel": 4
+                        }
+
+                    # Assign masked and casted data back
+                    stats_ds[out_var] = var_masked
+                    
+                    # 🎯 Extract the stat type (e.g., "PSC_micro_mean" -> "mean")
+                    stat_type = out_var.split('_')[-1]
+                    
+                    # Extract the base variable name for the attribute builder (e.g., "PSC_micro_mean" -> "PSC_micro")
+                    # This ensures build_stat_attributes looks up the specific fraction's metadata!
+                    base_var_name = out_var.replace(f"_{stat_type}", "")
+                    
+                    # Use the helper function to build stat-modified attributes using the specific variable name
+                    stats_ds[out_var].attrs = build_stat_attributes(base_var_name, stat_type, _FillValue=fill_value)
+                
+                # 7. Add dimensions to the stats dataset
+                if 'time' not in stats_ds.coords:
+                    # Assign it as a coordinate so the file isn't "timeless"
+                    reference_time = da.time.values[0] 
+                    stats_ds = stats_ds.expand_dims('time').assign_coords(time=[reference_time])
+                
+                # 8. Add Global Metadata
+                attrs = get_default_metadata(sheet="General")
+                attrs = attrs | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
+                
+                # Pass the processed stats dataset to fetch accurate bounds and time ranges
+                attrs = attrs | get_geospatial_metadata(dataset=stats_ds)
+                attrs = attrs | get_temporal_metadata(ds=stats_ds)
+
+                # Product Specific Attributes
+                try:
+                    print(f"Adding prod ({prod}) metdata...")
+                    base_prod_attrs = build_product_attributes(prod)
+                    attrs["product_name"] = base_prod_attrs.get("long_name", prod)
+                except ValueError as e:
+                    traceback.print_exc()
+                    attrs["product_name"] = prod
+                    if debug: print(f"⚠️ {e}")
+
+                try:
+                    attrs = attrs | get_summary_metadata(prod)
+                except ValueError as e:
+                    if debug: print(f"⚠️ Skipping summary metadata: {e}")
+
+                try:
+                    attrs["references"] = get_reference_metadata(prod, refs_only=True)
+                except ValueError as e:
+                    if debug: print(f"⚠️ Skipping reference metadata: {e}")
+
+                # 🎯 Refined History Statement
+                input_files = task.get('inputs', [])
+                num_files = len(input_files)
+                
+                if num_files > 0:
+                    input_basenames = [os.path.basename(f) for f in input_files]
+                    source_files_str = ", ".join(input_basenames)
+                    first_file = input_basenames[0]
+                    last_file = input_basenames[-1]
+                    file_stmt = f"Derived from {num_files} input files ranging from {first_file} to {last_file}."
+                else:
+                    file_stmt = "No input files provided."
+
+                new_history = (
+                    f"{get_current_utc_timestamp()} "
+                    f"{attrs['product_name']} statistics were calculated using xarray. "
+                    f"{file_stmt} Missing dates or masked pixels were excluded from the aggregation."
+                )
+                
+                # Safely append to existing history if it exists
+                attrs["history"] = f"{attrs['history']}\n{new_history}" if attrs.get("history") else new_history
+                stats_ds.attrs['source_files'] = source_files_str  
+                            
+                # 🎯 Source Metadata
+                try:
+                    # Make sure dataset and dataset_version variables are defined in your scope
+                    # Merges the flat dict returned by get_source_metadata into attrs
+                    source_meta = get_source_metadata(ds_name, dataset_version=ds_version, source_prefix="source")
+                    attrs = attrs | source_meta
+                except Exception as e:
+                    if debug: print(f"⚠️ Warning extracting source metadata: {e}")
+                
+                # Assign global attributes
+                stats_ds.attrs = attrs
+                        
+                # 6. Write the netcdf file to disk 
+                with timer("stats_ds.to_netcdf (Disk I/O)", debug=debug):
+                    
+                    import warnings
+                    # 🎯 Temporarily mute the expected NaN math warnings during the save step
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", category=RuntimeWarning)
+                        
+                        # Force single-threaded execution to prevent Mac HDF5/NetCDF crashes
+                        with dask.config.set(scheduler='single-threaded'):
+                            stats_ds.to_netcdf(out_path)
+                            
+                    if verbose: print(f"  ✅ Saved: {os.path.basename(out_path)}")
+                    if verbose: print("  🧊 Cooling down for 1.5s...")
+                    time.sleep(1.5)
+                            
+            except Exception as e:
+                print(f"❌ Error processing {out_path}: {e}")
+                if debug: 
+                    traceback.print_exc()
+                    #raise e # Crash and show traceback in debug mode
                 return False, corrupt_files_found
 
-            # 5. Merge dataset variables
-            stats_ds = xr.merge(computed_datasets)
-
-            # 6. Add variable attributes
-            encoding = {}
-            for out_var in stats_ds.data_vars:
-                var = stats_ds[out_var]
-                fill_value = get_fill_value(var)
-
-                # Use fillna() instead of an undefined valid_mask
-                var_masked = var.fillna(fill_value)
-
-                # If dtype is float64 or float32, cast as float32
-                if np.issubdtype(var_masked.dtype, np.floating):
-                    var_masked = var_masked.astype("float32")
-                    encoding[out_var] = {
-                        "_FillValue": np.float32(fill_value),
-                        "dtype": "float32",
-                        "zlib": True,
-                        "complevel": 4
-                    }
-                else:
-                    encoding[out_var] = {
-                        "_FillValue": fill_value,
-                        "zlib": True,
-                        "complevel": 4
-                    }
-
-                # Assign masked and casted data back
-                stats_ds[out_var] = var_masked
-                
-                # 🎯 Extract the stat type (e.g., "PSC_micro_mean" -> "mean")
-                stat_type = out_var.split('_')[-1]
-                
-                # Extract the base variable name for the attribute builder (e.g., "PSC_micro_mean" -> "PSC_micro")
-                # This ensures build_stat_attributes looks up the specific fraction's metadata!
-                base_var_name = out_var.replace(f"_{stat_type}", "")
-                
-                # Use the helper function to build stat-modified attributes using the specific variable name
-                stats_ds[out_var].attrs = build_stat_attributes(base_var_name, stat_type, _FillValue=fill_value)
+            # 7. Clean up all data handles 
+            finally: 
+                try:
+                    if 'ds' in locals() and ds is not None: ds.close()
+                    if 'stats_ds' in locals() and stats_ds is not None: stats_ds.close()
+                except:
+                    pass
+            gc.collect()
             
-            # 7. Add dimensions to the stats dataset
-            if 'time' not in stats_ds.coords:
-                # Assign it as a coordinate so the file isn't "timeless"
-                reference_time = da.time.values[0] 
-                stats_ds = stats_ds.expand_dims('time').assign_coords(time=[reference_time])
-            
-            # 8. Add Global Metadata
-            attrs = get_default_metadata(sheet="General")
-            attrs = attrs | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
-            
-            # Pass the processed stats dataset to fetch accurate bounds and time ranges
-            attrs = attrs | get_geospatial_metadata(dataset=stats_ds)
-            attrs = attrs | get_temporal_metadata(ds=stats_ds)
-
-            # Product Specific Attributes
-            try:
-                print(f"Adding prod ({prod}) metdata...")
-                base_prod_attrs = build_product_attributes(prod)
-                attrs["product_name"] = base_prod_attrs.get("long_name", prod)
-            except ValueError as e:
-                attrs["product_name"] = prod
-                if debug: print(f"⚠️ {e}")
-
-            try:
-                attrs = attrs | get_summary_metadata(prod)
-            except ValueError as e:
-                if debug: print(f"⚠️ Skipping summary metadata: {e}")
-
-            try:
-                attrs["references"] = get_reference_metadata(prod, refs_only=True)
-            except ValueError as e:
-                if debug: print(f"⚠️ Skipping reference metadata: {e}")
-
-            # 🎯 Refined History Statement
-            input_files = task.get('inputs', [])
-            num_files = len(input_files)
-            
-            if num_files > 0:
-                input_basenames = [os.path.basename(f) for f in input_files]
-                source_files_str = ", ".join(input_basenames)
-                first_file = input_basenames[0]
-                last_file = input_basenames[-1]
-                file_stmt = f"Derived from {num_files} input files ranging from {first_file} to {last_file}."
-            else:
-                file_stmt = "No input files provided."
-
-            new_history = (
-                f"{get_current_utc_timestamp()} "
-                f"{attrs['product_name']} statistics were calculated using xarray. "
-                f"{file_stmt} Missing dates or masked pixels were excluded from the aggregation."
-            )
-            
-            # Safely append to existing history if it exists
-            attrs["history"] = f"{attrs['history']}\n{new_history}" if attrs.get("history") else new_history
-            stats_ds.attrs['source_files'] = source_files_str  
-                        
-            # 🎯 Source Metadata
-            try:
-                # Make sure dataset and dataset_version variables are defined in your scope
-                # Merges the flat dict returned by get_source_metadata into attrs
-                source_meta = get_source_metadata(ds_name, dataset_version=ds_version, source_prefix="source")
-                attrs = attrs | source_meta
-            except Exception as e:
-                if debug: print(f"⚠️ Warning extracting source metadata: {e}")
-            
-            # Assign global attributes
-            stats_ds.attrs = attrs
-                      
-            # 6. Write the netcdf file to disk 
-            with timer("stats_ds.to_netcdf (Disk I/O)", debug=debug):
-                
-                import warnings
-                # 🎯 Temporarily mute the expected NaN math warnings during the save step
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", category=RuntimeWarning)
-                    
-                    # Force single-threaded execution to prevent Mac HDF5/NetCDF crashes
-                    with dask.config.set(scheduler='single-threaded'):
-                        stats_ds.to_netcdf(out_path)
-                        
-                if verbose: print(f"  ✅ Saved: {os.path.basename(out_path)}")
-                if verbose: print("  🧊 Cooling down for 1.5s...")
-                time.sleep(1.5)
-                        
+            if verbose: print(f"  ✅ Successfully wrote: {os.path.basename(out_path)}")
+            return True, corrupt_files_found
         except Exception as e:
-            print(f"❌ Error processing {out_path}: {e}")
-            if debug: 
+            # The traceback catcher will ONLY print if a file completely fails.
+            print(f"\n❌ FATAL ERROR processing: {os.path.basename(out_path)}")
+            print(f"Details: {e}")
+            
+            # Only print the giant traceback if debug mode is on, to keep logs clean
+            if debug:
+                print("--- TRACEBACK ---")
                 traceback.print_exc()
-                #raise e # Crash and show traceback in debug mode
+                print("-----------------\n")
+                
+            # Return False for failure!
             return False, corrupt_files_found
-
-        # 7. Clean up all data handles 
-        finally: 
-            try:
-                if 'ds' in locals() and ds is not None: ds.close()
-                if 'stats_ds' in locals() and stats_ds is not None: stats_ds.close()
-            except:
-                pass
-        gc.collect()
-        return True, corrupt_files_found
+    
 
 
 def run_stats_pipeline(prods, periods=None, **kwargs):
-                       #dataset=None, version=None, dataset_map=None,
-                       #periods=None, daterange=None, climatology_range=None,
-                       #subset=None,
-                       #time_dim='time',
-                       #is_running=True,
-                       #verbose=False):
-    
-    
     """
     Runs a multi-product, multi-period stats pipeline.
 
@@ -701,7 +729,6 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     version (str): Dataset version override (optional). Passed through to get_prod_files().
     verbose (bool): If True, prints progress and provenance (default is False).
         
-
     Returns
     -------
     results : dict
@@ -718,162 +745,167 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         print(f"🟢 PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80)
 
-    # Normalize inputs
-    if isinstance(prods, str): prods = [prods.upper().strip()]
-    if periods is None: 
-        periods = ['W', 'M', 'A']
-    elif isinstance(periods, str):
-        periods = [periods]
+    # Use try/finally to GUARANTEE the terminal output is restored, even if the code crashes
+    try:
 
-    verbose = kwargs.pop('verbose', False)
-    debug   = kwargs.get('debug', False) # Get it, but don't pop yet if others need it
+        # Normalize inputs
+        if isinstance(prods, str): prods = [prods.upper().strip()]
+        if periods is None: 
+            periods = ['W', 'M', 'A']
+        elif isinstance(periods, str):
+            periods = [periods]
 
-    # --- 🛡️ THE WARNING FILTER ---
-    # This block controls the "NaN chatter" from Dask/NumPy
-    if not debug:
-        # Hide "All-NaN slice" and "Divide by Zero" warnings
-        warnings.filterwarnings('ignore', category=RuntimeWarning)
-        # Tell NumPy to be quiet about math errors in the background
-        np.seterr(all='ignore')
-        if verbose: print("🤫 Quiet Mode: RuntimeWarnings are hidden.")
-    else:
-        # If Debug is True, we want to see every single warning
-        warnings.filterwarnings('default', category=RuntimeWarning)
-        np.seterr(all='warn')
-        print("🔍 Debug Mode: RuntimeWarnings are visible.")
-    
-    # Pull variables out of kwargs
-    debug   = kwargs.pop('debug', False) 
-    dataset = kwargs.pop('dataset',None)
-    subset  = kwargs.get('subset', 'GLOBAL')
-    parallel_runs = kwargs.pop('parallel_runs', 1) 
-    
-    # 📋 Initialize an error log for the entire run
-    successful_tasks = []
-    failed_tasks = []
-    skipped_tasks = []
-    all_corrupt_inputs = [] # Track specific source files that are broken
-    
-    # Loop through prods
-    for prod in prods:
-        # Loop through the periods
-        for period in periods:
-            if verbose:
-                print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
-            
-            # Create stats period map
-            stats_map = build_stats_map(prod, period, 
-                                        dataset=dataset,
-                                        verbose=verbose,
-                                        **kwargs
-            )
-            
-            # --- Error Handling for Empty Maps ---
-            if not stats_map:
-                print(f"❌ ERROR: No processing tasks generated for {prod} ({period}).")
-                print(f"   Check: Does {dataset} have {prod} data for the requested daterange?")
-                print(f"   Check: Is the 'subset' ({subset}) correct for this dataset?")
-                continue # Move to the next period/product
-            
-            # 🎯 Gather all tasks that actually need to be run
-            tasks_to_run = []
-            for out_period, task in stats_map.items():
-                if task['is_up_to_date']:
-                    if verbose: print(f"  ⏭ Skipping {out_period} (Up-to-date)")
-                    skipped_tasks.append(out_period)
-                    continue
+        verbose = kwargs.pop('verbose', False)
+        debug   = kwargs.get('debug', False) # Get it, but don't pop yet if others need it
+
+        # --- 🛡️ THE WARNING FILTER ---
+        # This block controls the "NaN chatter" from Dask/NumPy
+        if not debug:
+            warnings.filterwarnings('ignore', category=RuntimeWarning)  # Hide "All-NaN slice" and "Divide by Zero" warnings
+            np.seterr(all='ignore') # Tell NumPy to be quiet about math errors in the background
+            if verbose: print("🤫 Quiet Mode: RuntimeWarnings are hidden.")
+        else: # If Debug is True, we want to see every single warning
+            warnings.filterwarnings('default', category=RuntimeWarning)
+            np.seterr(all='warn')
+            print("🔍 Debug Mode: RuntimeWarnings are visible.")
+        
+        # Pull variables out of kwargs
+        debug   = kwargs.pop('debug', False) 
+        dataset = kwargs.pop('dataset',None)
+        subset  = kwargs.get('subset', 'GLOBAL')
+        parallel_runs = kwargs.pop('parallel_runs', 1) 
+        
+        # 📋 Initialize an error log for the entire run
+        successful_tasks = []
+        failed_tasks = []
+        skipped_tasks = []
+        all_corrupt_inputs = set() # Track specific source files that are broken (use "set" to automatically deduplicate corrupt files)
                 
-                if not task['inputs'] or len(task['inputs']) == 0:
-                    if verbose: print(f"  ⚠️ Skipping {out_period}: No source files found for this period.")
-                    continue
+        # Loop through prods
+        for prod in prods:
+            # Loop through the periods
+            for period in periods:
+                if verbose:
+                    print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
                 
-                tasks_to_run.append((out_period, task))
-
-            # If everything was up to date, skip to the next product/period
-            if not tasks_to_run:
-                continue
-
-            # 🎯 Execute Tasks (Sequential or Parallel)
-            if parallel_runs == 1:
-                # --- SEQUENTIAL EXECUTION (Great for debugging) ---
-                for out_period, task in tasks_to_run:
-                    try:
-                        success, corrupt_files = process_single_stat(task, prod, period, verbose, **kwargs)
-                        if corrupt_files: all_corrupt_inputs.extend(corrupt_files)
-                        
-                        if success: successful_tasks.append(out_period)
-                        else: failed_tasks.append(out_period)
-                    except Exception as e:
-                        failed_tasks.append(f"{out_period}: {str(e)}")
-                        print(f"\n❌ Error on {out_period}:")
-                        if debug:
-                            traceback.print_exc() 
-                        else:
-                            print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
+                # Create stats period map
+                stats_map = build_stats_map(prod, period, 
+                                            dataset=dataset,
+                                            verbose=verbose,
+                                            **kwargs
+                )
+                
+                # --- Error Handling for Empty Maps ---
+                if not stats_map:
+                    print(f"❌ ERROR: No processing tasks generated for {prod} ({period}).")
+                    print(f"   Check: Does {dataset} have {prod} data for the requested daterange?")
+                    print(f"   Check: Is the 'subset' ({subset}) correct for this dataset?")
+                    continue # Move to the next period/product
+                
+                # 🎯 Gather all tasks that actually need to be run
+                tasks_to_run = []
+                for out_period, task in stats_map.items():
+                    if task['is_up_to_date']:
+                        if verbose: print(f"  ⏭ Skipping {out_period} (Up-to-date)")
+                        skipped_tasks.append(out_period)
+                        continue
                     
-                    if verbose: print(f"  🛠 Finished attempt for {out_period}")
-            
-            else:
-                # --- PARALLEL EXECUTION ⚡ ---
-                if verbose: print(f"\n  ⚡ Launching {len(tasks_to_run)} tasks across {parallel_runs} parallel workers...")
-                
-                with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
-                    # Submit all tasks to the pool
-                    future_to_period = {
-                        executor.submit(process_single_stat, task, prod, period, verbose, **kwargs): out_period
-                        for out_period, task in tasks_to_run
-                    }
+                    if not task['inputs'] or len(task['inputs']) == 0:
+                        if verbose: print(f"  ⚠️ Skipping {out_period}: No source files found for this period.")
+                        continue
                     
-                    # Collect results as they finish (not necessarily in order!)
-                    for future in concurrent.futures.as_completed(future_to_period):
-                        out_period = future_to_period[future]
+                    tasks_to_run.append((out_period, task))
+
+                # If everything was up to date, skip to the next product/period
+                if not tasks_to_run:
+                    continue
+
+                if parallel_runs == 1:
+                    # --- SEQUENTIAL EXECUTION ---
+                    for out_period, task in tasks_to_run:
                         try:
-                            success, corrupt_files = future.result()
-                            if corrupt_files: all_corrupt_inputs.extend(corrupt_files)
+                            success, corrupt_files = process_single_stat(task, prod, period, verbose, **kwargs)
                             
-                            if success:
-                                successful_tasks.append(out_period)
-                                if verbose: print(f"  ✅ [Parallel] Finished {out_period}")
-                            else:
-                                failed_tasks.append(out_period)
+                            if corrupt_files: all_corrupt_inputs.update(corrupt_files)
+
+                            if success: successful_tasks.append(out_period)
+                            else: failed_tasks.append(out_period)
                         except Exception as e:
                             failed_tasks.append(f"{out_period}: {str(e)}")
-                            print(f"\n❌ [Parallel] Error on {out_period}:\n  ⚠️  {e}")
+                            print(f"\n❌ Error on {out_period}:")
+                            if debug:
+                                traceback.print_exc() 
+                            else:
+                                print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
+                        
+                        if verbose: print(f"  🛠 Finished attempt for {out_period}")
+                
+                else:
+                    # --- PARALLEL EXECUTION ⚡ ---
+                    if verbose: print(f"\n  ⚡ Launching {len(tasks_to_run)} tasks across {parallel_runs} parallel workers...")
+                    
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                        # Submit all tasks to the pool
+                        future_to_period = {
+                            executor.submit(process_single_stat, task, prod, period, verbose, **kwargs): out_period
+                            for out_period, task in tasks_to_run
+                        }
+                        
+                        # Collect results as they finish (not necessarily in order!)
+                        for future in concurrent.futures.as_completed(future_to_period):
+                            out_period = future_to_period[future]
+                            try:
+                                success, corrupt_files = future.result()
+                                if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
+                                if success:
+                                    successful_tasks.append(out_period)
+                                    if verbose: print(f"  ✅ [Parallel] Finished {out_period}")
+                                else:
+                                    failed_tasks.append(out_period)
+                            except Exception as e:
+                                failed_tasks.append(f"{out_period}: {str(e)}")
+                                print(f"\n❌ [Parallel] Error on {out_period}:\n  ⚠️  {e}")
+                                if debug:
+                                    traceback.print_exc()
+                                else:
+                                    print(f"  ⚠️  {e}")
 
-    # --- FINAL SUMMARY REPORT ---
-    print("\n" + "="*60)
-    print("🏁 PIPELINE FINISHED SUMMARY")
-    print("="*60)
-    
-    total_processed = len(successful_tasks) + len(failed_tasks)
-
-    if not failed_tasks and not all_corrupt_inputs:
-        print("✨ Success! All files processed with 0 errors.")
-    else:
-        print(f"⚠️ Pipeline finished with ERRORS.")
-        print(f"✅ Successfully processed: {len(successful_tasks)}")
-        print(f"⏭  Skipped (up-to-date): {len(skipped_tasks)}")
-        print(f"❌ Failed tasks: {len(failed_tasks)}")
+        # --- FINAL SUMMARY REPORT ---
+        print("\n" + "="*60)
+        print("🏁 PIPELINE FINISHED SUMMARY")
+        print("="*60)
         
-        if failed_tasks:
-            print(f"\n📂 FAILED TASKS (Output not created):")
-            for task in failed_tasks:
-                print(f"  • {task}")
+        total_processed = len(successful_tasks) + len(failed_tasks)
 
-        if all_corrupt_inputs:
-            print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED:")
-            for err in all_corrupt_inputs:
-                print(f"  • {err}")
-            print("\n💡 ACTION: Delete the corrupt files listed above and re-run the pipeline.")
-    
-    print("="*60)
+        if not failed_tasks and not all_corrupt_inputs:
+            print("✨ Success! All files processed with 0 errors.")
+            print(f"✅ Successfully processed: {len(successful_tasks)}")
+            print(f"⏭  Skipped (up-to-date): {len(skipped_tasks)}")
+        else:
+            print(f"⚠️ Pipeline finished with ERRORS.")
+            print(f"✅ Successfully processed: {len(successful_tasks)}")
+            print(f"⏭  Skipped (up-to-date): {len(skipped_tasks)}")
+            print(f"❌ Failed tasks: {len(failed_tasks)}")
+            
+            if failed_tasks:
+                print(f"\n📂 FAILED TASKS (Output not created):")
+                for task in failed_tasks:
+                    print(f"  • {task}")
 
-    # Close the Log File and restore the terminal
-    if logfile:
-        print(f"\n🔴 PIPELINE RUN ENDED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*80 + "\n")
-        sys.stdout.close()
-        sys.stdout = original_stdout # Give control back to standard Python
+            if all_corrupt_inputs:
+                print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED ({len(all_corrupt_inputs)}):")
+                for err in sorted(all_corrupt_inputs):
+                    print(f"  • {os.path.basename(err)}")
+                print("\n💡 ACTION: Delete the corrupt files listed above and re-run the pipeline.")
+        
+        print("="*60)
+    finally:
+        # Close the Log File and restore the terminal
+        if logfile:
+            print(f"\n🔴 PIPELINE RUN ENDED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("="*80 + "\n")
+            sys.stdout.close()
+            sys.stdout = original_stdout # Give control back to standard Python
     
 
 def get_climatology(ds, periods=['MONTH','WEEK','ANNUAL'],variable=None):
