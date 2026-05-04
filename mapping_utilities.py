@@ -177,6 +177,9 @@ def get_regrid_weights(target_path, source_path,
     
     target_ds = load_dataset(target_path)
     source_ds = load_dataset(source_path)
+
+    if 'latitude' in target_ds.coords: target_ds = target_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
+    if 'latitude' in source_ds.coords: source_ds = source_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
   
     if "lat" not in target_ds or "lon" not in target_ds:
         raise ValueError("Target dataset must include 'lat' and 'lon' coordinates.")
@@ -253,7 +256,12 @@ def regrid_dataset(
     regridded = xr.Dataset()
     for var in variables:
         regridded_var = regridder(source_ds[var])  # Don't pre-chunk source
-        regridded_var = regridded_var.chunk(target_chunks)  # Apply target chunking here
+        
+        # Filter chunks so they are only applied them to dimensions this variable actually has
+        valid_chunks = {dim: target_chunks[dim] for dim in regridded_var.dims if dim in target_chunks}
+        regridded_var = regridded_var.chunk(valid_chunks)  # 
+        
+        #regridded_var = regridded_var.chunk(target_chunks)  # Apply target chunking here
         regridded_var.attrs.update(source_ds[var].attrs)
         regridded[var] = regridded_var
 
@@ -263,7 +271,8 @@ def regrid_dataset(
             regridded[coord] = target_ds[coord]
 
     # 4. Apply dynamic chunking AFTER regridding
-    regridded = regridded.chunk(target_chunks)
+    valid_global_chunks = {dim: target_chunks[dim] for dim in regridded.dims if dim in target_chunks}
+    regridded = regridded.chunk(valid_global_chunks)
 
     # 5. Copy global attrs
     regridded.attrs.update(target_ds.attrs)
@@ -287,6 +296,9 @@ def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None):
     # 2. Open the datasets    
     target_ds = load_dataset(target_path)
     source_ds = load_dataset(source_path)
+
+    if 'latitude' in target_ds.coords: target_ds = target_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
+    if 'latitude' in source_ds.coords: source_ds = source_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
 
     # 3 Subset dataset by time (daterange) and products if needed    
     if daterange:

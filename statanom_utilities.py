@@ -1,4 +1,6 @@
 import os
+import sys
+from tabnanny import verbose
 import xarray as xr
 import numpy as np
 import warnings
@@ -84,7 +86,7 @@ def boost_file_limits():
         # Try to set it to 4096, but don't exceed the 'hard' system limit
         new_limit = min(4096, hard)
         resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
-        print(f"🚀 System: File handle limit boosted to {new_limit}")
+        #print(f"🚀 System: File handle limit boosted to {new_limit}")
 
        
 def build_stats_map(prod, period, output_dir=None,
@@ -243,7 +245,7 @@ def build_stats_map(prod, period, output_dir=None,
     
     return stats_map
 
-def preprocess_dataset(ds, prod, verbose=False):
+def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
     """
     Intercepts an xarray Dataset to perform product-specific math 
     and define the target variables before statistical aggregation.
@@ -280,12 +282,36 @@ def preprocess_dataset(ds, prod, verbose=False):
         # Prioritize the 'mean' variable if we are reading derived stats
         if mean_var_name in ds.data_vars:
             target_vars = [mean_var_name]
-        else:
-            # Fallback to your original lookup logic
-            # (Assuming get_nc_prod is available here, or pass ds_name into this function)
-            target_vars = [prod if prod in ds.data_vars else get_nc_prod('dataset_name', prod)]
+        else:            
+            raw_var = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)
+            
+            if raw_var:
+                if 'SST' in prod.upper() or 'TEMP' in prod.upper():
+                    try:
+                        # Extract the maximum value to see what scale we are on
+                        # (skipna=True ensures clouds/land don't break the check)
+                        max_val = float(ds[raw_var].max(skipna=True).values)
+                        
+                        if not np.isnan(max_val):
+                            if max_val > 100:
+                                if verbose: print(f"  🌡️ Detected Kelvin (Max: {max_val:.1f}). Converting to Celsius...")
+                                ds[raw_var] = ds[raw_var] - 273.15
+                                ds[raw_var].attrs['units'] = 'Celsius' # Force correct metadata
+                            else:
+                                if verbose: print(f"  🌡️ Detected Celsius (Max: {max_val:.1f}). No conversion needed.")
+                                ds[raw_var].attrs['units'] = 'Celsius' # Ensure metadata is right
+                    except Exception as e:
+                        if verbose: print(f"  ⚠️ Could not verify temperature units: {e}") 
+                
+                # Standardize the name 
+                if raw_var != prod and raw_var in ds.data_vars:
+                    if verbose: print(f"  🏷️ Standardizing variable name: '{raw_var}' -> '{prod}'")
+                    # Rename the variable inside the dataset
+                    ds = ds.rename({raw_var: prod})
+                    
+                # Tell the pipeline loop to use the clean 'prod' name 
+                target_vars = [prod]
 
-    # Store the target variables as an attribute so the pipeline knows what to do
     ds.attrs['pipeline_target_vars'] = target_vars
     return ds
 
@@ -454,8 +480,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
 
             # 4B. Preprocess data if needed (e.g. PSC files)
             with timer("preprocess_dataset", debug=debug):
-                ds = preprocess_dataset(ds, prod, verbose=verbose)
-                
+                ds = preprocess_dataset(ds, prod, ds_name=ds_name, verbose=verbose)                
             target_vars = ds.attrs.get('pipeline_target_vars', [])
             
             if not target_vars:
@@ -556,6 +581,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
 
             # Product Specific Attributes
             try:
+                print(f"Adding prod ({prod}) metdata...")
                 base_prod_attrs = build_product_attributes(prod)
                 attrs["product_name"] = base_prod_attrs.get("long_name", prod)
             except ValueError as e:
@@ -626,7 +652,6 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         except Exception as e:
             print(f"❌ Error processing {out_path}: {e}")
             if debug: 
-                import traceback
                 traceback.print_exc()
                 #raise e # Crash and show traceback in debug mode
             return False, corrupt_files_found
@@ -782,7 +807,6 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                         failed_tasks.append(f"{out_period}: {str(e)}")
                         print(f"\n❌ Error on {out_period}:")
                         if debug:
-                            import traceback
                             traceback.print_exc() 
                         else:
                             print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
@@ -793,7 +817,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                 # --- PARALLEL EXECUTION ⚡ ---
                 if verbose: print(f"\n  ⚡ Launching {len(tasks_to_run)} tasks across {parallel_runs} parallel workers...")
                 
-                with concurrent.futures.ProcessPoolExecutor(parallel_runs=parallel_runs) as executor:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
                     # Submit all tasks to the pool
                     future_to_period = {
                         executor.submit(process_single_stat, task, prod, period, verbose, **kwargs): out_period
