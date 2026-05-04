@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
+import xarray as xr
 import stat
 from utilities.bootstrap.environment import bootstrap_environment
+from utilities import parse_dataset_info, extract_period_code, get_period_info, get_period_dates
 env = bootstrap_environment(verbose=False)
 
 """
@@ -12,6 +14,7 @@ Main Functions:
     - get_file_dates: Extracts dates from a list of filenames
     - file_make: Checks to see if a file exists and if it needs to be remade based on the mtimes of the input files
     - set_file_permissions: Checks the permissions of a file and changes them if they don't match the desired permissions.
+    - corrupt_file_detector: Searches for corrupt files in a list of files
 
 Helper Functions:
     - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes
@@ -29,9 +32,85 @@ Modification History
     Aug 01, 2025 - KJWH: Initial code written
     Sep 10, 2025 - KJWH: Updated documentation
     Sep 25, 2025 - KJWH: Added get_file_dates
+    Mar 20, 2026 - KJWH: Added corrupt_file_detector
 """
 import os
 from pathlib import Path
+
+def file_parser(files): 
+    """
+    Parses a list of input file paths into structured metadata. 
+        • Uses parse_dataset_info() to extract dataset specific information
+        • Uses get_file_dates() to extract dates from the file names
+        • uses extract_period_code() to get period specific information
+
+    Parameters:
+        files (list): List of strings containing full paths to .nc or similar files.
+
+    Returns:
+        list[dict]: A list of dictionaries where each entry contains:
+            - full_file_path: The original path.
+            - directory/file_name/extension: Basic OS path info.
+            - dataset/version/product: Validated info from the directory structure.
+            - start_date/end_date: Temporal info from the file string.
+            - period_details: Nested dict of period codes and associated static info.
+
+    """
+    if not files:
+        return{}
+    # If 'files' is a single string, wrap it in a list
+    if isinstance(files, str):
+        files = [files]
+
+    # 1. Extract Dataset
+    dataset_metadata = parse_dataset_info(files)
+    
+    # 2. Extract Date Ranges for each file
+    file_dates = get_file_dates(files)
+
+    # 3. Extract period specific information if available
+    perinfo = extract_period_code(files)
+    percode = [info['code'] for info in perinfo]
+    fullperiod = [info['full_period'] for info in perinfo]
+        
+    # 4. Loop through files to add information
+    results = []
+    
+    # Using zip allows us to process the parallel lists efficiently
+    for i, file_path in enumerate(files):        
+        directory, full_name = os.path.split(file_path)
+        file_name, extension = os.path.splitext(full_name)
+        idataset = dataset_metadata[i]
+        file_entry = {
+            'full_file_path': file_path,
+            'directory': directory,
+            'file_name': file_name,
+            'extension': extension,
+            **idataset,
+            'start_date': file_dates[i][0],
+            'end_date': file_dates[i][1],
+        }
+
+        # Add period info if it was found in Step 3        
+        if percode is not None:
+            icode = percode[i]
+            if icode is not None:
+                period_info = get_period_info(icode)
+                period_dates = get_period_dates(fullperiod[i])
+                file_entry['period_details'] = {
+                    'period_code': icode,
+                    'period_full_code': fullperiod[i],
+                    'metadata': get_period_info(icode)
+                }
+        else:
+            file_entry['period_details'] = None
+        
+        results.append(file_entry)
+
+    return results
+
+
+
 
 def get_file_dates(files, source_format="yyyymmdd", period_format="%Y%m%d", placeholder=None):
     """
@@ -148,3 +227,29 @@ def set_file_permissions(filepath,desired_permissions=0o664):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
 
+def corrupt_file_detector(file_list):
+    """Deep-dives into a list of files to find specific 'bad' ones."""
+    issues = []
+    for f in file_list:
+        # Check 1: Does it exist?
+        if not os.path.exists(f):
+            # 🎯 CHANGED: Now appending a tuple (filepath, error_reason)
+            issues.append((f, "File Missing"))
+            continue
+        
+        # Check 2: Can we read it? (Permissions)
+        if not os.access(f, os.R_OK):
+            # 🎯 CHANGED: Tuple
+            issues.append((f, "Permission Denied"))
+            continue
+
+        # Check 3: Is it a valid NetCDF?
+        try:
+            with xr.open_dataset(f, engine='netcdf4', decode_timedelta=False) as test:
+                # Trigger a load of the coordinates to ensure it's not truncated
+                _ = test.coords.to_dataset().load()
+        except Exception as e:
+            # 🎯 CHANGED: Tuple
+            issues.append((f, f"Corrupt/Invalid: {str(e)}"))
+            
+    return issues

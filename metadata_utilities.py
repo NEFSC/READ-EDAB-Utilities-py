@@ -694,6 +694,48 @@ def build_product_attributes(product: str, metapath: str = None,  _FillValue=Non
 
     return attributes
 
+def build_stat_attributes(base_prod: str, stat_name: str, metapath: str = None, _FillValue=None, verbose=False) -> dict:
+    """
+    Builds variable attributes for statistical products by pulling base attributes 
+    and modifying them according to LUT_Stats.
+    """
+    # 1. Get the base attributes (e.g., for CHL)
+    attrs = build_product_attributes(base_prod, metapath=metapath, _FillValue=_FillValue, verbose=verbose)
+    
+    # 2. Load the new LUT_Stats table
+    lut_stats = get_metadata_table(metapath=metapath, sheet="LUT_Stats")
+    
+    # Restructure lut_stats to be keyed by the 'stat' column
+    stat_info = {}
+    for row in lut_stats.values():
+        s = str(row.get('stat', '')).strip().lower()
+        if s:
+            stat_info[s] = row
+            
+    stat_key = stat_name.strip().lower()
+    
+    # 3. Apply the statistical modifiers to make it CF-compliant
+    if stat_key in stat_info:
+        info = stat_info[stat_key]
+        
+        # Modify long_name (e.g., "Chlorophyll Concentration" -> "Chlorophyll Concentration Mean")
+        if "long_name" in attrs and pd.notna(info.get("long_name_modifier")):
+            attrs["long_name"] = f"{attrs['long_name']} {str(info['long_name_modifier']).strip()}"
+            
+        # Add cell_methods (Crucial for CF-compliance)
+        if pd.notna(info.get("cell_methods")):
+            attrs["cell_methods"] = str(info["cell_methods"]).strip()
+            
+        # Modify units if needed (e.g., for 'count')
+        if pd.notna(info.get("units_modifier")):
+            attrs["units"] = str(info["units_modifier"]).strip()
+            
+        # Standard names often don't apply to 'count' or 'variance', remove it to stay strictly compliant
+        if stat_key in ['count', 'var'] and 'standard_name' in attrs:
+            del attrs['standard_name']
+            
+    return attrs
+
 def get_fill_value(var) -> Optional[float]:
     """
     Retrieves the _FillValue for a given xarray or netCDF4 variable.

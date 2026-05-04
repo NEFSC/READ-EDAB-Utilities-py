@@ -44,6 +44,8 @@ def format_date(dt, fmt):
         return dt.strftime("%Y-%m-%d")
     elif fmt == "yyyymmddhhmmss":
         return dt.strftime("%Y%m%d%H%M%S")
+    elif fmt == "tuple":
+        return (dt.year, dt.month, dt.day)
     elif fmt == "datetime":
         if isinstance(dt, datetime):
             return dt.date()
@@ -51,75 +53,280 @@ def format_date(dt, fmt):
             return dt
         else:
             raise TypeError(f"Expected date or datetime, got {type(dt)}")
-    else:
+    try:
+        return dt.strftime(fmt)
+    except Exception:
         raise ValueError(f"Unknown format: {fmt}")
     
-def get_dates(dates,format='yyyymmdd'):
+def get_dates(
+        dates,
+        output="days",   # "days", "doys", "weeks", "months", "seasons", "years"
+        day_format='yyyymmdd',
+        period_format="tuple", # "datetime", "bounds"
+):
     """
-    Create normalized date lists from different date inputs and output a list of dates in multiple formats
+    Generate normalized date outputs from a wide variety of input formats.
 
-    Input can be:
-        dates (list): Accepts list of dates, range, year(s), or datetime objects.
-            - List of date strings (yyyymmdd or yyyy-mm-dd)
-            - List of datetime.date objects
-            - List of integers: [2023] or [2023, 2025]
-            - List of one or two strings: ['20250101'] or ['20250101', '20250630'] or ['2025', '2026']
-    
-        format (str): Output format. Options:
-            - 'yyyymmdd'       → default
-            - 'yyyy-mm-dd'
-            - 'yyyymmddhhmmss' → used if any input contains time info
-            - 'datetime'       → returns datetime.date 
-    Returns:
-        list: Formatted date strings or date objects
+    This function accepts flexible date specifications (single dates, lists of dates,
+    year ranges, or explicit start/end pairs) and returns a sequence of days, weeks,
+    months, seasons, or years in a consistent, schema‑driven format.
 
+    Parameters
+    ----------
+    dates : object or list
+        Input date specification. Accepted forms include:
+        • A single date string ("YYYYMMDD" or "YYYY‑MM‑DD")
+        • A single datetime.date or datetime.datetime object
+        • A single integer year (e.g., 2023)
+        • A list of date strings
+        • A list of datetime/date objects
+        • A list of integer years: [2023] or [2023, 2025]
+        • A two‑element list defining a range:
+                ["20250101", "20250630"]
+                [2025, 2026]
+                [datetime(2025,1,1), datetime(2026,12,31)]
+
+    output : str, optional
+        Specifies the type of period to generate. Options:
+        • "days"    → daily sequence (default)
+        • "doys"    → day of year
+        • "weeks"   → ISO week periods
+        • "months"  → calendar months
+        • "seasons" → climatological seasons (JFM, AMJ, JAS, OND)
+        • "years"   → calendar years
+
+    day_format : str, optional
+        Controls how *daily* outputs are formatted. Only used when output="days".
+        Options:
+        • "yyyymmdd"       → default
+        • "yyyy-mm-dd"
+        • "yyyymmddhhmmss"
+        • "datetime"       → return datetime objects
+
+    period_format : str, optional
+        Controls how *non‑day* periods (weeks, months, seasons, years) are represented.
+        Options:
+        • "tuple"    → canonical tuple representation (default)
+                doy     → (year, day_of_year)
+                weeks   → (year, week)
+                months  → (year, month)
+                seasons → (year, "JFM"/"AMJ"/"JAS"/"OND")
+                years   → (year,)
+        • "datetime" → return the start date of each period as a datetime
+        • "bounds"   → return (start_date, end_date) as "YYYYMMDD" strings
+
+    Returns
+    -------
+    list
+        A list of formatted days or period representations, depending on the
+        `output`, `day_format`, and `period_format` settings.
+
+    Notes
+    -----
+    • When `dates` contains more than two items and output != "days", the function
+    interprets the input as a collection of individual dates and uses the min/max
+    to define the range.
+
+    • Seasons follow fixed 3‑month climatological groupings:
+        JFM = Jan–Mar
+        AMJ = Apr–Jun
+        JAS = Jul–Sep
+        OND = Oct–Dec
+
+    • All returned datetime objects are timezone‑naive and represent local calendar dates.
     """
+
+    # -----------------------------
+    # Helper functions: 
+    # -----------------------------
+    # Parse a single input
     def to_dt(d):
-        if isinstance(d, int): return date(d, 1, 1)
+        if isinstance(d, int):
+            return date(d, 1, 1)
+
         if isinstance(d, str):
-            # Try to coerce year-like strings to int
+            # Year-like string
             if d.isdigit() and len(d) == 4:
                 return date(int(d), 1, 1)
+
             for fmt in ("%Y%m%d%H%M%S", "%Y%m%d", "%Y-%m-%d"):
                 try:
                     return datetime.strptime(d, fmt)
                 except ValueError:
-                    continue
+                    pass
             raise ValueError(f"Could not parse string: {d}")
-        if isinstance(d, (datetime, date)): return d
+
+        if isinstance(d, (datetime, date)):
+            return d
+
         raise TypeError(f"Unsupported date type: {type(d)}")
 
+    def apply_period_format(start_dt, end_dt, tuple_value):
+        if period_format == "tuple":
+            return tuple_value
+        if period_format == "datetime":
+            return start_dt
+        if period_format == "bounds":
+            return (start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d"))
+        raise ValueError(f"Unknown period_format: {period_format}")
+
+    # -----------------------------
+    # Normalize input list
+    # -----------------------------
     if dates is None:
         return None
 
-    # Normalize input to list
     if not isinstance(dates, list):
         dates = [dates]
 
     # Coerce year-like strings to int
-    dates = [int(d) if isinstance(d, str) and d.isdigit() and len(d) == 4 else d for d in dates]
-    
-    # Range of years
+    dates = [int(d) if isinstance(d, str) and d.isdigit() and len(d) == 4 else d
+             for d in dates]
+
+    # -----------------------------
+    # Determine start/end
+    # -----------------------------
     if all(isinstance(d, int) for d in dates):
+        # Year range
         start = date(dates[0], 1, 1)
-        end = date(dates[-1], 12, 31)
+        end   = date(dates[-1], 12, 31)
 
-    # Handle two dates (any type)
-    elif len(dates) == 2 and all(isinstance(d, (str, int, date, datetime)) for d in dates):
+    elif len(dates) == 2:
+        # Two endpoints
         start, end = sorted([to_dt(d) for d in dates])
-    
-    # Treat as list of individual dates
-    else:
-        return [format_date(to_dt(d), format) for d in dates]
 
-    # Build range
-    step = timedelta(days=1)
-    current = start
-    out = []
-    while current <= end:
-        out.append(format_date(current, format))
-        current += step
-    return out
+    else:
+        # List of individual dates
+        parsed = [to_dt(d) for d in dates]
+        if output == "days":
+            # Return exactly the dates provided
+            return [format_date(d, day_format) for d in parsed]
+        
+        # For weeks/months/seasons/years, treat as range
+        start = min(parsed)
+        end   = max(parsed)
+
+    # Ensure datetime
+    if isinstance(start, date) and not isinstance(start, datetime):
+        start = datetime(start.year, start.month, start.day)
+    if isinstance(end, date) and not isinstance(end, datetime):
+        end = datetime(end.year, end.month, end.day)
+
+    # -----------------------------
+    # Output: DAYS
+    # -----------------------------
+    if output == "days":
+        out = []
+        cur = start
+        while cur <= end:
+            out.append(format_date(cur, day_format))
+            cur += timedelta(days=1)
+        return out
+
+    # -----------------------------
+    # Output: DOYS
+    # -----------------------------
+    if output == "doys":
+        out = []
+        cur = start
+        while cur <= end:
+            year = cur.year
+            doy = cur.timetuple().tm_yday
+            tup = (year, doy)
+            # DOY uses period_format just like other non-day periods
+            out.append(apply_period_format(cur, cur, tup))
+            cur += timedelta(days=1)
+
+        return out
+
+    # -----------------------------
+    # Output: WEEKS
+    # -----------------------------
+    if output == "weeks":
+        # Snap to Monday
+        cur = start - timedelta(days=start.isocalendar().weekday)
+        end_week = end - timedelta(days=end.isocalendar().weekday)
+
+        out = []
+        while cur <= end_week:
+            iso = cur.isocalendar()
+            tup = (iso.year, iso.week)
+            out.append(apply_period_format(cur, cur + timedelta(days=6), tup))
+            cur += timedelta(days=7)
+        return out
+
+    # -----------------------------
+    # Output: MONTHS
+    # -----------------------------
+    if output == "months":
+        cur = start.replace(day=1)
+        end_m = end.replace(day=1)
+
+        out = []
+        while cur <= end_m:
+            tup = (cur.year, cur.month)
+            # compute bounds
+            if cur.month == 12:
+                next_month = cur.replace(year=cur.year + 1, month=1, day=1)
+            else:
+                next_month = cur.replace(month=cur.month + 1, day=1)
+            end_dt = next_month - timedelta(days=1)
+            out.append(apply_period_format(cur, end_dt, tup))
+            cur = next_month
+        return out
+
+    # -----------------------------
+    # Output: SEASONS
+    # -----------------------------
+    if output == "seasons":
+
+        def season_start_month(m):
+            if m in (1,2,3): return 1
+            if m in (4,5,6): return 4
+            if m in (7,8,9): return 7
+            return 10
+
+        cur = start.replace(month=season_start_month(start.month), day=1)
+        end_s = end.replace(month=season_start_month(end.month), day=1)
+
+        out = []
+        while cur <= end_s:
+            m = cur.month
+            if m == 1:  code = "JFM"
+            elif m == 4: code = "AMJ"
+            elif m == 7: code = "JAS"
+            else:        code = "OND"
+
+            # bounds
+            if m == 10:
+                next_season = cur.replace(year=cur.year + 1, month=1, day=1)
+            else:
+                next_season = cur.replace(month=m + 3, day=1)
+            end_dt = next_season - timedelta(days=1)
+
+            tup = (cur.year, code)
+            out.append(apply_period_format(cur, end_dt, tup))
+
+            cur = next_season
+        return out
+
+    # -----------------------------
+    # Output: YEARS
+    # -----------------------------
+    if output == "years":
+        out = []
+        for y in range(start.year, end.year + 1):
+            s = datetime(y, 1, 1)
+            e = datetime(y, 12, 31)
+            tup = (y,)
+            out.append(apply_period_format(s, e, tup))
+        return out
+
+    # -----------------------------
+    # Unknown output
+    # -----------------------------
+    raise ValueError(f"Unknown output type: {output}")
+   
 
 def get_source_file_dates(files, format="yyyymmdd", placeholder=None):
     """

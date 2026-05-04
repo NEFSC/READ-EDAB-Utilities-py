@@ -25,7 +25,7 @@ from utilities import get_summary_metadata
 from utilities import get_default_metadata
 from utilities import get_source_metadata
 from utilities import parse_dataset_info
-from utilities import get_source_file_dates, get_prod_files, get_dates, make_product_output_dir
+from utilities import get_source_file_dates, get_prod_files, get_dates
 
 
 """
@@ -33,7 +33,7 @@ CALC_PHYTOSIZECLASS create daily phytoplankton size class files from daily satel
 It uses the Northeast U.S. regionally tuned phytoplankton size class model based on Turner et al. (2021) to compute the micro, nano, and picoplankton fractions of total chlorophyll.
 Main Functions:
     - run_psc_pipline: Main function to run the full pipeline
-    - build_psc_date_map: Constructs a date→(CHL, SST, PSC) file path mapping and determines which files need to be processed
+    - build_psc_date_map: Constructs a date → (CHL, SST, PSC) file path mapping and determines which files need to be processed
     - process_daily_psc: Runs the psc_models function using daily CHL and SST inputs, adds metadata, and saves the data as a netcdf file
     - phyto_size_turner: Calculates the micro, nano, and picoplankton fractions of total chlorophyll using the Turner et al. (2021) model
 
@@ -115,8 +115,9 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
     sst_map = {d: f for d, f in zip(sst_dates, sst_files) if d}
 
     # Build PSC file map
-    output_dir = make_product_output_dir('CHL','PSC',dataset=chl_dataset,subset=subset)
-    print(output_dir)
+    #output_dir = make_product_output_dir('CHL','PSC',dataset=chl_dataset,subset=subset)
+    output_dir = get_prod_files('PSC',dataset=chl_dataset,map=subset,getfilepath=True,make_dir=True)
+    
     info = parse_dataset_info(output_dir)
     psc_map = {}
     for date in chl_dates:
