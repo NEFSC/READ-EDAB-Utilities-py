@@ -36,6 +36,7 @@ def bootstrap_environment(preferred=None, verbose=False):
         "khyde_laptop": "/Users/kimberly.hyde/Documents/nadata/RESOURCES/",
         "network": "/Volumes/EDAB_Resources/",
         "satdata": "/mnt/EDAB_Resources/",
+        "hsynan":r"\\nefscdata\EDAB_Resources",
         "container": "/mnt2/"
     }
 
