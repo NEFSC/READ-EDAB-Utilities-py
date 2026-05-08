@@ -43,7 +43,7 @@ def get_metadata_table(metapath=None,sheet=None) -> dict:
     """
 
     if metapath is None:
-        dir = env["metadata_path"]
+        dir = env["metadata_path_copy"]
         metapath = os.path.join(dir,'EDAB_metadata_copy.xlsx')
 
     xls = pd.ExcelFile(metapath)
