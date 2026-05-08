@@ -364,7 +364,15 @@ def resolve_dataset_map(dataset_products,
 
     if not candidate_maps:
         return None, None
-
+    
+    # Prioritize the default_map (e.g., 'GLOBAL_4KM') unless one is provided
+    if default_map:
+        preferred_maps = [m for m in candidate_maps if default_map in m[0]]
+        if preferred_maps:
+            candidate_maps = preferred_maps
+            if provenance_log is not None:
+                provenance_log['resolution_steps'].append(f"Filtered candidates by default_map='{default_map}'")
+                            
     # --- Handle multiple matches ---
     if len(candidate_maps) > 1:
 
