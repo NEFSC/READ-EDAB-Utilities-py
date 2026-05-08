@@ -150,17 +150,11 @@ def get_dataset_dirs(dataset=None,verbose=True):
               If dataset is provided, returns only its matching subfolders.
 
     """
-    try:
-        root_dir = env.get("dataset_path")
-        if not root_dir or not os.path.exists(root_dir):
-            root_dir = get_datasets_source(verbose=verbose)
-    except Exception as e:
-        root_dir = get_datasets_source(verbose=verbose)
+    root_dir = get_datasets_source(verbose=verbose)
     
     if verbose:
         print(f"🔍 SCANNING ROOT DIRECTORY: {root_dir}")
 
-    #root_dir = env["dataset_path"]
     dataset_info_map = dataset_defaults()
     results = {}
     for dirpath, dirnames, _ in os.walk(root_dir): 
