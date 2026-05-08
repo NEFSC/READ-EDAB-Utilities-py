@@ -469,7 +469,7 @@ def parse_dataset_info(pathlist, base=None):
     dataset_info = dataset_defaults()
 
     if base is None:
-        base = env["dataset_path"]
+        base = get_datasets_source(verbose=False)
     
     base = os.path.abspath(base)
     
