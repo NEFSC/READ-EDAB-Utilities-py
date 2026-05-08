@@ -600,7 +600,6 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
 
                 # Product Specific Attributes
                 try:
-                    print(f"Adding prod ({prod}) metdata...")
                     base_prod_attrs = build_product_attributes(prod)
                     attrs["product_name"] = base_prod_attrs.get("long_name", prod)
                 except ValueError as e:
