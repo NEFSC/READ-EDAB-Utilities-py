@@ -109,7 +109,8 @@ def get_datasets_source(preferred=None,verbose=False):
     input_dirs = {
         "laptop": r"/Users/kimberly.hyde/Documents/nadata/DATASETS/",
         "network": r"/Volumes/EDAB_Datasets/",
-        "server": r"/mnt/EDAB_Datasets/"
+        "server": r"/mnt/EDAB_Datasets/",
+        "hsynan":r"\\nefscdata\EDAB_Resources",
     }
 
     # If preferred is specified, try it first
@@ -149,7 +150,17 @@ def get_dataset_dirs(dataset=None,verbose=True):
               If dataset is provided, returns only its matching subfolders.
 
     """
-    root_dir = env["dataset_path"]
+    try:
+        root_dir = env.get("dataset_path")
+        if not root_dir or not os.path.exists(root_dir):
+            root_dir = get_datasets_source(verbose=verbose)
+    except Exception as e:
+        root_dir = get_datasets_source(verbose=verbose)
+    
+    if verbose:
+        print(f"🔍 SCANNING ROOT DIRECTORY: {root_dir}")
+
+    #root_dir = env["dataset_path"]
     dataset_info_map = dataset_defaults()
     results = {}
     for dirpath, dirnames, _ in os.walk(root_dir): 
@@ -226,7 +237,7 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
     all_sources = get_dataset_dirs(verbose=False)
     
     if dataset not in all_sources:
-        print(f"❌ {dataset}' not found in available sources.")
+        print(f"❌ {dataset} not found in available sources.")
         return None
     
     # Extract nested SOURCE and OUTPUT paths
