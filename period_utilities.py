@@ -1549,22 +1549,17 @@ def map_inputs_to_period(period_code, output_period, spans, vspans, range_by_yea
         # Extract the tokens for this year
         tokens_for_year = vspans["tokens"][mask]
 
+
         if period_code == "A":
+            # Grab all unique months found within this year's mask
+            unique_months = set(vspans["months"][mask])
+
             # Annual periods require exactly 12 monthly inputs
-            monthly_mask = [
-                (tok.startswith("M_") and tok[2:6] == f"{year}")
-                for tok in vspans["tokens"]
-            ]
-
-            # Extract months for this year
-            months = [tok[2:8] for tok in vspans["tokens"][monthly_mask]]
-
-            # Require exactly 12 unique YYYYMM values
-            if len(set(months)) != 12:
+            if len(unique_months) != 12:
                 return []
             return tokens_for_year.tolist()
         
-        # If there are *zero* daily inputs, exclude the year
+        # If there are *zero* daily inputs for 'Y', exclude the year
         if len(tokens_for_year) == 0:
             return []
 

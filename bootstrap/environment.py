@@ -69,6 +69,7 @@ def bootstrap_environment(preferred=None, verbose=False):
     python_path = root_path / "python"
     workflow_path = root_path / "workflow_resources"
     metadata_path = workflow_path / "metadata"
+    metadata_path_copy = workflow_path / "metadata_copy"
     lookup_path = workflow_path / "lookuptables"
     satlog_path = root_path / "logs/satprocessing"
     utilities_path = python_path / "utilities"
