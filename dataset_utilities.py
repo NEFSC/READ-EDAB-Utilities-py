@@ -150,17 +150,11 @@ def get_dataset_dirs(dataset=None,verbose=True):
               If dataset is provided, returns only its matching subfolders.
 
     """
-    try:
-        root_dir = env.get("dataset_path")
-        if not root_dir or not os.path.exists(root_dir):
-            root_dir = get_datasets_source(verbose=verbose)
-    except Exception as e:
-        root_dir = get_datasets_source(verbose=verbose)
+    root_dir = get_datasets_source(verbose=verbose)
     
     if verbose:
         print(f"🔍 SCANNING ROOT DIRECTORY: {root_dir}")
 
-    #root_dir = env["dataset_path"]
     dataset_info_map = dataset_defaults()
     results = {}
     for dirpath, dirnames, _ in os.walk(root_dir): 
@@ -370,7 +364,15 @@ def resolve_dataset_map(dataset_products,
 
     if not candidate_maps:
         return None, None
-
+    
+    # Prioritize the default_map (e.g., 'GLOBAL_4KM') unless one is provided
+    if default_map:
+        preferred_maps = [m for m in candidate_maps if default_map in m[0]]
+        if preferred_maps:
+            candidate_maps = preferred_maps
+            if provenance_log is not None:
+                provenance_log['resolution_steps'].append(f"Filtered candidates by default_map='{default_map}'")
+                            
     # --- Handle multiple matches ---
     if len(candidate_maps) > 1:
 
@@ -467,7 +469,7 @@ def parse_dataset_info(pathlist, base=None):
     dataset_info = dataset_defaults()
 
     if base is None:
-        base = env["dataset_path"]
+        base = get_datasets_source(verbose=False)
     
     base = os.path.abspath(base)
     
