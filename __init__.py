@@ -7,7 +7,7 @@ from .dataset_utilities import *
 from .file_utilities import *
 from .product_utilities import *
 from .period_utilities import *
-from .mapping_utilities import *
+from .map_utilities import *
 from .metadata_utilities import *
 from .statanom_utilities import *
 from .calc_daylength import *
