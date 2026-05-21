@@ -322,7 +322,7 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
     ds.attrs['pipeline_target_vars'] = target_vars
     return ds
 
-def compute_stats(data, var_name, time_dim, label=None, stats=None, **kwargs):
+def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None, **kwargs):
     """
     Computes summary statistics across the time dimension for a given DataArray.    
     
@@ -337,7 +337,8 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, **kwargs):
            Groupings: 'fast' (mean, min, max, count)
                       'full' (all standard linear stats)
                       'log'  (full + gmean, gstd)
-        
+    weights
+
     Returns
     -------
     xarray.Dataset
@@ -346,20 +347,36 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, **kwargs):
     """
     
     # 1. Define the Available Library
-    stats_library = {
-        'mean':   lambda x: x.mean(dim=time_dim, skipna=True),
-        'min':    lambda x: x.min(dim=time_dim, skipna=True),
-        'max':    lambda x: x.max(dim=time_dim, skipna=True),
-        'median': lambda x: x.median(dim=time_dim, skipna=True),
-        'std':    lambda x: x.std(dim=time_dim, skipna=True),
-        'sum':    lambda x: x.sum(dim=time_dim, skipna=True),
-        'var':    lambda x: x.var(dim=time_dim, skipna=True),
-        'count':  lambda x: x.notnull().sum(dim=time_dim),
-        
-        # Log-based statistics (Geometric Mean & Std) - Use .where(x > 0) to prevent log(0) or log(negative) errors
-        'gmean':  lambda x: np.exp(np.log(x.where(x > 0)).mean(dim=time_dim, skipna=True)),
-        'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).std(dim=time_dim, skipna=True))
-    }
+    if weights is not None:
+        stats_library = {
+            # 🎯 Apply weights for mathematically supported statistics
+            'mean':   lambda x: x.weighted(weights).mean(dim=time_dim, skipna=True),
+            'sum':    lambda x: x.weighted(weights).sum(dim=time_dim, skipna=True),
+            'var':    lambda x: x.weighted(weights).var(dim=time_dim, skipna=True),
+            'std':    lambda x: x.weighted(weights).std(dim=time_dim, skipna=True),
+            'gmean':  lambda x: np.exp(np.log(x.where(x > 0)).weighted(weights).mean(dim=time_dim, skipna=True)),
+            'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).weighted(weights).std(dim=time_dim, skipna=True)),
+            
+            # 🎯 Unweighted fallbacks for everything else
+            'min':    lambda x: x.min(dim=time_dim, skipna=True),
+            'max':    lambda x: x.max(dim=time_dim, skipna=True),
+            'median': lambda x: x.median(dim=time_dim, skipna=True),
+            'count':  lambda x: x.notnull().sum(dim=time_dim),
+        }
+    else:
+        # Standard unweighted library
+        stats_library = {
+            'mean':   lambda x: x.mean(dim=time_dim, skipna=True),
+            'min':    lambda x: x.min(dim=time_dim, skipna=True),
+            'max':    lambda x: x.max(dim=time_dim, skipna=True),
+            'median': lambda x: x.median(dim=time_dim, skipna=True),
+            'std':    lambda x: x.std(dim=time_dim, skipna=True),
+            'sum':    lambda x: x.sum(dim=time_dim, skipna=True),
+            'var':    lambda x: x.var(dim=time_dim, skipna=True),
+            'count':  lambda x: x.notnull().sum(dim=time_dim),
+            'gmean':  lambda x: np.exp(np.log(x.where(x > 0)).mean(dim=time_dim, skipna=True)),
+            'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).std(dim=time_dim, skipna=True))
+        }
 
     # Define standard grouping
     standard_stats = ['mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count']
@@ -529,12 +546,46 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                     if da.size == 0:
                         print(f"⚠️ Warning: DataArray is empty for {var_name}. Skipping.")
                         continue
+
+                    # Determine the weights for specific periods (e.g. weighting the number of days in a month for the annual (A) period)
+                    weights = None
+                    monthly_weights = ['M3','A','JFM','AMJ','JAS','OND']
+                    
+                    #  🎯 Extract the number of days per month
+                    if per in monthly_weights:
+                        weights = da.time.dt.days_in_month
+                        weights.name = "weights"
+                        if verbose and var_name == target_vars[0]: # Only print once per file
+                            print(f"      ⚖️ Applying days_in_month weights for {per} period...")
+                    
+                    # 🎯  Apply Triangle Weights [1, 2, 1] to the 3-Day Running Mean
+                    elif per == 'D3':
+                        # Safety check: Ensure we actually found 3 days of inputs
+                        if da.sizes['time'] == 3:
+                            weights = xr.DataArray([1.0, 2.0, 1.0], dims=['time'], coords={'time': da.time})
+                            weights.name = "weights"
+                            if verbose and var_name == target_vars[0]:
+                                print(f"      ⚖️ Applying [1, 2, 1] central weights for {per} period...")
+                        else:
+                            if verbose and var_name == target_vars[0]:
+                                print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 3. Falling back to unweighted mean.")
+                    
+                    # 🎯 Apply Symmetric Tent Weights to the 8-Day Running Mean
+                    elif per == 'D8':
+                        if da.sizes['time'] == 8:
+                            weights = xr.DataArray([1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.0], dims=['time'], coords={'time': da.time})
+                            weights.name = "weights"
+                            if verbose and var_name == target_vars[0]:
+                                print(f"      ⚖️ Applying [1, 2, 3, 4, 4, 3, 2, 1] central weights for {per} period...")
+                        else:
+                            if verbose and var_name == target_vars[0]:
+                                print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 8. Falling back to unweighted mean.")
                     
                     # Compute the statistics for this specific variable
                     with timer(f"compute_stats ({var_name})", debug=debug):
                         # 🚨 Pass 'var_name' into compute_stats so it names the outputs correctly 
                         # (e.g. PSC_micro_mean instead of PSC_mean)
-                        var_stats_ds = compute_stats(da, var_name, time_dim='time', **kwargs)
+                        var_stats_ds = compute_stats(da, var_name, time_dim='time', weights=weights, **kwargs)
                     
                     computed_datasets.append(var_stats_ds)
 
