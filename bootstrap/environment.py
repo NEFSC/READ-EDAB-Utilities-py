@@ -71,7 +71,7 @@ def bootstrap_environment(preferred=None, verbose=False):
     metadata_path = workflow_path / "metadata"
     lookup_path = workflow_path / "lookuptables"
     satlog_path = root_path / "logs/satprocessing"
-    utilities_path = python_path / "utilities"
+    utilities_path = python_path / "utilities" / "src" / "utilities"
 
     # Validate existence
     for p in [python_path, workflow_path, metadata_path, lookup_path,satlog_path,utilities_path]:
