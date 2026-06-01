@@ -4,7 +4,7 @@ import re
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
-"""
+""" 
 Purpose:
     FUNCTION_UTILITIES is a collection of utility functions for working with the python functions in utilities.
 
