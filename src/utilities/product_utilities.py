@@ -64,7 +64,9 @@ def product_defaults():
         'CHL_FRONTS': ('CHL_FRONTS','OCCCI', 'PRODUCT'),
         'SST_FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT'),
         'FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT'),
-        'BTEMP': ('BTEMP','GLORYS','SOURCE')
+        'BTEMP': ('BTEMP','GLORYS','SOURCE'),
+        'DO': ('DO','MOM6','SOURCE'),
+        'ARAG': ('ARAG','MOM6','SOURCE')
     }
 
     return prod_info_map
@@ -132,6 +134,10 @@ def netcdf_product_defaults():
         'TESTDATASET': {
             'SST_MEAN': 'sst_mean',
             'SST_MAX': 'sst_max',
+        },
+        'MOM6': {
+            'DO': 'btm_o2',
+            'ARAG': 'aragonite_saturation'
         }
     }
 

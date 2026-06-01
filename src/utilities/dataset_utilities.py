@@ -59,7 +59,8 @@ def dataset_defaults():
         'MUR': ('V4.1','GLOBAL_1KM', 'SST'),
         'OCCCI': ('V6.0','GLOBAL_4KM', 'CHL'),
         'OISST': ('V2','GLOBAL_25KM', 'SST'),
-        'PACE': ('V3.1','GLOBAL_4KM','CHL')
+        'PACE': ('V3.1','GLOBAL_4KM','CHL'),
+        'MOM6': ('V0.0','NES_9KM','BTEMP')
     }
 
     return dataset_info_map
