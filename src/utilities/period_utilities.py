@@ -1626,10 +1626,9 @@ def map_inputs_to_period(period_code, output_period, spans, vspans, range_by_yea
     
     if period_code == "ANNUAL":
         start_year, end_year = output_period  
-        mask = [
-            tok.startswith("A_") and start_year <= int(tok[2:6]) <= end_year
-            for tok in vspans["tokens"]
-        ]
+        #Grab all input files whose years fall within the baseline
+        mask = (vspans["years"] >= start_year) & (vspans["years"] <= end_year)
+        
         return vspans["tokens"][mask].tolist()
     
     if period_code == "YEAR":
