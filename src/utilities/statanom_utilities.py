@@ -423,6 +423,22 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         
         boost_file_limits()
     
+        
+        def sanitize_for_netcdf(ds):
+            """
+            Recursively scrubs all dictionaries and NoneTypes from a dataset's attributes.
+            Must be run immediately before .to_netcdf()
+            """
+            for obj in [ds] + [ds[var] for var in ds.variables]:
+                for k, val in list(obj.attrs.items()):
+                    if isinstance(val, dict):
+                        # Extract the default string if it's a schema dictionary
+                        obj.attrs[k] = val.get('default', str(val))
+                    elif val is None:
+                        # Xarray also crashes if it tries to save a NoneType attribute
+                        obj.attrs[k] = "None"
+            return ds
+        
         @contextmanager
         def timer(label, debug=False):
             start = time.perf_counter()
@@ -455,7 +471,8 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 try:                
                     with timer(f"xr.open_mfdataset (Attempt {attempt+1})", debug=debug): # 'with' ensures file handles are released automatically, even on crash.
                         ds = xr.open_mfdataset(
-                            task['inputs'], 
+                            #task['inputs'], 
+                            input_files,
                             combine="by_coords",
                             decode_timedelta=True,
                             chunks={'time': 1, 'lat': 'auto', 'lon': 'auto'}, 
@@ -472,7 +489,8 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                     # If NOT on the last attempt, try to find the bad files and retry
                     if attempt < max_retries - 1:
                         if verbose: print(f"  ⚠️  Hiccup on {per} (Attempt {attempt+1}). Retrying in 2s...")
-
+                        if verbose: print(f"  🛑 ROOT CAUSE ERROR: {e}")
+                        
                         # Find the bad files
                         bad_files_info = corrupt_file_detector(input_files)    
                         
@@ -702,7 +720,10 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 
                 # Assign global attributes
                 stats_ds.attrs = attrs
-                        
+
+                # Sanitize the dataset at the last possible millisecond
+                stats_ds = sanitize_for_netcdf(stats_ds)
+                
                 # 6. Write the netcdf file to disk 
                 with timer("stats_ds.to_netcdf (Disk I/O)", debug=debug):
                     
