@@ -12,13 +12,12 @@ def init_notebook_environment(preferred=None, verbose=False):
     hostname = socket.gethostname()
 
     resources_root = {
-        "khyde_laptop": "/Users/kimberly.hyde/Documents/nadata/RESOURCES/",
-        "gdavis": r"C:\\Users\\grace.davis\\Documents\\Hollings_2026\\RESOURCES\\",
-        "egable": r"C:\\Users\\edmund.gable\\Documents\\GitHub\\RESOURCES\\",
-        "network": "/Volumes/EDAB_Resources/",
-        "satdata": "/mnt/EDAB_Resources/",
-        "hsynan":r"\\nefscdata\EDAB_Resources",
-        "container": "/mnt2/"
+        "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
+        "nefscsatdata": "/mnt/EDAB_Resources",
+        "guihyde": "/mnt/EDAB_Resources",
+        "Mac.localdomain": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
+        "gdavis": "C:/Users/grace.davis/Documents/Hollings_2026/RESOURCES",
+        "egable": "C:/Users/edmund.gable/Documents/GitHub/RESOURCES"
     }
 
     base_path = None
