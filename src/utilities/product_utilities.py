@@ -147,8 +147,8 @@ def get_nc_prod(dataset,product):
     Returns internal variable name and metadata for a given dataset and product.
 
     Parameters:
-        dataset_name (str): Dataset key (e.g., 'GLOBCOLOUR')
-        product_name (str): Product key (e.g., 'CHL1')
+        dataset (str): Dataset key (e.g., 'GLOBCOLOUR')
+        product(str): Product key (e.g., 'CHL1')
 
     Returns:
         dict with keys like 'var_name', 'source', 'frequency', or None if not found
@@ -194,34 +194,26 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
 
     This function resolves the correct path based on product metadata, dataset defaults,
     and optional period codes (e.g. 'M' for monthly stats). It supports fallback logic
-    when dataset_map is not provided, and redirects to *_STATS folders for derived products.
+    when dataset_map is not provided, and redirects to PRODUCTS folders for derived products.
 
-    Parameters:
+    Required Parameters:
     ----------
-    prod: str
-        Product name (e.g. 'CHL', 'PSC', 'SST').
-    dataset: str, optional
-        Dataset name (e.g. 'OCCCI', 'ACSPO'). Defaults to product's default dataset.
-    dataset_version: str, optional
-        Version string (e.g. 'V6.0'). Defaults to dataset default.
-    dataset_type: str, optional
-        Type of dataset folder (e.g. 'SOURCE' or 'PRODUCTS'). Defaults to product default in product_defaults().
-    dataset_map: str, optional
-        Specific map folder (e.g. 'NES_4KM_DAILY'). If not provided, will be auto-resolved.
-    map_region: str, optional
-        Map region (e.g. 'NES', 'GLOBAL'). Used for fallback resolution.
-    resolution: str, optional
-        Resolution in km (e.g. '4', '25'). Used for fallback resolution.
-    type: str, optional
-        Data type (e.g. 'DAILY', 'STATS', 'ANOMS'). Used for fallback resolution.
-    prod_type: str, optional
-        Subfolder under product (e.g. 'ANOMALY', 'CLIMATOLOGY').
-    period: str, optional
-        Period code (e.g. 'M', 'D3', 'YEAR'). Used to redirect to *_STATS folders.
-    getfilepath: bool, optional
-        If True, returns the resolved path instead of listing files.
-    verbose: bool, optional
-        If True, prints detailed resolution steps.
+    prod (str): Product name (e.g. 'CHL', 'PSC', 'SST').
+    
+    Optional Parameters:
+    ----------
+    dataset (str): Dataset name (e.g. 'OCCCI', 'ACSPO'). Defaults to product's default dataset.
+    dataset_version (str): Version string (e.g. 'V6.0'). Defaults to dataset default.
+    dataset_type (str): Type of dataset folder (e.g. 'SOURCE' or 'PRODUCTS'). Defaults to product default in product_defaults().
+    dataset_map (str): Specific map folder (e.g. 'NES_4KM_DAILY'). If not provided, will be auto-resolved.
+    map_region (str): Map region (e.g. 'NES', 'GLOBAL'). Used for fallback resolution.
+    resolution (str): Resolution in km (e.g. '4', '25'). Used for fallback resolution.
+    type (str): Data type (e.g. 'DAILY', 'STATS', 'ANOMS'). Used for fallback resolution.
+    prod_type (str): Subfolder under product (e.g. 'ANOMALY', 'CLIMATOLOGY').
+    period (str): Period code (e.g. 'M', 'D3', 'YEAR'). Used to redirect to *_STATS folders.
+    getfilepath (bool): If True, returns the resolved path instead of listing files.
+    make_dir (bool): If True, creates the directory if it does not exist.
+    make_dirverbose (bool): If True, prints detailed resolution steps.
 
     Returns:
     -------
@@ -256,7 +248,6 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
     map_region = kwargs.get('map_region')
     data_type = kwargs.get('data_type')
     prod_type = kwargs.get('prod_type')
-
 
     # --- Step 3: Initialize a provenance dictionary to track decisions for debugging ---
     provenance_log = {
@@ -312,7 +303,7 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
     transformed_path = False
     # 🎯 TRIGGER LOGIC: Transform if writing outputs or looking for derived periods
     is_derived_period = period and period not in ['D', 'DD']
-    if getfilepath or is_derived_period or data_type == 'ANOMS':    
+    if is_derived_period or data_type == 'ANOMS':    
         try:
             # Get period_info dictionary/tuple
             p_info = get_period_info(period) if period else {}
@@ -360,73 +351,10 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
             verbose_trace(f"📂 Transformed path to {suffix}: {path}", verbose)
         except Exception as e:
             verbose_trace(f"⚠ Path transformation failed: {e}", verbose)
-    """
-    is_derived_type = data_type in ['STATS', 'ANOMS', 'CLIMS']
-    
-    #if getfilepath and (kwargs.get('map_region') or kwargs.get('resolution')):
-    if getfilepath or is_derived_period or is_derived_type:    
-        try:
-            # Get suffix from period_info
-            p_info = get_period_info(period) if period else None
-            
-            # 🎯 Safely check for climatology (handles both dicts and tuples)
-            is_clim = False
-            if isinstance(p_info, dict):
-                is_clim = p_info.get('is_climatology', False)
-            elif isinstance(p_info, tuple) and len(p_info) > 4:
-                is_clim = p_info[4]
-            
-            # Determine Suffix (Daily, Stats, or Climatology)
-            if is_clim: 
-                suffix = 'CLIMS'
-            elif period in ['D', 'DD']:
-                suffix = 'DAILY'
-            elif is_derived_type:
-                suffix = data_type
-            else:
-                suffix = 'STATS'
-
-            # Manually override for anomalies if requested
-            if data_type == 'ANOMS' or (period and 'ANOM' in period):
-                suffix = 'ANOMS'
-
-            # --- Reconstruction Logic ---
-            parts = dataset_map.split('_') if dataset_map else ['GLOBAL', '4KM']
-            
-            # Use map_region/resolution overrides if provided, else keep original
-            region = map_region.upper() if map_region else parts[0]
-            
-            if resolution:
-                res_val = str(resolution).upper()
-                resolution_str = res_val if 'KM' in res_val else f"{res_val}KM"
-            else:
-                resolution_str = parts[1] if len(parts) > 1 else '4KM'
-            
-            new_map = f"{region}_{resolution_str}_{suffix}"
-
-            # --- Transform the physical path ---
-            res_info = parse_dataset_info(path)
-            if res_info:
-                info = res_info[0]
-                # Replace the map (e.g., GLOBAL_4KM_DAILY -> NES_2KM_STATS)
-                path = path.replace(info["dataset_map"], new_map)
-                
-                # Ensure we redirect to /PRODUCTS/ for any derived data 
-                # OR if we are subsetting a region (e.g. GLOBAL -> NES)
-                if suffix != 'DAILY' or region != parts[0]:
-                    path = path.replace(f'/{info["dataset_type"]}/', "/PRODUCTS/")
-            
-            dataset_map = new_map 
-            transformed_path = True
-            verbose_trace(f"📂 Transformed path to {suffix}: {path}", verbose)
-        except Exception as e:
-            verbose_trace(f"⚠ Path transformation failed: {e}", verbose)
-    """ 
     
     if not dataset_map or not path:
         print(f"⚠ No valid dataset_map found for product '{prod}' with data_type='{data_type}'")
         return []
-
 
     # --- Step 8: Search for product path ---
     candidate_types = [dataset_type] if dataset_type in dataset_products else list(dataset_products.keys())    
