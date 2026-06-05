@@ -31,7 +31,7 @@ def derive_dataset_path(resources_path: Path) -> Path:
 def bootstrap_environment(preferred=None, verbose=False):
     hostname = socket.gethostname()
 
-    # Map hostnames to RESOURCES root directories
+    # 1. Explicitly map RESOURCES directoriess
     resources_root = {
         "khyde_laptop": "/Users/kimberly.hyde/Documents/nadata/RESOURCES/",
         "gdavis": r"C:\\Users\\grace.davis\\Documents\\Hollings_2026\\RESOURCES\\",
@@ -42,8 +42,21 @@ def bootstrap_environment(preferred=None, verbose=False):
         "container": "/mnt2/"
     }
 
-    # Resolve RESOURCES root
+    # 1. Explicitly map DATASETS directories
+    datasets_root = {
+        "khyde_laptop": "/Users/kimberly.hyde/Documents/nadata/DATASETS/",
+        "gdavis": r"C:\\Users\\grace.davis\\Documents\\Hollings_2026\\DATASETS\\",
+        "egable": r"C:\\Users\\edmund.gable\\Documents\\GitHub\\DATASETS\\",
+        "network": "/Volumes/EDAB_Datasets/",
+        "satdata": "/mnt/EDAB_Datasets/",
+        "hsynan":r"\\nefscdata\EDAB_Datasets",
+        "container": "/mnt2/"
+    }
+
+    active_key = None
     root_path = None
+
+    # Resolve RESOURCES root
     if preferred:
         if preferred in resources_root:
             candidate = Path(resources_root[preferred])
@@ -56,18 +69,38 @@ def bootstrap_environment(preferred=None, verbose=False):
         else:
             print(f"⚠ Unrecognized preferred label '{preferred}'. Valid options: {list(resources_root.keys())}")
 
+    # If no preferred key (or it failed), try the hostname
+    if root_path is None and hostname in resources_root:
+        candidate = Path(resources_root[hostname])
+        if candidate.exists():
+            active_key = hostname
+            root_path = candidate
+            if verbose:
+                print(f"✓ Using hostname RESOURCES directory: [{hostname}] → {candidate}")
+
+    # Fallback: Check all remaining keys to see if any valid path exists on this machine
     if root_path is None:
-        root_path = get_path(resources_root)
-        if root_path and verbose:
-            print(f"✓ Using default RESOURCES directory: {root_path}")
+        for key, path_str in resources_root.items():
+            candidate = Path(path_str)
+            if candidate.exists():
+                active_key = key
+                root_path = candidate
+                if verbose:
+                    print(f"✓ Using fallback RESOURCES directory: [{key}] → {candidate}")
+                break
 
     if root_path is None:
-        raise FileNotFoundError("No valid RESOURCES directory found.")
+        raise FileNotFoundError("[BOOTSTRAP] No valid RESOURCES directory found on this machine.")
 
-    # Derive DATASETS path by replacing 'RESOURCES' with 'DATASETS'
-    dataset_path = derive_dataset_path(root_path)
+    # --- Resolve DATASETS Root ---
+    if active_key in datasets_root:
+        dataset_path = Path(datasets_root[active_key])
+        if not dataset_path.exists():
+            raise FileNotFoundError(f"[BOOTSTRAP] Mapped DATASETS path does not exist: {dataset_path}")
+    else:
+        raise KeyError(f"[BOOTSTRAP] No dataset mapping found for key: '{active_key}'")
 
-    # Resolve subdirectories
+    # --- Resolve subdirectories ---
     python_path = root_path / "python"
     workflow_path = root_path / "workflow_resources"
     metadata_path = workflow_path / "metadata"
@@ -75,7 +108,7 @@ def bootstrap_environment(preferred=None, verbose=False):
     satlog_path = root_path / "logs/satprocessing"
     utilities_path = python_path / "utilities" / "src" / "utilities"
 
-    # Validate existence
+    # --- Validate existence of subdirectories ---
     for p in [python_path, workflow_path, metadata_path, lookup_path,satlog_path,utilities_path]:
         if not p.is_dir():
             raise FileNotFoundError(f"[BOOTSTRAP] Missing expected directory: {p}")

@@ -105,34 +105,16 @@ def get_datasets_source(preferred=None,verbose=False):
         FileNotFoundError: If none of the provided directories exist.
     """
     
-    # List of input directories in the ordered preference (e.g. if two are available, the first will be choosen)
-    input_dirs = {
-        "default": str(env['dataset_path']),
-        "network": r"/Volumes/EDAB_Datasets/",
-        "server": r"/mnt/EDAB_Datasets/"
-    }
-    
-    # If preferred is specified, try it first
-    if preferred:
-        if preferred in input_dirs:
-            path = input_dirs[preferred]
-            if os.path.exists(path):
-                if verbose:
-                    print(f"✓ Using specified input directory: [{preferred}] → {path}")
-                return path
-            else:
-                print(f"✗ Preferred input source '{preferred}' not available — falling back to defaults.")
-        else:
-            print(f"⚠ Preferred label '{preferred}' not recognized. Valid options: {list(input_dirs.keys())}")
+    dataset_path = env.get("dataset_path")
 
-    # Try remaining options
-    for label, path in input_dirs.items():
-        if os.path.exists(path):
-            if verbose:
-                print(f"✓ Using default input data directory: [{label}] → {path}")
-            return path
+    # Safety check to ensure the path exists (though env generation already checks this)
+    if dataset_path and dataset_path.exists():
+        if verbose:
+            print(f"✓ Using dataset directory from environment: {dataset_path}")
+        # Returning as a string to maintain compatibility with your existing code
+        return str(dataset_path)
 
-    raise FileNotFoundError("No valid input data directory found.")
+    raise FileNotFoundError("No valid DATASETS directory found in the provided environment.")
 
 #--------------------------------------------------------------------------------------
 def get_dataset_dirs(dataset=None,verbose=True):
