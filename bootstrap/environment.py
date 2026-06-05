@@ -34,6 +34,8 @@ def bootstrap_environment(preferred=None, verbose=False):
     # Map hostnames to RESOURCES root directories
     resources_root = {
         "khyde_laptop": "/Users/kimberly.hyde/Documents/nadata/RESOURCES/",
+        "gdavis": r"C:\\Users\\grace.davis\\Documents\\Hollings_2026\\RESOURCES\\",
+        "egable": r"C:\\Users\\edmund.gable\\Documents\\GitHub\\RESOURCES\\",
         "network": "/Volumes/EDAB_Resources/",
         "satdata": "/mnt/EDAB_Resources/",
         "hsynan":r"\\nefscdata\EDAB_Resources",
