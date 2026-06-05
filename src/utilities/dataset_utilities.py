@@ -14,7 +14,6 @@ Main Functions:
     - get_dataset_products: Searches for products within the given SOURCE and PRODUCTS paths for a dataset
     - parse_dataset_info: Extracts structured metadata from a full dataset path.
     - resolve_dataset_map: Resolves the appropriate dataset_map folder for a given product within a dataset structure.
-    - get_dataset_vars: Determines which variables to regrid from a source dataset.
 
 Helper Functions:
     - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes
@@ -39,7 +38,7 @@ Modification History
 
 def dataset_defaults():
     """
-    Returns the default/primary version, datatype and main product EDAB datasets
+    Returns the default/primary version, datatype and main product gridded datasets used in EDAB workflows.
 
     Parameters:
         No inputs
@@ -108,12 +107,11 @@ def get_datasets_source(preferred=None,verbose=False):
     
     # List of input directories in the ordered preference (e.g. if two are available, the first will be choosen)
     input_dirs = {
-        "laptop": r"/Users/kimberly.hyde/Documents/nadata/DATASETS/",
+        "default": str(env['dataset_path']),
         "network": r"/Volumes/EDAB_Datasets/",
-        "server": r"/mnt/EDAB_Datasets/",
-        "hsynan":r"\\nefscdata\EDAB_Resources",
+        "server": r"/mnt/EDAB_Datasets/"
     }
-
+    
     # If preferred is specified, try it first
     if preferred:
         if preferred in input_dirs:
@@ -242,7 +240,7 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
         None
         )    
     output_data_path = next(
-        (path for key, path in all_sources[dataset].items() if "OUTPUT" in key),
+        (path for key, path in all_sources[dataset].items() if "PRODUCTS" in key),
         None
         )    
 
@@ -252,11 +250,11 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
     
     if not source_data_path:
         if verbose:
-            print(f"⚠ No 'SOURCE' path found for '{dataset}' – proceeding with OUTPUT only.")
+            print(f"⚠ No 'SOURCE' path found for '{dataset}' – proceeding with PRODUCTS only.")
 
     if not output_data_path:
         if verbose:
-            print(f"⚠ No 'OUTPUT' path found for '{dataset}' – proceeding with SOURCE only.")
+            print(f"⚠ No 'PRODUCTS' path found for '{dataset}' – proceeding with SOURCE only.")
 
     results = {}
     
