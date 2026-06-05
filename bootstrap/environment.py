@@ -33,24 +33,22 @@ def bootstrap_environment(preferred=None, verbose=False):
 
     # 1. Explicitly map RESOURCES directoriess
     resources_root = {
-        "khyde_laptop": "/Users/kimberly.hyde/Documents/nadata/RESOURCES/",
-        "gdavis": r"C:\\Users\\grace.davis\\Documents\\Hollings_2026\\RESOURCES\\",
-        "egable": r"C:\\Users\\edmund.gable\\Documents\\GitHub\\RESOURCES\\",
-        "network": "/Volumes/EDAB_Resources/",
-        "satdata": "/mnt/EDAB_Resources/",
-        "hsynan":r"\\nefscdata\EDAB_Resources",
-        "container": "/mnt2/"
+        "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
+        "nefscsatdata": "/mnt/EDAB_Resources",
+        "guihyde": "/mnt/EDAB_Resources",
+        "Mac.localdomain": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
+        "gdavis": "C:/Users/grace.davis/Documents/Hollings_2026/RESOURCES",
+        "egable": "C:/Users/edmund.gable/Documents/GitHub/RESOURCES"
     }
 
-    # 1. Explicitly map DATASETS directories
+    # 2. Explicitly map DATASETS directories
     datasets_root = {
-        "khyde_laptop": "/Users/kimberly.hyde/Documents/nadata/DATASETS/",
-        "gdavis": r"C:\\Users\\grace.davis\\Documents\\Hollings_2026\\DATASETS\\",
-        "egable": r"C:\\Users\\edmund.gable\\Documents\\GitHub\\DATASETS\\",
-        "network": "/Volumes/EDAB_Datasets/",
-        "satdata": "/mnt/EDAB_Datasets/",
-        "hsynan":r"\\nefscdata\EDAB_Datasets",
-        "container": "/mnt2/"
+        "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/nadata/DATASETS",
+        "nefscsatdata": "/mnt/EDAB_Datasets",
+        "guihyde": "/mnt/EDAB_Datasets",
+        "Mac.localdomain": "/Users/kimberly.hyde/Documents/nadata/DATASETS",
+        "gdavis": "C:/Users/grace.davis/Documents/Hollings_2026/DATASETS",
+        "egable": "C:/Users/edmund.gable/Documents/GitHub/DATASETS"
     }
 
     active_key = None
