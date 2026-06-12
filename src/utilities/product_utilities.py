@@ -59,7 +59,9 @@ def product_defaults():
         'MOANA': ('MOANA','PACE','SOURCE'),
         'CARBON': ('CARBON','PACE','SOURCE'),
         'FLH': ('FLH','PACE','SOURCE'),
-        'CHL_TEMP': ('CHL','GLOBCOLOUR','SOURCE'),
+        'CHL_TEMP': ('CHL1','GLOBCOLOUR','SOURCE'),
+        'PIC': ('PIC','GLOBCOLOUR','SOURCE'),
+        'POC': ('POC','GLOBCOLOUR','SOURCE'),
         'SST_TEMP': ('SST','ACSPONRT', 'SOURCE'),
         'CHL_FRONTS': ('CHL_FRONTS','OCCCI', 'PRODUCT'),
         'SST_FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT'),
@@ -111,6 +113,8 @@ def netcdf_product_defaults():
         'GLOBCOLOUR': {
             'PAR': 'PAR_mean',
             'CHL': 'CHL1_mean',
+            'PIC': 'PIC_mean',
+            'POC': 'POC_mean',
         },
         'OCCCI': {
             'CHL': 'chlor_a',
