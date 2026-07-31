@@ -28,88 +28,78 @@ def derive_dataset_path(resources_path: Path) -> Path:
         raise FileNotFoundError(f"[BOOTSTRAP] Derived DATASETS path does not exist: {dataset_path}")
     return dataset_path
 
-def bootstrap_environment(preferred=None, verbose=False):
+def bootstrap_environment(verbose=False):
     hostname = socket.gethostname()
 
-    # 1. Explicitly map RESOURCES directoriess
-    resources_root = {
-        "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
-        "nefscsatdata": "/mnt/EDAB_Resources",
-        "guihyde": "/mnt/EDAB_Resources",
-        "Mac.localdomain": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
-        "gdavis": "C:/Users/grace.davis/Documents/Hollings_2026/RESOURCES",
-        "egable": "C:/Users/edmund.gable/Documents/GitHub/RESOURCES"
-    }
+    # 1. Determine script path
+    # Use __file__ to get the absolute path of the current script.
+    # There is a fallback to cwd() in case this is run in an interactive environment like Jupyter.
+    try:
+        current_file = Path(__file__).resolve()
+    except NameError:
+        current_file = Path.cwd().resolve()
 
-    # 2. Explicitly map DATASETS directories
-    datasets_root = {
-        "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/nadata/DATASETS",
-        "nefscsatdata": "/mnt/EDAB_Datasets",
-        "guihyde": "/mnt/EDAB_Datasets",
-        "Mac.localdomain": "/Users/kimberly.hyde/Documents/nadata/DATASETS",
-        "gdavis": "C:/Users/grace.davis/Documents/Hollings_2026/DATASETS",
-        "egable": "C:/Users/edmund.gable/Documents/GitHub/DATASETS"
-    }
+    # 2. Dynamically resolve RESOURCES root
+    # Search up the path tree for a directory named "Resources" or "EDAB_Resources" (case-insensitive)
+    resource_candidates = [
+        p for p in [current_file] + list(current_file.parents)
+        if p.name.lower() in ["resources", "edab_resources"]
+    ]
 
-    active_key = None
-    root_path = None
+    if not resource_candidates:
+        raise FileNotFoundError(f"[BOOTSTRAP] 'Resources' or 'EDAB_Resources' not found in path: {current_file}")
+    elif len(resource_candidates) > 1:
+        raise ValueError(f"[BOOTSTRAP] Multiple Resources directories found in path, which is ambiguous: {resource_candidates}")
 
-    # Resolve RESOURCES root
-    if preferred:
-        if preferred in resources_root:
-            candidate = Path(resources_root[preferred])
-            if candidate.exists():
-                root_path = candidate
-                if verbose:
-                    print(f"✓ Using specified RESOURCES directory: [{preferred}] → {candidate}")
-            else:
-                print(f"✗ Preferred RESOURCES path not found — falling back to defaults.")
-        else:
-            print(f"⚠ Unrecognized preferred label '{preferred}'. Valid options: {list(resources_root.keys())}")
+    root_path = resource_candidates[0]
 
-    # If no preferred key (or it failed), try the hostname
-    if root_path is None and hostname in resources_root:
-        candidate = Path(resources_root[hostname])
-        if candidate.exists():
-            active_key = hostname
-            root_path = candidate
-            if verbose:
-                print(f"✓ Using hostname RESOURCES directory: [{hostname}] → {candidate}")
+    if verbose:
+        print(f"✓ Dynamically resolved RESOURCES directory: {root_path}")
 
-    # Fallback: Check all remaining keys to see if any valid path exists on this machine
-    if root_path is None:
-        for key, path_str in resources_root.items():
-            candidate = Path(path_str)
-            if candidate.exists():
-                active_key = key
-                root_path = candidate
-                if verbose:
-                    print(f"✓ Using fallback RESOURCES directory: [{key}] → {candidate}")
-                break
+    # 3. Dynamically resolve DATASETS root (and create if missing)
+    # Look in the directory exactly one level above the RESOURCES root
+    base_dir = root_path.parent
+    
+    dataset_candidates = [
+        p for p in base_dir.iterdir()
+        if p.is_dir() and p.name.lower() in ["datasets", "edab_datasets"]
+    ]
 
-    if root_path is None:
-        raise FileNotFoundError("[BOOTSTRAP] No valid RESOURCES directory found on this machine.")
-
-    # --- Resolve DATASETS Root ---
-    if active_key in datasets_root:
-        dataset_path = Path(datasets_root[active_key])
-        if not dataset_path.exists():
-            raise FileNotFoundError(f"[BOOTSTRAP] Mapped DATASETS path does not exist: {dataset_path}")
+    if not dataset_candidates:
+        # If no datasets folder exists, automatically create a standard one
+        dataset_path = base_dir / "DATASETS"
+        dataset_path.mkdir(parents=True, exist_ok=True)
+        print(f"⚠ DATASETS directory not found. Auto-created: {dataset_path}")
+    elif len(dataset_candidates) > 1:
+        raise ValueError(f"[BOOTSTRAP] Multiple DATASETS directories found in {base_dir}, which is ambiguous: {dataset_candidates}")
     else:
-        raise KeyError(f"[BOOTSTRAP] No dataset mapping found for key: '{active_key}'")
+        dataset_path = dataset_candidates[0]
+        if verbose:
+            print(f"✓ Dynamically resolved DATASETS directory: {dataset_path}")
 
-    # --- Resolve subdirectories ---
+
+    # --- Resolve required source code subdirectories ---
     python_path = root_path / "python"
-    workflow_path = root_path / "workflow_resources"
-    metadata_path = workflow_path / "metadata"
-    lookup_path = workflow_path / "lookuptables"
-    satlog_path = root_path / "logs/satprocessing"
     utilities_path = python_path / "utilities" / "src" / "utilities"
 
-    # --- Validate existence of subdirectories ---
-    for p in [python_path, workflow_path, metadata_path, lookup_path,satlog_path,utilities_path]:
+    # --- Validate existence of source subdirectories ---
+    for p in [python_path, utilities_path]:
         if not p.is_dir():
-            raise FileNotFoundError(f"[BOOTSTRAP] Missing expected directory: {p}")
+            raise FileNotFoundError(f"[BOOTSTRAP] Missing essential source directory (cannot auto-create): {p}")
+
+    # --- Resolve operational subdirectories (to be auto-created if missing) ---
+    operational_dirs = {
+        "workflow_path": root_path / "workflow_resources",
+        "metadata_path": root_path / "workflow_resources" / "metadata",
+        "lookup_path": root_path / "workflow_resources" / "lookuptables",
+        "satlog_path": root_path / "logs" / "satprocessing"
+    }
+
+    for name, path in operational_dirs.items():
+        if not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
+            if verbose:
+                print(f"⚠ Missing operational directory auto-created: {path}")
 
     # Add python path to sys.path
     if str(python_path) not in sys.path:
@@ -131,10 +121,10 @@ def bootstrap_environment(preferred=None, verbose=False):
         "project_root": python_path,
         "python_path": python_path,
         "utilities_path": utilities_path,
-        "workflow_resources": workflow_path,
-        "metadata_path": metadata_path,
-        "lookuptable_path": lookup_path,
+        "workflow_resources": operational_dirs["workflow_path"],
+        "metadata_path": operational_dirs["metadata_path"],
+        "lookuptable_path": operational_dirs["lookup_path"],
         "dataset_path": dataset_path,
-        "satlogs_path": satlog_path,
+        "satlogs_path": operational_dirs["satlog_path"],
         "timestamp": datetime.now()
     }
