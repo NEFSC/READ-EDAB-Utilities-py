@@ -11,6 +11,7 @@ import netCDF4
 from typing import Optional, Dict, Any
 from datetime import datetime
 from typing import Dict
+import re
 
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
@@ -632,6 +633,7 @@ def build_product_attributes(product: str, metapath: str = None,  _FillValue=Non
     Builds a metadata dictionary for a given product short_name.
     - Uses 'Products' sheet to determine required attributes
     - Pulls values from 'LUT_Products' sheet
+    - Dynamically handles wavelength-specific products (e.g., RRS_412)
     - Includes optional attributes if present
     - Allows _FillValue override
     - Raises message for missing required attributes with note to add manually
@@ -642,12 +644,24 @@ def build_product_attributes(product: str, metapath: str = None,  _FillValue=Non
 
 
     product_key = product.strip().upper()
+
+    # Detect Wavelength Products (e.g., RRS_412 -> Base: RRS, Wavelength: 412)
+    # The regex looks for letters at the start, an underscore, and numbers at the end
+    match = re.match(r"^([A-Z]+)_(\d+)$", product_key)
+    if match:
+        base_product = match.group(1)
+        wavelength = int(match.group(2))
+        if verbose: print(f"  🌈 Detected spectral product: Base='{base_product}', Wavelength='{wavelength}' nm")
+    else:
+        base_product = product_key
+        wavelength = None
+
     product_row = None
 
     # Find matching product in LUT_Products
     for row in lut_products.values():
         short_name = str(row.get("short_name", "")).strip().upper()
-        if short_name == product_key:
+        if short_name == base_product:
             product_row = row
             break
 
@@ -659,7 +673,7 @@ def build_product_attributes(product: str, metapath: str = None,  _FillValue=Non
             canonical = str(alias_row.get("product", "")).strip().upper()
             comment = alias_row.get("comment", None)
 
-            if alias == product_key:
+            if alias == base_product:
                 for row in lut_products.values():
                     short_name = str(row.get("short_name", "")).strip().upper()
                     if short_name == canonical:
@@ -671,7 +685,7 @@ def build_product_attributes(product: str, metapath: str = None,  _FillValue=Non
                 break  # ✅ Stop after first alias match
     
     if not product_row:
-        raise ValueError(f"Product '{product}' not found in LUT_Products")
+        raise ValueError(f"Product '{base_product}' not found in LUT_Products")
 
     attributes = {}
     missing_required = []
@@ -687,6 +701,15 @@ def build_product_attributes(product: str, metapath: str = None,  _FillValue=Non
             attributes[attr_name] = product_row[attr_name]
         elif is_required:
             missing_required.append(attr_name)
+
+    # Inject Wavelength Metadata
+    if wavelength:
+        # Append the wavelength to the long_name if it exists
+        if "long_name" in attributes:
+            attributes["long_name"] = f"{attributes['long_name']} at {wavelength} nm"
+        
+        # Add a specific wavelength attribute to the dictionary
+        attributes["wavelength"] = f"{wavelength} nm"
 
     if missing_required:
         for attr in missing_required:

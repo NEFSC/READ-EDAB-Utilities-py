@@ -1,3 +1,4 @@
+from doctest import debug
 import os
 import sys
 import re
@@ -96,7 +97,7 @@ def build_stats_map(prod, period, output_dir=None,
                     dataset=None, daterange=None,climatology_range=None,
                     dataset_version=None, dataset_map=None,
                     subset=None, is_running=True, overwrite=False, 
-                    data_type="STATS",verbose=False):
+                    data_type="STATS",verbose=False, debug=False):
     """
     Unified stats pipeline:
       1) Resolve or Create Output Directory
@@ -126,6 +127,16 @@ def build_stats_map(prod, period, output_dir=None,
             make_dir=True,      # Create the folder if it doesn't exist
             verbose=verbose
         )
+
+    if output_dir is None:
+        raise ValueError("🛑 CRITICAL: output_dir resolved to None. get_prod_files failed to generate a path.")
+    elif isinstance(output_dir, list):
+        if len(output_dir) == 1:
+            output_dir = output_dir[0]
+        elif len(output_dir) > 1:
+            raise ValueError(f"🛑 CRITICAL: output_dir resolved to multiple paths: {output_dir}")
+        else:
+            raise ValueError("🛑 CRITICAL: output_dir resolved to an empty list.")
 
     # ---------------------------------------------------------
     # 2. Determine expected input period (D, M, etc.)
@@ -188,6 +199,7 @@ def build_stats_map(prod, period, output_dir=None,
 
         # Build output filename
         out_name = f"{out_period}-{ds_name}-{prod}-{subset or 'GLOBAL'}-{data_type}.nc"
+        print(f"Processing {out_period}: {len(input_files)} input files -> {out_name}")
         out_path = os.path.join(output_dir, out_name)
 
         # Determine freshness
@@ -278,49 +290,74 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
         else:
             if verbose: print("  ⚠️ Missing required base variables for PSC math.")
 
+    # --- 🎯 MULTI-WAVELENGTH PRODUCt LOGIC ---
+    elif prod in ['RRS', 'APH', 'ADG', 'BBB']:
+        if verbose: print(f"  🌈 Detected multi-wavelength product family: {prod}")
+        
+        # 1. Check if we are reading already-derived stats (e.g., RRS_412_mean)
+        derived_vars = [v for v in ds.data_vars if v.upper().startswith(f"{prod}_") and v.endswith('_mean')]
+        
+        if derived_vars:
+            for v in derived_vars:
+                base_name = v.replace('_mean', '')
+                if verbose: print(f"  🏷️ Renaming derived stat: '{v}' -> '{base_name}'")
+                ds = ds.rename({v: base_name})
+                target_vars.append(base_name)
+                
+        # 2. Otherwise, we are reading raw daily files. Find all wavelengths.
+        else:
+            # Regex match: Starts with product name (case-insensitive) + underscore + numbers
+            # This grabs 'Rrs_412' but successfully ignores 'Rrs_412_bias'
+            pattern = re.compile(rf"^{prod}_(\d+)$", re.IGNORECASE)
+            
+            raw_vars = [v for v in ds.data_vars if pattern.match(v)]
+            
+            if not raw_vars:
+                if verbose: print(f"  ⚠️ No wavelength variables found for '{prod}' in this file.")
+            
+            # Standardize names to uppercase (e.g., 'Rrs_412' -> 'RRS_412')
+            for v in raw_vars:
+                clean_name = v.upper()
+                if v != clean_name:
+                    if verbose: print(f"  🏷️ Standardizing variable name: '{v}' -> '{clean_name}'")
+                    ds = ds.rename({v: clean_name})
+                target_vars.append(clean_name)
+
+    # --- DEFAULT BEHAVIOR (Standard products or specific individual wavelengths) ---
     else:
-        # --- DEFAULT BEHAVIOR for standard products like SST, CHL, etc. ---
         mean_var_name = f"{prod}_mean"
         
-        # Prioritize the 'mean' variable if we are reading derived stats
         if mean_var_name in ds.data_vars:
-            # Rename existing stats products so the pipeline treats it as raw base data
-            if verbose: print(f" Renaming '{mean_var_name}' -> '{prod}'")
+            if verbose: print(f"  🏷️ Renaming '{mean_var_name}' -> '{prod}'")
             ds = ds.rename({mean_var_name: prod})
             target_vars = [prod]
         else:            
-            # Look up the raw product variable name (e.g. sea_surface_temperature)
             raw_var = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)
             
             if raw_var:
                 if 'SST' in prod.upper() or 'TEMP' in prod.upper():
                     try:
-                        # Extract the maximum value to see what scale we are on
-                        # (skipna=True ensures clouds/land don't break the check)
                         max_val = float(ds[raw_var].max(skipna=True).values)
-                        
                         if not np.isnan(max_val):
                             if max_val > 100:
                                 if verbose: print(f"  🌡️ Detected Kelvin (Max: {max_val:.1f}). Converting to Celsius...")
                                 ds[raw_var] = ds[raw_var] - 273.15
-                                ds[raw_var].attrs['units'] = 'Celsius' # Force correct metadata
+                                ds[raw_var].attrs['units'] = 'Celsius' 
                             else:
-                                if verbose: print(f"  🌡️ Detected Celsius (Max: {max_val:.1f}). No conversion needed.")
-                                ds[raw_var].attrs['units'] = 'Celsius' # Ensure metadata is right
+                                if verbose: print(f"  🌡️ Detected Celsius. No conversion needed.")
+                                ds[raw_var].attrs['units'] = 'Celsius' 
                     except Exception as e:
                         if verbose: print(f"  ⚠️ Could not verify temperature units: {e}") 
                 
-                # Standardize the name 
                 if raw_var != prod and raw_var in ds.data_vars:
                     if verbose: print(f"  🏷️ Standardizing variable name: '{raw_var}' -> '{prod}'")
-                    # Rename the variable inside the dataset
                     ds = ds.rename({raw_var: prod})
                     
-                # Tell the pipeline loop to use the clean 'prod' name 
                 target_vars = [prod]
 
     ds.attrs['pipeline_target_vars'] = target_vars
     return ds
+
 
 def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None, **kwargs):
     """
@@ -439,14 +476,6 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                         obj.attrs[k] = "None"
             return ds
         
-        @contextmanager
-        def timer(label, debug=False):
-            start = time.perf_counter()
-            yield
-            if debug:  # <--- Check this line!
-                elapsed = time.perf_counter() - start
-                print(f"    ⏱️ {label}: {elapsed:.2f}s")
-
         # 1. Extract variables from the inputs
         debug = kwargs.get('debug', False)
         subset = kwargs.get('subset')
@@ -469,20 +498,66 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
 
                 # 3. Open the dataset
                 try:                
-                    with timer(f"xr.open_mfdataset (Attempt {attempt+1})", debug=debug): # 'with' ensures file handles are released automatically, even on crash.
+                    # Extract dataset name 
+                    try:
+                        input_fp = file_parser(input_files[0])
+                        ds_name = input_fp[0].get('dataset') 
+                    except Exception:
+                        ds_name = kwargs.get('dataset', 'UNKNOWN') 
+                    if ds_name: ds_name = ds_name.upper()
+
+                    # 🎯 Route 1: Safe, manual loading for complex multi-wavelength products
+                    if prod in ['RRS', 'APH', 'ADG', 'BBB']:
+                        if debug: print(f"      📖 Opening complex dataset manually (Attempt {attempt+1})...")
+                
+                        daily_datasets = []        
+                        for f_path in input_files:
+                            with xr.open_dataset(f_path, engine='h5netcdf') as single_ds:
+                                single_ds = preprocess_dataset(single_ds, prod, ds_name=ds_name, verbose=verbose)
+                                target_vars = single_ds.attrs.get('pipeline_target_vars', [])
+                                
+                                vars_to_drop = [v for v in single_ds.data_vars if v not in target_vars]
+                                if vars_to_drop:
+                                    single_ds = single_ds.drop_vars(vars_to_drop)
+                                
+                                if subset:
+                                    single_ds = subset_dataset(single_ds, subset)
+                                    
+                                single_ds.load()
+                                daily_datasets.append(single_ds)
+                                
+                        if debug: print("      🔗 Concatenating all days into a single dataset...")
+                        ds = xr.concat(daily_datasets, dim='time', combine_attrs='override')
+                        ds.attrs['pipeline_target_vars'] = target_vars
+
+                    # 🎯 Route 2: High-speed parallel loading for standard products (SST, CHL, PSC, etc.)
+                    else:
+                        if debug: print(f"      📖 Opening standard dataset via mfdataset (Attempt {attempt+1})...")
                         ds = xr.open_mfdataset(
-                            #task['inputs'], 
                             input_files,
                             combine="by_coords",
                             decode_timedelta=True,
-                            chunks={'time': 1, 'lat': 'auto', 'lon': 'auto'}, 
-                            parallel=False,  # 🚨 CRITICAL: Parallel opening often crashes HDF5 on Mac
-                            engine='netcdf4',
-                            coords='minimal', # Don't waste RAM on redundant coords
-                            compat='override' # Assume all files have the same grid (Fastest)
+                            chunks={'time': 1},              
+                            parallel=False,                  
+                            engine='h5netcdf',               
+                            coords='minimal',                
+                            data_vars='minimal',             
+                            compat='override'                
                         )
-
-                    break # Success! All files opened successfully. Escape the retry loop
+                        
+                        # 🎯 Apply preprocessing and subsetting to the opened standard dataset
+                        if debug: print(f"      ⚙️ Preprocessing and subsetting standard dataset...")
+                        
+                        ds = preprocess_dataset(ds, prod, ds_name=ds_name, verbose=verbose)
+                        target_vars = ds.attrs.get('pipeline_target_vars', [])
+                        
+                        vars_to_drop = [v for v in ds.data_vars if v not in target_vars]
+                        if vars_to_drop:
+                            ds = ds.drop_vars(vars_to_drop)
+                            
+                        if subset:
+                            if verbose: print(f"      🗺️ Subsetting entire dataset to region: {subset}")
+                            ds = subset_dataset(ds, subset)
                     
                 except Exception as e:
 
@@ -517,95 +592,75 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 if verbose: print(f"❌ FATAL: All retries exhausted. Could not open dataset for {per}.")
                 return False, corrupt_files_found
             
-            # 4. Resolve dataset, preprocess and loop through variables
+            # 4. Loop through variables and compute stats
             try:
-                # 4A. Resolve dataset name for product mapping
-                try:
-                    input_fp = file_parser(input_files[0])
-                    ds_name = input_fp[0].get('dataset') 
-                    ds_version = input_fp[0].get('dataset_version')
-                    
-                except Exception as e:
-                    print(f"⚠️ Error with file parsing: {e}")                
-                    ds_name = kwargs.get('dataset', 'UNKNOWN') 
-                    ds_version = kwargs.get('dataset_version', 'UNKNOWN') 
-
-                if ds_name: ds_name = ds_name.upper()
-
-                # 4B. Preprocess data if needed (e.g. PSC files)
-                with timer("preprocess_dataset", debug=debug):
-                    ds = preprocess_dataset(ds, prod, ds_name=ds_name, verbose=verbose)                
                 target_vars = ds.attrs.get('pipeline_target_vars', [])
-                
                 if not target_vars:
                     raise ValueError(f"❌ No valid variables found to process for {prod}.")
-
-                # 🎯 4C. Loop through target_vars
-                computed_datasets = []
                 
-                for var_name in target_vars:
-                    if verbose: print(f"    📊 Extracting and preparing {var_name}...")
+                computed_datasets = []
 
-                    # Extract the single DataArray safely
-                    try:
-                        da = ds[var_name]
-                    except KeyError:
-                        print(f"⚠️ Warning: '{var_name}' not found. Skipping this variable.")
-                        continue
+                # 🎯 Wrap the loop to protect `da.size` from triggering multi-threaded HDF5 crashes in Route 2
+                with dask.config.set(scheduler='single-threaded'):
+                    for var_name in target_vars:
+                        if verbose: print(f"    📊 Extracting and preparing {var_name}...")
 
-                    # Spatial Subsetting & Integrity Check
-                    if subset:
-                        if verbose: print(f"      Subsetting {var_name} to region: {subset}")
-                        da = subset_dataset(da, subset)
+                        # Extract the single DataArray safely
+                        try:
+                            da = ds[var_name]
+                        except KeyError:
+                            print(f"⚠️ Warning: '{var_name}' not found. Skipping this variable.")
+                            continue
+
                         if da.size == 0:
-                            print(f"⚠️ Warning: Subset '{subset}' resulted in 0 pixels for {var_name}. Skipping.")
-                            continue # Skip this variable but try the others!
-                        
-                    if da.size == 0:
-                        print(f"⚠️ Warning: DataArray is empty for {var_name}. Skipping.")
-                        continue
+                            print(f"⚠️ Warning: DataArray is empty for {var_name}. Skipping.")
+                            continue
 
-                    # Determine the weights for specific periods (e.g. weighting the number of days in a month for the annual (A) period)
-                    weights = None
-                    monthly_weights = ['M3','A','JFM','AMJ','JAS','OND']
-                    
-                    #  🎯 Extract the number of days per month
-                    if per in monthly_weights:
-                        weights = da.time.dt.days_in_month
-                        weights.name = "weights"
-                        if verbose and var_name == target_vars[0]: # Only print once per file
-                            print(f"      ⚖️ Applying days_in_month weights for {per} period...")
-                    
-                    # 🎯  Apply Triangle Weights [1, 2, 1] to the 3-Day Running Mean
-                    elif per == 'D3':
-                        # Safety check: Ensure we actually found 3 days of inputs
-                        if da.sizes['time'] == 3:
-                            weights = xr.DataArray([1.0, 2.0, 1.0], dims=['time'], coords={'time': da.time})
+                        print(f"      DataArray shape for {var_name}: {da.shape}")
+
+                        # Determine the weights for specific periods (e.g. weighting the number of days in a month for the annual (A) period)
+                        weights = None
+                        monthly_weights = ['M3','A','JFM','AMJ','JAS','OND']
+
+                        if debug: print(f" Checking period ({per}) if weights are needed for the stats caclulations")
+                        
+                        #  🎯 Extract the number of days per month
+                        if per in monthly_weights:
+                            weights = da.time.dt.days_in_month
                             weights.name = "weights"
-                            if verbose and var_name == target_vars[0]:
-                                print(f"      ⚖️ Applying [1, 2, 1] central weights for {per} period...")
-                        else:
-                            if verbose and var_name == target_vars[0]:
-                                print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 3. Falling back to unweighted mean.")
-                    
-                    # 🎯 Apply Symmetric Tent Weights to the 8-Day Running Mean
-                    elif per == 'D8':
-                        if da.sizes['time'] == 8:
-                            weights = xr.DataArray([1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.0], dims=['time'], coords={'time': da.time})
-                            weights.name = "weights"
-                            if verbose and var_name == target_vars[0]:
-                                print(f"      ⚖️ Applying [1, 2, 3, 4, 4, 3, 2, 1] central weights for {per} period...")
-                        else:
-                            if verbose and var_name == target_vars[0]:
-                                print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 8. Falling back to unweighted mean.")
-                    
-                    # Compute the statistics for this specific variable
-                    with timer(f"compute_stats ({var_name})", debug=debug):
-                        # 🚨 Pass 'var_name' into compute_stats so it names the outputs correctly 
-                        # (e.g. PSC_micro_mean instead of PSC_mean)
+                            if verbose and var_name == target_vars[0]: # Only print once per file
+                                print(f"      ⚖️ Applying days_in_month weights for {per} period...")
+                        
+                        # 🎯  Apply Triangle Weights [1, 2, 1] to the 3-Day Running Mean
+                        elif per == 'D3':
+                            # Safety check: Ensure we actually found 3 days of inputs
+                            if da.sizes['time'] == 3:
+                                weights = xr.DataArray([1.0, 2.0, 1.0], dims=['time'], coords={'time': da.time})
+                                weights.name = "weights"
+                                if verbose and var_name == target_vars[0]:
+                                    print(f"      ⚖️ Applying [1, 2, 1] central weights for {per} period...")
+                            else:
+                                if verbose and var_name == target_vars[0]:
+                                    print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 3. Falling back to unweighted mean.")
+                        
+                        # 🎯 Apply Symmetric Tent Weights to the 8-Day Running Mean
+                        elif per == 'D8':
+                            if da.sizes['time'] == 8:
+                                weights = xr.DataArray([1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.0], dims=['time'], coords={'time': da.time})
+                                weights.name = "weights"
+                                if verbose and var_name == target_vars[0]:
+                                    print(f"      ⚖️ Applying [1, 2, 3, 4, 4, 3, 2, 1] central weights for {per} period...")
+                            else:
+                                if verbose and var_name == target_vars[0]:
+                                    print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 8. Falling back to unweighted mean.")
+                        
+                        if debug: print(f" Computing stats for {var_name}")
+                        # Compute the statistics for this specific variable
+                        # 🚨 Pass 'var_name' into compute_stats so it names the outputs correctly (e.g. PSC_micro_mean instead of PSC_mean)
                         var_stats_ds = compute_stats(da, var_name, time_dim='time', weights=weights, **kwargs)
-                    
-                    computed_datasets.append(var_stats_ds)
+                
+                        if debug: print(f" Adding computed stats for {var_name} to the main dataset")
+                        computed_datasets.append(var_stats_ds)
 
                 # Safety check: Did any variables successfully process?
                 if not computed_datasets:
@@ -613,7 +668,19 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                     return False, corrupt_files_found
 
                 # 5. Merge dataset variables
+                if debug: print(f"     Merging {len(computed_datasets)} computed variables into a single dataset...")
                 stats_ds = xr.merge(computed_datasets)
+
+                # Force Dask to finish all math and load into RAM imeediately after merging. 
+                # This prevents any downstream metadata functions from secretly triggering multi-threaded HDF5 reads.
+                if debug: print("     Computing stats into memory...")
+                # Catch the expected NaN math warnings during computation
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    
+                    # Force single-threaded execution to prevent Mac HDF5 read crashes
+                    with dask.config.set(scheduler='single-threaded'):
+                        stats_ds = stats_ds.load()
 
                 # 6. Add variable attributes
                 encoding = {}
@@ -725,20 +792,10 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 stats_ds = sanitize_for_netcdf(stats_ds)
                 
                 # 6. Write the netcdf file to disk 
-                with timer("stats_ds.to_netcdf (Disk I/O)", debug=debug):
-                    
-                    import warnings
-                    # 🎯 Temporarily mute the expected NaN math warnings during the save step
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", category=RuntimeWarning)
+                if debug: print(f"      💾 Saving {out_path}")
+                stats_ds.to_netcdf(out_path,format='NETCDF4')
                         
-                        # Force single-threaded execution to prevent Mac HDF5/NetCDF crashes
-                        with dask.config.set(scheduler='single-threaded'):
-                            stats_ds.to_netcdf(out_path)
-                            
-                    if verbose: print(f"  ✅ Saved: {os.path.basename(out_path)}")
-                    if verbose: print("  🧊 Cooling down for 1.5s...")
-                    time.sleep(1.5)
+                if verbose: print(f"  ✅ Saved: {os.path.basename(out_path)}")
                             
             except Exception as e:
                 print(f"❌ Error processing {out_path}: {e}")
@@ -841,7 +898,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
             print("🔍 Debug Mode: RuntimeWarnings are visible.")
         
         # Pull variables out of kwargs
-        debug   = kwargs.pop('debug', False) 
+        debug   = kwargs.get('debug', False) 
         dataset = kwargs.pop('dataset',None)
         subset  = kwargs.get('subset', 'GLOBAL')
         parallel_runs = kwargs.pop('parallel_runs', 1) 

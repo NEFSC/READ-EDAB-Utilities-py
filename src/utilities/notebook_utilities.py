@@ -4,48 +4,36 @@ import socket
 import sys
 from pathlib import Path
 
-def init_notebook_environment(preferred=None, verbose=False):
+def init_notebook_environment(verbose=False):
     """
-    Dynamically resolves RESOURCES path based on hostname,
+    Dynamically resolves RESOURCES path based on file or working directory,
     adds python path to sys.path, and returns the bootstrapped environment.
     """
-    hostname = socket.gethostname()
 
-    resources_root = {
-        "NECMAC04363461.local": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
-        "nefscsatdata": "/mnt/EDAB_Resources",
-        "guihyde": "/mnt/EDAB_Resources",
-        "Mac.localdomain": "/Users/kimberly.hyde/Documents/nadata/RESOURCES",
-        "gdavis": "C:/Users/grace.davis/Documents/Hollings_2026/RESOURCES",
-        "egable": "C:/Users/edmund.gable/Documents/GitHub/RESOURCES"
-    }
+    # 1. Determine script/notebook path
+    try:
+        current_file = Path(__file__).resolve()
+    except NameError:
+        # Crucial fallback for interactive environments like Jupyter Notebooks
+        current_file = Path.cwd().resolve()
 
-    base_path = None
+    # 2. Dynamically resolve RESOURCES root
+    resource_candidates = [
+        p for p in [current_file] + list(current_file.parents)
+        if p.name.lower() in ["resources", "edab_resources"]
+    ]
 
-    # 1. Try the preferred key first
-    if preferred and preferred in resources_root:
-        candidate = Path(resources_root[preferred])
-        if candidate.exists():
-            base_path = candidate
+    if not resource_candidates:
+        raise EnvironmentError(f"[INIT] 'Resources' or 'EDAB_Resources' not found in path: {current_file}")
+    elif len(resource_candidates) > 1:
+        raise ValueError(f"[INIT] Multiple Resources directories found in path, which is ambiguous: {resource_candidates}")
 
-    # 2. Try the hostname
-    if not base_path and hostname in resources_root:
-        candidate = Path(resources_root[hostname])
-        if candidate.exists():
-            base_path = candidate
-
-    # 3. Fallback: check all mapped paths to see if any exist locally
-    if not base_path:
-        for path_str in resources_root.values():
-            candidate = Path(path_str)
-            if candidate.exists():
-                base_path = candidate
-                break
-
-    if not base_path:
-        raise EnvironmentError(f"[INIT] Could not find a valid RESOURCES base path on this machine.")
-
-    # Resolve python root and add to sys.path
+    base_path = resource_candidates[0]
+    
+    if verbose:
+        print(f"[INIT] Dynamically resolved RESOURCES base path: {base_path}")
+    
+    # 3. Resolve python root and add to sys.path
     project_root = base_path / "python"
     if not project_root.is_dir():
         raise FileNotFoundError(f"[INIT] Project root not found: {project_root}")
@@ -53,12 +41,12 @@ def init_notebook_environment(preferred=None, verbose=False):
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    # Import and run the main bootstrap script
+    # 4. Import and run the main bootstrap script
     try:
         from utilities.bootstrap.environment import bootstrap_environment
     except ModuleNotFoundError as e:
         raise ImportError(f"[INIT] Failed to import bootstrap_environment: {e}")
 
     # Pass the preferred argument down to maintain consistency
-    return bootstrap_environment(preferred=preferred, verbose=verbose)
+    return bootstrap_environment(verbose=verbose)
 
