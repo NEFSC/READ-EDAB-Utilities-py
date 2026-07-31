@@ -1,4 +1,3 @@
-import xesmf as xe
 import os
 import hashlib
 import glob
@@ -154,6 +153,7 @@ def get_regrid_weights(target_path, source_path,
         Returns:
         - the full path of the regrid weights file
     """
+    import xesmf as xe
 
     # Get the output directory for the weight files
     if not weights_dir:
