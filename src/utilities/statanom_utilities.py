@@ -615,9 +615,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                         if da.size == 0:
                             print(f"⚠️ Warning: DataArray is empty for {var_name}. Skipping.")
                             continue
-
-                        print(f"      DataArray shape for {var_name}: {da.shape}")
-
+                        
                         # Determine the weights for specific periods (e.g. weighting the number of days in a month for the annual (A) period)
                         weights = None
                         monthly_weights = ['M3','A','JFM','AMJ','JAS','OND']
