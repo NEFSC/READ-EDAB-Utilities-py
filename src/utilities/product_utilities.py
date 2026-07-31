@@ -118,6 +118,12 @@ def netcdf_product_defaults():
         },
         'OCCCI': {
             'CHL': 'chlor_a',
+            'RRS_412': 'Rrs_412',
+            'RRS_443': 'Rrs_443',
+            'RRS_490': 'Rrs_490',
+            'RRS_510': 'Rrs_510',
+            'RRS_560': 'Rrs_560',
+            'RRS_665': 'Rrs_665',
         },
         'PACE': {
             'CHL': 'chlor_a',
@@ -292,26 +298,44 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
     
 
     # --- Step 6: Resolve dataset_map
+    # 🎯 TRIGGER LOGIC: Transform if writing outputs or looking for derived periods
+    is_derived_period = period and period not in ['D', 'DD']
+
+    # When building the output directory, the input DAILY path is needed to use as a template. 
+    # Don't restrict the search to 'STATS' which may not exist yet!
+    search_data_type = None if getfilepath else data_type
+    search_period = None if getfilepath else period
+
+    if getfilepath and (is_derived_period or data_type in ['STATS', 'ANOMS']):
+        search_data_type = 'DAILY'
+        search_period = None
+    
     if not kwargs.get('dataset_map'):
         dataset_map, path = resolve_dataset_map(
-        filtered_structure,
-        prod=actual_prod,
-        default_map=default_map,
-        period=period,
-        data_type=data_type,
-        provenance_log=provenance_log,
-        verbose=verbose
-    )
+            filtered_structure,
+            prod=actual_prod,
+            default_map=default_map,
+            period=search_period,
+            data_type=search_data_type,
+            provenance_log=provenance_log,
+            verbose=verbose
+        )
+    else:
+        path = None # Will be resolved in Step 8 if map is hardcoded
     
     # --- Step 7: Handle PRODUCTS/STATS/CLIMS/ANOMS Logic ---
     transformed_path = False
-    # 🎯 TRIGGER LOGIC: Transform if writing outputs or looking for derived periods
-    is_derived_period = period and period not in ['D', 'DD']
+
+    # Transform if writing outputs or looking for derived periods
     if is_derived_period or data_type == 'ANOMS':    
         try:
+            if not path:
+                raise ValueError("Base path is None; cannot transform.")
+
             # Get period_info dictionary/tuple
             p_info = get_period_info(period) if period else {}
             folder_name = p_info.get('folder_name')
+
             # Determine Suffix dynamically based entirely on period_info
             if folder_name:
                 suffix = folder_name.upper() # e.g., 'MONTHLY', 'CLIMATOLOGY', 'WEEKLY'
@@ -358,7 +382,7 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
     
     if not dataset_map or not path:
         print(f"⚠ No valid dataset_map found for product '{prod}' with data_type='{data_type}'")
-        return []
+        return None if getfilepath else []
 
     # --- Step 8: Search for product path ---
     candidate_types = [dataset_type] if dataset_type in dataset_products else list(dataset_products.keys())    
