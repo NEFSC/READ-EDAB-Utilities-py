@@ -199,7 +199,7 @@ def build_stats_map(prod, period, output_dir=None,
 
         # Build output filename
         out_name = f"{out_period}-{ds_name}-{prod}-{subset or 'GLOBAL'}-{data_type}.nc"
-        print(f"Processing {out_period}: {len(input_files)} input files -> {out_name}")
+        if verbose: print(f"Processing {out_period}: {len(input_files)} input files -> {out_name}")
         out_path = os.path.join(output_dir, out_name)
 
         # Determine freshness
@@ -493,7 +493,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         try:
             for attempt in range(max_retries):
                 if not input_files:
-                    if verbose: print(f"❌ FATAL: All input files for {per} are corrupt or missing.")
+                    print(f"❌ FATAL: All input files for {per} are corrupt or missing.")
                     return False, corrupt_files_found
 
                 # 3. Open the dataset
@@ -793,7 +793,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 if debug: print(f"      💾 Saving {out_path}")
                 stats_ds.to_netcdf(out_path,format='NETCDF4')
                         
-                if verbose: print(f"  ✅ Saved: {os.path.basename(out_path)}")
+                print(f"  Saved: {os.path.basename(out_path)}")
                             
             except Exception as e:
                 print(f"❌ Error processing {out_path}: {e}")
