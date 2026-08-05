@@ -35,7 +35,7 @@ Main Functions:
     - run_psc_pipline: Main function to run the full pipeline
     - build_psc_date_map: Constructs a date → (CHL, SST, PSC) file path mapping and determines which files need to be processed
     - process_daily_psc: Runs the psc_models function using daily CHL and SST inputs, adds metadata, and saves the data as a netcdf file
-    - phyto_size_turner: Calculates the micro, nano, and picoplankton fractions of total chlorophyll using the Turner et al. (2021) model
+    - psc_turner: Calculates the micro, nano, and picoplankton fractions of total chlorophyll using the Turner et al. (2021) model
 
 Helper Functions:
     - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes

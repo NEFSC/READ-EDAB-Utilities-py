@@ -319,7 +319,7 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
             for v in raw_vars:
                 clean_name = v.upper()
                 if v != clean_name:
-                    if debug: print(f"  🏷️ Standardizing variable name: '{v}' -> '{clean_name}'")
+                    #if verbose: print(f"  🏷️ Standardizing variable name: '{v}' -> '{clean_name}'")
                     ds = ds.rename({v: clean_name})
                 target_vars.append(clean_name)
 
@@ -506,27 +506,45 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                         ds_name = kwargs.get('dataset', 'UNKNOWN') 
                     if ds_name: ds_name = ds_name.upper()
 
-                    # 🎯 Route 1: Safe, manual loading for complex multi-wavelength products
+                    # Route 1: Safe, manual loading for complex multi-wavelength products
                     if prod in ['RRS', 'APH', 'ADG', 'BBB']:
                         if debug: print(f"      📖 Opening complex dataset manually (Attempt {attempt+1})...")
                 
-                        daily_datasets = []        
+                        daily_datasets = []   
+                        files_to_remove = []  # Track files that fail during manual load     
+
                         for f_path in input_files:
-                            with xr.open_dataset(f_path, engine='h5netcdf') as single_ds:
-                                if verbose: print(f" Opening {f_path}")
-                                single_ds = preprocess_dataset(single_ds, prod, ds_name=ds_name, verbose=verbose)
-                                target_vars = single_ds.attrs.get('pipeline_target_vars', [])
-                                
-                                vars_to_drop = [v for v in single_ds.data_vars if v not in target_vars]
-                                if vars_to_drop:
-                                    single_ds = single_ds.drop_vars(vars_to_drop)
-                                
-                                if subset:
-                                    single_ds = subset_dataset(single_ds, subset)
+                            if verbose: print(f" Loading file {f_path}")
+                            try:
+                                with xr.open_dataset(f_path, engine='h5netcdf') as single_ds:                                
+                                    single_ds = preprocess_dataset(single_ds, prod, ds_name=ds_name, verbose=verbose)
+                                    target_vars = single_ds.attrs.get('pipeline_target_vars', [])
                                     
-                                single_ds.load()
-                                daily_datasets.append(single_ds)
+                                    vars_to_drop = [v for v in single_ds.data_vars if v not in target_vars]
+                                    if vars_to_drop:
+                                        single_ds = single_ds.drop_vars(vars_to_drop)
+                                    
+                                    if subset:
+                                        single_ds = subset_dataset(single_ds, subset)
+                                        
+                                    single_ds.load()
+                                    daily_datasets.append(single_ds)
+                            except Exception as file_err:
+                                # Catch the exact file causing the HDF5 filter failure!
+                                print(f"  ⚠️ Warning: Failed to read/load file {os.path.basename(f_path)}")
+                                print(f"     Error: {file_err}")
+                                files_to_remove.append(f_path)
                                 
+                                # Add to corrupt files list for your final summary report
+                                corrupt_files_found.append(f"{f_path} (HDF5 filter read error)")
+                                
+                        # If files failed, trigger a retry by raising an exception so the retry loop catches it and cleans input_files
+                        if files_to_remove:
+                            raise RuntimeError(f"Encountered {len(files_to_remove)} unreadable/corrupt files during manual load.")
+
+                        if not daily_datasets:
+                            raise ValueError("All files in this period failed to load.")
+
                         if debug: print("      🔗 Concatenating all days into a single dataset...")
                         ds = xr.concat(daily_datasets, dim='time', combine_attrs='override')
                         ds.attrs['pipeline_target_vars'] = target_vars
