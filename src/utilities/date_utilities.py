@@ -2,6 +2,7 @@ from datetime import datetime, date, timedelta
 import numpy as np
 from pathlib import Path
 import re
+import calendar
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
@@ -15,6 +16,7 @@ Main Functions:
     - get_source_file_dates: Extract standardized date strings from source data filenames.
     - get_current_utc_timestamp: Returns current UTC time in ISO 8601 format: 'YYYY-MM-DDTHH:MM:SSZ' 
     - format_iso_duration: Convert float days to ISO 8601 duration string.
+    - get_daterange: Generate a date range based on input dates
 
 
 Helper Functions:
@@ -379,6 +381,94 @@ def get_source_file_dates(files, format="yyyymmdd", placeholder=None):
             continue
         out.append(format_date(dt, format))
     return out
+
+def get_daterange(*args):
+    """
+    Standardizes various date inputs into a two-element list representing 
+    the start and end dates in 'YYYYMMDD' format.
+
+    Supported Input Examples:
+        - Single year: 2020 -> ['20200101', '20201231']
+        - Single month: 202011 -> ['20201101', '20201130']
+        - Exact date: '2020-01-01' -> ['20200101', '20200101']
+        - Year range: [2000, 2025] -> ['20000101', '20251231']
+        - Year range (args): '2000', '2025' -> ['20000101', '20251231']
+        - Month range: [201502, 201601] -> ['20150201', '20160131']
+        - Exact range: ['20200101', '20200315'] -> ['20200101', '20200315']
+
+    Parameters:
+        *args: Any number of dates, passed as separate arguments or within lists/tuples.
+
+    Returns:
+        list: [start_date, end_date] in 'YYYYMMDD' format, or None if invalid.
+    """
+    if not args:
+        return None
+        
+    # Flatten the incoming arguments into a single flat list
+    dates = []
+    for arg in args:
+        # If the argument is already a list or tuple, extract its contents
+        if isinstance(arg, (list, tuple)):
+            dates.extend(arg)
+        # If it's a single value, just append it directly
+        else:
+            dates.append(arg)
+
+    if not dates:
+        return None
+        
+    parsed_dates = []
+    
+    for d in dates:
+        # If it's already a datetime or date object, save it directly
+        if isinstance(d, datetime):
+            parsed_dates.append(d)
+            continue
+        if isinstance(d, date):
+            parsed_dates.append(datetime(d.year, d.month, d.day))
+            continue
+            
+        # Convert to string and strip formatting characters (e.g. "2020-11-01" -> "20201101")
+        d_str = str(d).replace("-", "").replace("/", "")
+        
+        try:
+            if len(d_str) == 4:
+                # It's a single year. Add Jan 1 and Dec 31.
+                year = int(d_str)
+                parsed_dates.append(datetime(year, 1, 1))
+                parsed_dates.append(datetime(year, 12, 31))
+                
+            elif len(d_str) == 6:
+                # It's a Year + Month. Add the 1st and the last day of that month.
+                year = int(d_str[:4])
+                month = int(d_str[4:6])
+                _, last_day = calendar.monthrange(year, month)
+                parsed_dates.append(datetime(year, month, 1))
+                parsed_dates.append(datetime(year, month, last_day))
+                
+            elif len(d_str) >= 8:
+                # It's a specific exact date.
+                parsed_dates.append(datetime.strptime(d_str[:8], "%Y%m%d"))
+                
+            else:
+                raise ValueError(f"Unrecognized date length/format: {d}")
+                
+        except ValueError as e:
+            print(f"⚠️ Skipping invalid date '{d}': {e}")
+            continue
+            
+    # If we couldn't parse any valid dates, return None
+    if not parsed_dates:
+        return None
+        
+    # Find the absolute minimum and maximum dates in our parsed list
+    start_date = min(parsed_dates)
+    end_date = max(parsed_dates)
+    
+    # Return them perfectly formatted!
+    return [start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")]
+
 
 def get_current_utc_timestamp() -> str:
     """ 
