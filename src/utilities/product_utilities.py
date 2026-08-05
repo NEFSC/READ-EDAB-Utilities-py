@@ -2,7 +2,7 @@ import os
 import glob
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
-from utilities import dataset_defaults, get_dataset_products, parse_dataset_info, resolve_dataset_map, get_period_info
+from utilities import dataset_defaults, get_dataset_products, parse_dataset_info, resolve_dataset_map, get_period_info, get_source_file_dates, get_daterange
 
 """
 Purpose:
@@ -258,6 +258,7 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
     map_region = kwargs.get('map_region')
     data_type = kwargs.get('data_type')
     prod_type = kwargs.get('prod_type')
+    daterange = kwargs.get('daterange')
 
     # --- Step 3: Initialize a provenance dictionary to track decisions for debugging ---
     provenance_log = {
@@ -445,6 +446,35 @@ def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=
             print(f"⚠ No .nc files found in: {path}")
         return []
 
+    # --- Step 10: Subset files by date range if specified ---
+    if daterange:
+        # Standardize the daterange
+        std_daterange = get_daterange(daterange)
+
+        if std_daterange:
+            verbose_trace(f"🗓 Filtering files to match daterange: {daterange[0]} to {daterange[1]}...", verbose)
+            
+            # Parse the date boundaries into standardized YYYYMMDD strings (Assuming 'daterange' is a list/tuple like ['19970101', '19971231'])
+            start_str = str(daterange[0]).replace("-", "")
+            end_str = str(daterange[1]).replace("-", "")
+
+            # Use your utility to extract dates for all found files at once
+            file_dates = get_source_file_dates(nc_files, format="yyyymmdd")
+            
+            filtered_files = []
+            for i, f_date in enumerate(file_dates):
+                if f_date is not None:
+                    # String comparison works perfectly for YYYYMMDD formats!
+                    if start_str <= f_date <= end_str:
+                        filtered_files.append(nc_files[i])
+                else:
+                    # If the utility couldn't find a date, keep the file just in case
+                    filtered_files.append(nc_files[i])
+                    
+            nc_files = filtered_files
+        else:
+            verbose_trace(f"⚠️ Provided daterange '{daterange}' could not be parsed. Skipping date filter.", verbose)
+            
     verbose_trace(f"📦 Found {len(nc_files)} .nc files in: {path}")
     nc_files.sort()
 
