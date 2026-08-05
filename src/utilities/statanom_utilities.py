@@ -319,7 +319,7 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
             for v in raw_vars:
                 clean_name = v.upper()
                 if v != clean_name:
-                    if verbose: print(f"  🏷️ Standardizing variable name: '{v}' -> '{clean_name}'")
+                    if debug: print(f"  🏷️ Standardizing variable name: '{v}' -> '{clean_name}'")
                     ds = ds.rename({v: clean_name})
                 target_vars.append(clean_name)
 
@@ -513,6 +513,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                         daily_datasets = []        
                         for f_path in input_files:
                             with xr.open_dataset(f_path, engine='h5netcdf') as single_ds:
+                                if verbose: print(f" Opening {f_path}")
                                 single_ds = preprocess_dataset(single_ds, prod, ds_name=ds_name, verbose=verbose)
                                 target_vars = single_ds.attrs.get('pipeline_target_vars', [])
                                 
