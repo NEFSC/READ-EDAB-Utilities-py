@@ -19,7 +19,7 @@ import dask
 
 # Local utilities
 from utilities.bootstrap.environment import bootstrap_environment
-from utilities import get_period_info, get_period_sets, get_prod_files
+from utilities import get_period_info, get_period_sets, get_prod_files, get_filepath
 from utilities import get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
 from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value,get_source_metadata
@@ -96,7 +96,7 @@ def boost_file_limits():
 def build_stats_map(prod, period, output_dir=None,
                     dataset=None, daterange=None,climatology_range=None,
                     dataset_version=None, dataset_map=None,
-                    subset=None, is_running=True, overwrite=False, 
+                    map_subset=None, is_running=True, overwrite=False, 
                     data_type="STATS",verbose=False, debug=False):
     """
     Unified stats pipeline:
@@ -113,14 +113,14 @@ def build_stats_map(prod, period, output_dir=None,
         if verbose:
             print(f"🔍 Resolving output directory for {prod} ({period})...")
         
-        # Use get_prod_files to 'discover' the new path.
+        # Get the output directory path based on product, dataset, and period. This will be used to store the computed statistics.
         # Set make_dir=True to create the directory if it does not exist.
-        output_dir = get_prod_files(
+        output_dir = get_filepath(
             prod,
             dataset=dataset,
             dataset_version=dataset_version,
             dataset_map=dataset_map,
-            map_region=subset,         # Use 'subset' to override region (GLOBAL -> NES)
+            map_subset=map_subset,         # Use 'subset' to override region (GLOBAL -> NES)
             period=period,      # This triggers Step 7 logic for CLIMS/STATS
             data_type=data_type,
             getfilepath=True,
@@ -129,7 +129,7 @@ def build_stats_map(prod, period, output_dir=None,
         )
 
     if output_dir is None:
-        raise ValueError("🛑 CRITICAL: output_dir resolved to None. get_prod_files failed to generate a path.")
+        raise ValueError("🛑 CRITICAL: output_dir resolved to None. get_filepath failed to generate a path.")
     elif isinstance(output_dir, list):
         if len(output_dir) == 1:
             output_dir = output_dir[0]
@@ -162,7 +162,7 @@ def build_stats_map(prod, period, output_dir=None,
         dataset=dataset,
         dataset_version=dataset_version,
         dataset_map=dataset_map,
-        map_region=subset,
+        map_subset=map_subset,
         period=search_period,
         data_type=search_type,
         verbose=verbose
@@ -198,7 +198,7 @@ def build_stats_map(prod, period, output_dir=None,
         input_files = info["input_files"]
 
         # Build output filename
-        out_name = f"{out_period}-{ds_name}-{prod}-{subset or 'GLOBAL'}-{data_type}.nc"
+        out_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{data_type}.nc"
         if verbose: print(f"Processing {out_period}: {len(input_files)} input files -> {out_name}")
         out_path = os.path.join(output_dir, out_name)
 
@@ -252,7 +252,7 @@ def build_stats_map(prod, period, output_dir=None,
     completion_pct = (up_to_date_count / total_tasks * 100) if total_tasks > 0 else 0
 
     print("-" * 60)
-    print(f"📊 STATS SUMMARY: {prod} | {period} | {subset or 'GLOBAL'}")
+    print(f"📊 STATS SUMMARY: {prod} | {period} | {map_subset or 'GLOBAL'}")
     print(f"📁 Output Dir: {output_dir}")
     print(f"✅ Up-to-date:  {up_to_date_count}/{total_tasks} ({completion_pct:.1f}%)")
     print(f"⏳ To process:  {needs_update_count} files")
@@ -478,7 +478,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
         
         # 1. Extract variables from the inputs
         debug = kwargs.get('debug', False)
-        subset = kwargs.get('subset')
+        map_subset = kwargs.get('map_subset')
         out_path = task['output']
         input_files = task['inputs']
         max_retries = 3    
@@ -524,8 +524,8 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                                     if vars_to_drop:
                                         single_ds = single_ds.drop_vars(vars_to_drop)
                                     
-                                    if subset:
-                                        single_ds = subset_dataset(single_ds, subset)
+                                    if map_subset:
+                                        single_ds = subset_dataset(single_ds, map_subset)
                                         
                                     single_ds.load()
                                     daily_datasets.append(single_ds)
@@ -574,9 +574,9 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                         if vars_to_drop:
                             ds = ds.drop_vars(vars_to_drop)
                             
-                        if subset:
-                            if verbose: print(f"      🗺️ Subsetting entire dataset to region: {subset}")
-                            ds = subset_dataset(ds, subset)
+                        if map_subset:
+                            if verbose: print(f"      🗺️ Subsetting entire dataset to region: {map_subset}")
+                            ds = subset_dataset(ds, map_subset)
                     
                 except Exception as e:
 
@@ -868,7 +868,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     dataset (str): Override dataset. Defaults to each product’s default from product_defaults() (optional).
     periods (list of str): Period codes to compute (e.g. ['D','W','M']) (optional). 
                            Defaults to ['W','WEEK','M','MONTH','A','ANNUAL','DOY'].
-    subset (str): Regional subset (e.g. 'NES') (optional). Passed through to get_prod_files() as data_type or map override.
+    map_subset (str): Regional subset (e.g. 'NES') (optional). Passed through to get_prod_files() as data_type or map override.
     daterange (str or tuple): Date range spec to subset time (optional). Passed to get_dates().
     time_dim (str): Name of the time dimension in your NetCDF files (default is 'time').
     version (str): Dataset version override (optional). Passed through to get_prod_files().
@@ -917,7 +917,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         # Pull variables out of kwargs
         debug   = kwargs.get('debug', False) 
         dataset = kwargs.pop('dataset',None)
-        subset  = kwargs.get('subset', 'GLOBAL')
+        map_subset  = kwargs.get('map_subset', 'GLOBAL')
         parallel_runs = kwargs.pop('parallel_runs', 1) 
         
         # 📋 Initialize an error log for the entire run
@@ -944,7 +944,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                 if not stats_map:
                     print(f"❌ ERROR: No processing tasks generated for {prod} ({period}).")
                     print(f"   Check: Does {dataset} have {prod} data for the requested daterange?")
-                    print(f"   Check: Is the 'subset' ({subset}) correct for this dataset?")
+                    print(f"   Check: Is the 'map_subset' ({map_subset}) correct for this dataset?")
                     continue # Move to the next period/product
                 
                 # 🎯 Gather all tasks that actually need to be run

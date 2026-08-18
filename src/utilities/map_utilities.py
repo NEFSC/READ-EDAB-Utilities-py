@@ -115,9 +115,18 @@ def load_dataset(path_or_paths):
     Loads a NetCDF dataset from a file, directory, or list of files.
     Returns an xarray.Dataset.
     """
+    mf_kwargs = {
+        'combine': 'nested',
+        'concat_dim': 'time'
+    }
+
     if isinstance(path_or_paths, (list, tuple)):
         # List of files
-        return xr.open_mfdataset(path_or_paths, combine='by_coords')
+        try:
+            return xr.open_mfdataset(path_or_paths, **mf_kwargs)
+        except ValueError:
+            # Fallback just in case the files are structured completely differently
+            return xr.open_mfdataset(path_or_paths, combine='by_coords')
 
     if os.path.isfile(path_or_paths) and path_or_paths.endswith(".nc"):
         # Single file
@@ -231,6 +240,8 @@ def regrid_dataset(
         Dataset with regridded variables.
     """
 
+    import xesmf as xe
+
     if weights_file is None:
         raise ValueError("Weights file is required to regrid the data.")
     
@@ -302,7 +313,7 @@ def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None):
 
     # 3 Subset dataset by time (daterange) and products if needed    
     if daterange:
-        dates = get_dates(daterange,format='datetime')
+        dates = get_dates(daterange,day_format='datetime')
         source_ds = source_ds.sel(time=dates,method='nearest',tolerance=np.timedelta64(1, 'D'))
         
     if source_vars:

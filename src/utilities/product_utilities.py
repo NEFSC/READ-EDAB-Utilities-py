@@ -1,8 +1,7 @@
-import os
-import glob
+from importlib.resources import path
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
-from utilities import dataset_defaults, get_dataset_products, parse_dataset_info, resolve_dataset_map, get_period_info, get_source_file_dates, get_daterange
+from utilities import dataset_defaults, get_dataset_products, parse_dataset_info, resolve_dataset_grid, get_period_info, get_source_file_dates, get_daterange
 
 """
 Purpose:
@@ -46,14 +45,14 @@ def product_defaults():
     # The default product name, dataset and source data location product
     prod_info_map = {
         'CHL': ('CHL','OCCCI', 'SOURCE'),
-        'CHLOR_A': ('CHLOR_A','OCCCI','PRODUCT'),
+        'CHLOR_A': ('CHLOR_A','OCCCI','PRODUCTS'),
         'SST': ('SST','ACSPO', 'SOURCE'),
-        'PPD': ('PPD','OCCCI', 'PRODUCT'),
-        'PSC': ('PSC','OCCCI', 'PRODUCT'),
+        'PPD': ('PPD','OCCCI', 'PRODUCTS'),
+        'PSC': ('PSC','OCCCI', 'PRODUCTS'),
         'RRS': ('RRS','OCCCI', 'SOURCE'),
         'PAR': ('PAR','GLOBCOLOUR','SOURCE'),
         'IPAR': ('IPAR','PACE','SOURCE'),
-        'AVW': ('AVW','OCCCI','PRODUCT'),
+        'AVW': ('AVW','OCCCI','PRODUCTS'),
         'KD': ('KD','OCCCI','SOURCE'),
         'IOP': ('IOP','OCCCI','SOURCE'),
         'MOANA': ('MOANA','PACE','SOURCE'),
@@ -63,9 +62,9 @@ def product_defaults():
         'PIC': ('PIC','GLOBCOLOUR','SOURCE'),
         'POC': ('POC','GLOBCOLOUR','SOURCE'),
         'SST_TEMP': ('SST','ACSPONRT', 'SOURCE'),
-        'CHL_FRONTS': ('CHL_FRONTS','OCCCI', 'PRODUCT'),
-        'SST_FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT'),
-        'FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCT'),
+        'CHL_FRONTS': ('CHL_FRONTS','OCCCI', 'PRODUCTS'),
+        'SST_FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCTS'),
+        'FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCTS'),
         'BTEMP': ('BTEMP','GLORYS','SOURCE'),
         'DO': ('DO','MOM6','SOURCE'),
         'ARAG': ('ARAG','MOM6','SOURCE')
@@ -196,288 +195,4 @@ def get_nc_prod(dataset,product):
     else:
         print(f"[ERROR] No match found for product '{product_name}' in dataset '{dataset_name}'.")
         return None
-
-
-def get_prod_files(prod, dataset=None, period=None, getfilepath=False, make_dir=False, verbose=False, **kwargs):
-    """
-    Retrieves NetCDF files for a specified product from a structured dataset directory.
-
-    This function resolves the correct path based on product metadata, dataset defaults,
-    and optional period codes (e.g. 'M' for monthly stats). It supports fallback logic
-    when dataset_map is not provided, and redirects to PRODUCTS folders for derived products.
-
-    Required Parameters:
-    ----------
-    prod (str): Product name (e.g. 'CHL', 'PSC', 'SST').
-    
-    Optional Parameters:
-    ----------
-    dataset (str): Dataset name (e.g. 'OCCCI', 'ACSPO'). Defaults to product's default dataset.
-    dataset_version (str): Version string (e.g. 'V6.0'). Defaults to dataset default.
-    dataset_type (str): Type of dataset folder (e.g. 'SOURCE' or 'PRODUCTS'). Defaults to product default in product_defaults().
-    dataset_map (str): Specific map folder (e.g. 'NES_4KM_DAILY'). If not provided, will be auto-resolved.
-    map_region (str): Map region (e.g. 'NES', 'GLOBAL'). Used for fallback resolution.
-    resolution (str): Resolution in km (e.g. '4', '25'). Used for fallback resolution.
-    type (str): Data type (e.g. 'DAILY', 'STATS', 'ANOMS'). Used for fallback resolution.
-    prod_type (str): Subfolder under product (e.g. 'ANOMALY', 'CLIMATOLOGY').
-    period (str): Period code (e.g. 'M', 'D3', 'YEAR'). Used to redirect to *_STATS folders.
-    getfilepath (bool): If True, returns the resolved path instead of listing files.
-    make_dir (bool): If True, creates the directory if it does not exist.
-    make_dirverbose (bool): If True, prints detailed resolution steps.
-
-    Returns:
-    -------
-    list or str
-        List of matching NetCDF files, or path string if getfilepath=True.
-
-    Raises:
-    -------
-    ValueError
-        If product is found in multiple folders or resolution fails.
-    """
-    
-    def verbose_trace(msg, verbose=True):
-        if verbose:
-            print(msg)
-
-    # --- Step 1: Normalize product name and resolved product metadata ---
-    prod = prod.upper().strip()
-    prod_info_map = product_defaults()
-    if prod not in prod_info_map:
-        print(f"❌ Product '{prod}' not found in prod_info_map.")
-        return None
-    actual_prod, default_dataset, default_type = prod_info_map[prod]
-
-    # --- Step 2: Extract parameters from kwards ---
-    dataset = dataset.upper().strip() if dataset else default_dataset # Use provided dataset or fallback to default
-    dataset_type = kwargs.get('dataset_type', default_type).upper() # User provided dataset_type or fallback to default from prod_info_map
-    dataset_version = kwargs.get('dataset_version') 
-    dataset_type = kwargs.get('dataset_type', default_type).upper()
-    dataset_map = kwargs.get('dataset_map')
-    resolution = kwargs.get('resolution')
-    map_region = kwargs.get('map_region')
-    data_type = kwargs.get('data_type')
-    prod_type = kwargs.get('prod_type')
-    daterange = kwargs.get('daterange')
-
-    # --- Step 3: Initialize a provenance dictionary to track decisions for debugging ---
-    provenance_log = {
-        'product': prod,
-        'dataset': dataset,
-        'dataset_type': dataset_type,
-        'dataset_version': dataset_version,
-        'period': period,
-        'map_region':map_region,
-        'resolution_steps': []
-    }
-    
-    # --- Step 4: Resolve dataset defaults ---
-    dataset_info_map = dataset_defaults()
-    if dataset not in dataset_info_map:
-        print(f"❌ Dataset '{dataset}' not found in dataset_info_map.")
-        return None
-
-    default_version, default_map, default_product = dataset_info_map[dataset]
-    dataset_version = dataset_version or default_version
-    provenance_log['resolution_steps'].append(f"Loaded dataset defaults → version: {default_version}, map: {default_map}, default_product: {default_product}")
-    
-    # --- Step 5: Load dataset structure ---
-    dataset_products = get_dataset_products(dataset)
-    if not dataset_products:
-        print(f"⚠ No product structure found for dataset '{dataset}'.")
-        return None
-    
-    if actual_prod == default_product:
-        provenance_log['resolution_steps'].append(f"Using default dataset_map: {default_map}")
-    else:
-        provenance_log['resolution_steps'].append(f"Searching all maps for product '{actual_prod}'")
-
-    if dataset_type in dataset_products:
-        filtered_structure = {dataset_type: dataset_products[dataset_type]}
-    else:
-        filtered_structure = dataset_products
-    
-
-    # --- Step 6: Resolve dataset_map
-    # 🎯 TRIGGER LOGIC: Transform if writing outputs or looking for derived periods
-    is_derived_period = period and period not in ['D', 'DD']
-
-    # When building the output directory, the input DAILY path is needed to use as a template. 
-    # Don't restrict the search to 'STATS' which may not exist yet!
-    search_data_type = None if getfilepath else data_type
-    search_period = None if getfilepath else period
-
-    if getfilepath and (is_derived_period or data_type in ['STATS', 'ANOMS']):
-        search_data_type = 'DAILY'
-        search_period = None
-    
-    if not kwargs.get('dataset_map'):
-        dataset_map, path = resolve_dataset_map(
-            filtered_structure,
-            prod=actual_prod,
-            default_map=default_map,
-            period=search_period,
-            data_type=search_data_type,
-            provenance_log=provenance_log,
-            verbose=verbose
-        )
-    else:
-        path = None # Will be resolved in Step 8 if map is hardcoded
-    
-    # --- Step 7: Handle PRODUCTS/STATS/CLIMS/ANOMS Logic ---
-    transformed_path = False
-
-    # Transform if writing outputs or looking for derived periods
-    if is_derived_period or data_type == 'ANOMS':    
-        try:
-            if not path:
-                raise ValueError("Base path is None; cannot transform.")
-
-            # Get period_info dictionary/tuple
-            p_info = get_period_info(period) if period else {}
-            folder_name = p_info.get('folder_name')
-
-            # Determine Suffix dynamically based entirely on period_info
-            if folder_name:
-                suffix = folder_name.upper() # e.g., 'MONTHLY', 'CLIMATOLOGY', 'WEEKLY'
-            else:
-                # Fail-safe: Use data_type if provided, otherwise default to 'DERIVED'
-                suffix = data_type.upper() if data_type else 'DERIVED'
-            
-            # Manually override for anomalies if requested
-            if data_type == 'ANOMS' or (period and 'ANOM' in period):
-                suffix = 'ANOMS'
-
-            # --- Reconstruction Logic ---
-            parts = dataset_map.split('_') if dataset_map else ['GLOBAL', '4KM']
-            
-            # Use map_region/resolution overrides if provided, else keep original
-            region = map_region.upper() if map_region else parts[0]
-            
-            if resolution:
-                res_val = str(resolution).upper()
-                resolution_str = res_val if 'KM' in res_val else f"{res_val}KM"
-            else:
-                resolution_str = parts[1] if len(parts) > 1 else '4KM'
-            
-            # 🎯 NEW MAP: e.g., NES_2KM_MONTHLY or NES_2KM_CLIMATOLOGY
-            new_map = f"{region}_{resolution_str}_{suffix}"
-
-            # --- Transform the physical path ---
-            res_info = parse_dataset_info(path)
-            if res_info:
-                info = res_info[0]
-                # Replace the old map string with the new elegant one
-                path = path.replace(info["dataset_map"], new_map)
-                
-                # Ensure we redirect to /PRODUCTS/ for any derived data 
-                # OR if we are subsetting a region (e.g. GLOBAL -> NES)
-                if suffix != 'DAILY' or region != parts[0]:
-                    path = path.replace(f'/{info["dataset_type"]}/', "/PRODUCTS/")
-            
-            dataset_map = new_map 
-            transformed_path = True
-            verbose_trace(f"📂 Transformed path to {suffix}: {path}", verbose)
-        except Exception as e:
-            verbose_trace(f"⚠ Path transformation failed: {e}", verbose)
-    
-    if not dataset_map or not path:
-        print(f"⚠ No valid dataset_map found for product '{prod}' with data_type='{data_type}'")
-        return None if getfilepath else []
-
-    # --- Step 8: Search for product path ---
-    candidate_types = [dataset_type] if dataset_type in dataset_products else list(dataset_products.keys())    
-
-    if not transformed_path:
-        matching_paths = {}
-        for dtype in candidate_types:
-            for map_key, prod_dict in dataset_products[dtype].items():
-                verbose_trace(f"🔍 Checking {dtype}/{map_key} for product '{actual_prod}'", verbose)
-                if dataset_map and dataset_map not in map_key:
-                    continue
-                if actual_prod in prod_dict:
-                    path = prod_dict[actual_prod]
-                    if prod_type:
-                        path = os.path.join(path, prod_type)
-                    matching_paths[dtype] = path
-        # --- Step 8.5: Handle ambiguous or missing paths ---
-        if not matching_paths:
-            verbose_trace(f"⚠ Product '{prod}' not found in dataset '{dataset}' under type '{dataset_type}' and map '{dataset_map}'")
-            return []
-        
-        if len(matching_paths) > 1:
-            raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple types ({list(matching_paths.keys())}) for dataset '{dataset}'.")
-
-        resolved_type, path = next(iter(matching_paths.items()))
-        verbose_trace(f"✅ Found '{prod}' in '{resolved_type}' → {path}",verbose)
-    
-    provenance_log['resolution_steps'].append(f"Resolved product path → {path}")
-    provenance_log['final_path'] = path
-
-    # --- Step 9a: Make and return path or search for files ---
-    dir_exists = os.path.isdir(path)
-    if make_dir and not dir_exists:
-        os.makedirs(path, exist_ok=True)
-        dir_exists = True
-        verbose_trace(f"🛠 Created directory: {path}", verbose)
-    
-    if getfilepath:
-        # New Safety Check: If we are returning the path but it doesn't exist
-        if not dir_exists:
-            print(f"⚠ Warning: Resolved path does not exist on disk: {path}")
-            print("  (Hint: Set make_dir=True to automatically create this directory structure)")
-        
-        return path
-
-    # --- Step 9b: Or search for files ---
-    search_pattern = f"{period}_*.nc" if period else "*.nc"
-    verbose_trace(f"🔍 Searching for .nc files in: {path}",verbose)
-
-    if verbose:
-            print("🧾 Provenance log:")
-            for step in provenance_log['resolution_steps']:
-                print("  •", step)
-
-    nc_files = glob.glob(os.path.join(path, search_pattern))
-    if not nc_files:
-        if period:
-            print(f"⚠ No .nc files found in: {path} for period code {period}")
-        else:
-            print(f"⚠ No .nc files found in: {path}")
-        return []
-
-    # --- Step 10: Subset files by date range if specified ---
-    if daterange:
-        # Standardize the daterange
-        std_daterange = get_daterange(daterange)
-
-        if std_daterange:
-            verbose_trace(f"🗓 Filtering files to match daterange: {daterange[0]} to {daterange[1]}...", verbose)
-            
-            # Parse the date boundaries into standardized YYYYMMDD strings (Assuming 'daterange' is a list/tuple like ['19970101', '19971231'])
-            start_str = str(daterange[0]).replace("-", "")
-            end_str = str(daterange[1]).replace("-", "")
-
-            # Use your utility to extract dates for all found files at once
-            file_dates = get_source_file_dates(nc_files, format="yyyymmdd")
-            
-            filtered_files = []
-            for i, f_date in enumerate(file_dates):
-                if f_date is not None:
-                    # String comparison works perfectly for YYYYMMDD formats!
-                    if start_str <= f_date <= end_str:
-                        filtered_files.append(nc_files[i])
-                else:
-                    # If the utility couldn't find a date, keep the file just in case
-                    filtered_files.append(nc_files[i])
-                    
-            nc_files = filtered_files
-        else:
-            verbose_trace(f"⚠️ Provided daterange '{daterange}' could not be parsed. Skipping date filter.", verbose)
-            
-    verbose_trace(f"📦 Found {len(nc_files)} .nc files in: {path}")
-    nc_files.sort()
-
-    return nc_files
-
                                                            
