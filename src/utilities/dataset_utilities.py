@@ -13,7 +13,7 @@ Main Functions:
     - get_datasets_source: Checks for the first valid input data directory from a given dictionary.
     - get_dataset_products: Searches for products within the given SOURCE and PRODUCTS paths for a dataset
     - parse_dataset_info: Extracts structured metadata from a full dataset path.
-    - resolve_dataset_map: Resolves the appropriate dataset_map folder for a given product within a dataset structure.
+    - resolve_dataset_grid: Resolves the appropriate dataset_grid folder for a given product within a dataset structure.
 
 Helper Functions:
     - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes
@@ -289,10 +289,9 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
 
     return results
 
-def resolve_dataset_map(dataset_products,
-                        prod=None,
+def resolve_dataset_grid(dataset_products, prod,
                         data_type=None,
-                        default_map=None,
+                        default_grid=None,
                         period=None,
                         verbose=False,
                         provenance_log=None):
@@ -313,7 +312,7 @@ def resolve_dataset_map(dataset_products,
     data_type : str, optional
         Explicit map type to filter by (e.g., 'DAILY', 'STATS', 'ANOMS').
         If provided, only folders ending in _{data_type.upper()} will be considered.
-    default_map : str, optional
+    default_grid : str, optional
         Default map folder name (e.g., 'GLOBAL_4KM_DAILY'). Used for provenance logging.
     period : str, optional
         Period code (e.g., 'D', 'M', 'D3'). Used to infer map type if data_type is not provided.
@@ -325,7 +324,7 @@ def resolve_dataset_map(dataset_products,
     Returns
     -------
     tuple
-        (dataset_map, path) if resolved successfully.
+        (dataset_grid, path) if resolved successfully.
         (None, None) if no matching folder is found or ambiguity cannot be resolved.
 
     Raises
@@ -334,101 +333,61 @@ def resolve_dataset_map(dataset_products,
         If multiple folders contain the product and no resolution strategy succeeds.
     """
 
-    if prod == None:
-        prod = 'CHL'
-
-    candidate_maps = []
+    # 1. Gather all grids containing the product
+    candidate_grids = []
     for dtype in dataset_products:
-        for map_key, prod_dict in dataset_products[dtype].items():
+        for grid_key, prod_dict in dataset_products[dtype].items():
             if prod in prod_dict:
-                candidate_maps.append((map_key, prod_dict[prod]))
+                candidate_grids.append((grid_key, prod_dict[prod]))
 
-    if not candidate_maps:
+    if not candidate_grids:
         return None, None
     
-    # Prioritize the default_map (e.g., 'GLOBAL_4KM') unless one is provided
-    if default_map:
-        preferred_maps = [m for m in candidate_maps if default_map in m[0]]
-        if preferred_maps:
-            candidate_maps = preferred_maps
-            if provenance_log is not None:
-                provenance_log['resolution_steps'].append(f"Filtered candidates by default_map='{default_map}'")
+    # 2. Prioritize the default_grid if provided    if default_grid:
+    preferred_grids = [g for g in candidate_grids if default_grid in g[0]]
+    if preferred_grids:
+        candidate_grids = preferred_grids
+        if provenance_log is not None:
+            provenance_log['resolution_steps'].append(f"Filtered candidates by default_grid='{default_grid}'")
                             
-    # --- Handle multiple matches ---
-    if len(candidate_maps) > 1:
+    # 3. STRICTLY filter by data_type (if provided)
+    if data_type:
+        candidate_grids = [g for g in candidate_grids if g[0].endswith(f"_{data_type.upper()}")]
+        if not candidate_grids:
+            # The product exists, but NOT for this data_type. Return None to trigger creation.
+            return None, None
 
-        # ✅ If data_type is explicitly provided, filter strictly by it
-        if data_type:
-            typed_maps = [m for m in candidate_maps if m[0].endswith(f"_{data_type.upper()}")]
-            if typed_maps:
-                selected_map = typed_maps[0]
-                if provenance_log is not None:
-                    provenance_log['resolution_steps'].append(f"Filtered by data_type='{data_type}' → {selected_map[0]}")
-                if verbose:
-                    print(f"📦 Selected map by data_type → {selected_map[0]}")
-                return selected_map
-            else:
-                if provenance_log is not None:
-                    provenance_log['resolution_steps'].append(f"No map folder found for data_type='{data_type}'")
-                if verbose:
-                    print(f"⚠ No map folder found for data_type='{data_type}'")
-                return None, None
-
-        # ✅ Period-based logic (Using folder_name from period_info)
+    # 4. STRICTLY filter by period (if provided and data_type wasn't)
+    elif period:
         p_info = get_period_info(period) if period else {}
-        folder_name = p_info.get('folder_name')
-        if folder_name:
-            target_suffix = folder_name.upper()
-        else:
-            target_suffix = 'DERIVED'
-
-        # Try to find an exact match for the target period (e.g., _MONTHLY)
-        target_maps = [m for m in candidate_maps if m[0].endswith(f"_{target_suffix}")]
-
-        if target_maps:
-            if provenance_log is not None:
-                provenance_log['resolution_steps'].append(f"Matched {target_suffix} map for period '{period}' → {target_maps[0][0]}")
-            if verbose:
-                print(f"📊 Matched {target_suffix} map → {target_maps[0][0]}")
-            return target_maps[0]
-
-        # ✅ 3. Fallback to DAILY base map
-        # If the derived map doesn't exist yet, default to DAILY so the pipeline can transform it later
-        daily_maps = [m for m in candidate_maps if m[0].endswith('_DAILY')]
+        target_suffix = p_info.get('folder_name', period).upper()
         
-        if daily_maps:
-            if provenance_log is not None:
-                provenance_log['resolution_steps'].append(f"Defaulted to base DAILY map → {daily_maps[0][0]}")
-            if verbose:
-                print(f"📦 Defaulted to base DAILY map → {daily_maps[0][0]}")
-            return daily_maps[0]
+        # e.g., filter to only grids ending in _DAILY or _MONTHLY
+        period_grids = [g for g in candidate_grids if g[0].endswith(f"_{target_suffix}")]
+        
+        if period_grids:
+            candidate_grids = period_grids
+        else:
+            # The product exists, but NOT for this period. Return None to trigger creation.
+            return None, None
 
-        """
-        daily_maps = [m for m in candidate_maps if m[0].endswith('_DAILY')]
-        stats_maps = [m for m in candidate_maps if m[0].endswith('_STATS')]
+    # 5. Handle any remaining ambiguity
+    if len(candidate_grids) > 1:
+        # Tie-breaker: default to DAILY if no specific period was requested
+        daily_grids = [g for g in candidate_grids if g[0].endswith('_DAILY')]
+        if daily_grids:
+            return daily_grids[0]
 
-        if period in [None, 'D', 'DD'] and daily_maps:
-            if provenance_log is not None:
-                provenance_log['resolution_steps'].append(f"Defaulted to DAILY map → {daily_maps[0][0]}")
-            if verbose:
-                print(f"📦 Defaulted to DAILY map → {daily_maps[0][0]}")
-            return daily_maps[0]
-
-        elif period not in ['D', 'DD'] and stats_maps:
-            if provenance_log is not None:
-                provenance_log['resolution_steps'].append(f"Defaulted to STATS map for period '{period}' → {stats_maps[0][0]}")
-            if verbose:
-                print(f"📊 Defaulted to STATS map → {stats_maps[0][0]}")
-            return stats_maps[0]
-        """
-        # ❌ Ambiguity remains — raise error
-        maps_found = [m[0] for m in candidate_maps]
-        raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple maps ({maps_found}). Please specify dataset_map.")
+        # Raise an error if it can't be resolved
+        grids_found = [g[0] for g in candidate_grids]
+        raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple grids ({grids_found}). Please specify dataset_grid.")
     
-    # ✅ Single match — return directly
+    # ✅ 6. Return the single exact match
     if verbose:
-        print(f"📦 Auto-resolved dataset_map → {candidate_maps[0][0]}")
-    return candidate_maps[0]
+        print(f"📦 Auto-resolved dataset_grid → {candidate_grids[0][0]}")
+    return candidate_grids[0]
+
+    
 
 
 
@@ -459,6 +418,7 @@ def parse_dataset_info(pathlist, base=None):
     results = []
 
     # Ensure we are working with a list
+    is_single_input = isinstance(pathlist, str)
     paths = pathlist if isinstance(pathlist, (list, tuple)) else [pathlist]
 
     for path in paths:
@@ -475,7 +435,7 @@ def parse_dataset_info(pathlist, base=None):
                     "dataset": parts[0] if len(parts) > 0 else "UNKNOWN",
                     "version": parts[1] if len(parts) > 1 else "UNKNOWN",
                     "dataset_type": parts[2] if len(parts) > 2 else "UNKNOWN",
-                    "dataset_map": parts[3] if len(parts) > 3 else "UNKNOWN",
+                    "dataset_grid": parts[3] if len(parts) > 3 else "UNKNOWN",
                     "product": parts[4] if len(parts) > 4 else "UNKNOWN"
                 }
             else:
@@ -483,8 +443,8 @@ def parse_dataset_info(pathlist, base=None):
                     "dataset": "UNKNOWN",
                     "version": "UNKNOWN",
                     "dataset_type": "UNKNOWN",
-                    "dataset_map": "UNKNOWN",
+                    "dataset_grid": "UNKNOWN",
                     "product": "UNKNOWN"
                 }
         results.append(dir_cache[dirname])
-    return results
+    return results[0] if is_single_input else results

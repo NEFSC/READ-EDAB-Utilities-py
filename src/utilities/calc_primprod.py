@@ -23,7 +23,7 @@ from utilities import get_summary_metadata
 from utilities import get_default_metadata
 from utilities import get_source_metadata
 from utilities import parse_dataset_info
-from utilities import get_source_file_dates, get_prod_files, get_dates
+from utilities import get_source_file_dates, get_prod_files, get_dates, get_filepath
 
 
 """
@@ -98,7 +98,7 @@ def validate_inputs(chl, sst, par, daylength):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None, subset=None, verbose=False):
+def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None, map_subset=None, verbose=False):
     """
     Constructs a date→(CHL, SST, PAR, PPD) file path mapping using get_prod_files.
 
@@ -118,8 +118,9 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
     
     # Extract metadata from first CHL file
     if not chl_files:
-        raise ValueError("No CHL files found to derive metadata.")
-    info = parse_dataset_info(chl_files[0])
+        raise ValueError(f"No CHL files found for {chl_dataset} to derive metadata.")
+    parse_info = parse_dataset_info(chl_files[0])
+    info = parse_info[0] if isinstance(parse_info, list) else parse_info
 
     # Extract valid date strings
     chl_dates = get_source_file_dates(chl_files, format="yyyymmdd", placeholder=None)
@@ -133,10 +134,10 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
     #ppd_map = {d: f for d, f in zip(ppd_dates, ppd_files) if d}
     # Build PPD file map
     #output_dir = make_product_output_dir('CHL','PPD',dataset=chl_dataset,subset=subset)
-    output_dir = get_prod_files('PPD',dataset=chl_dataset,map=subset,getfilepath=True,make_dir=True)
+    output_dir = get_filepath('PPD',dataset=chl_dataset,map_subset=map_subset,getfilepath=True,make_dir=True)
     ppd_map = {}
     for date in chl_dates:
-        filename = f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_map']}-PPD.nc"
+        filename = f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_grid']}-PPD.nc"
         ppd_map[date] = os.path.join(output_dir, filename)
 
     # Normalize get_date_prod
@@ -161,7 +162,7 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
             chl_path = chl_map[date]
             sst_path = sst_map[date]
             par_path = par_map[date]
-            ppd_path = os.path.join(output_dir, f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_map']}-PPD.nc")
+            ppd_path = os.path.join(output_dir, f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_grid']}-PPD.nc")
 
             # Check if PPD file exists and is newer than all inputs
             if os.path.exists(ppd_path):
@@ -405,7 +406,7 @@ def run_pp_pipeline(chl_dataset=None,
                     sst_dataset=None,
                     par_dataset=None,
                     daterange=None,
-                    subset=None,
+                    map_subset=None,
                     daylength_dir=None,
                     overwrite=False,
                     verbose=True,
@@ -420,7 +421,7 @@ def run_pp_pipeline(chl_dataset=None,
     Parameters:
         chl_dataset, sst_dataset, par_dataset (str): Dataset identifiers
         daterange (list of str): Dates to process (YYYYMMDD)
-        subset (str): The subset region (e.g. NES, NWA) to subset the data 
+        mapmap_subset (str): The map region (e.g. NES, NWA) to subset the data to
         overwrite (bool): If True, reprocess even if output is up-to-date
         verbose (bool): If True, print progress
         logfile (str): Optional file to log the progress
@@ -438,7 +439,7 @@ def run_pp_pipeline(chl_dataset=None,
                                     chl_dataset=chl_dataset,
                                     sst_dataset=sst_dataset,
                                     par_dataset=par_dataset,
-                                    subset=subset,
+                                    map_subset=map_subset,
                                     verbose=verbose)
 
     # 2️⃣ Filter dates to run
@@ -516,11 +517,11 @@ def run_pp_pipeline(chl_dataset=None,
             raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
 
         # Subset CHL and SST if requested
-        if subset:
-            if verbose: print(f"Subsetting to region: {subset}")
-            chl = subset_dataset(chl, subset)
-            sst = subset_dataset(sst, subset)
-            par = subset_dataset(par, subset)
+        if map_subset:
+            if verbose: print(f"Subsetting to region: {map_subset}")
+            chl = subset_dataset(chl, map_subset)
+            sst = subset_dataset(sst, map_subset)
+            par = subset_dataset(par, map_subset)
         
         chl, sst, par = xr.align(chl, sst, par, join="exact")  # or "inner" if needed
 

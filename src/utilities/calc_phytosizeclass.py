@@ -25,7 +25,7 @@ from utilities import get_summary_metadata
 from utilities import get_default_metadata
 from utilities import get_source_metadata
 from utilities import parse_dataset_info
-from utilities import get_source_file_dates, get_prod_files, get_dates
+from utilities import get_source_file_dates, get_prod_files, get_dates, get_filepath
 
 
 """
@@ -85,7 +85,7 @@ def validate_inputs(chl, sst):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, subset=None, verbose=False):
+def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, map_subset=None, verbose=False):
     """
     Constructs a date→(CHL, SST, PSC) file path mapping using get_prod_files.
 
@@ -93,7 +93,7 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
         dates (list of str): List of dates (YYYYMMDD) to process.
         get_date_prod (str): Which product to use for date filtering.
         chl_dataset, sst_dataset (str): Dataset identifiers. 
-        subset (str): The subset region (e.g. NES, NWA) to subset the data 
+        map_subset (str): The subset region (e.g. NES, NWA) to subset the data 
     Returns:
         dict: Mapping of date → (chl_path, sst_path, psc_output_path)
     """
@@ -116,12 +116,14 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
 
     # Build PSC file map
     #output_dir = make_product_output_dir('CHL','PSC',dataset=chl_dataset,subset=subset)
-    output_dir = get_prod_files('PSC',dataset=chl_dataset,map=subset,getfilepath=True,make_dir=True)
+    output_dir = get_filepath('PSC',dataset=chl_dataset,map_subset=map_subset,getfilepath=True,make_dir=True)
     
-    info = parse_dataset_info(output_dir)
+    parsed_info = parse_dataset_info(output_dir)
+    info = parsed_info[0] if isinstance(parsed_info, list) else parsed_info
+
     psc_map = {}
     for date in chl_dates:
-        filename = f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_map']}-PSC-Turner.nc"
+        filename = f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_grid']}-PSC-Turner.nc"
         psc_map[date] = os.path.join(output_dir, filename)
 
     # Normalize get_date_prod
@@ -340,7 +342,7 @@ def process_daily_psc(chl, sst, output_psc_file, history=None, sourceinfo=None):
 def run_psc_pipeline(chl_dataset=None,
                     sst_dataset=None,
                     daterange=None,
-                    subset='NES',
+                    map_subset='NES',
                     overwrite=False,
                     verbose=True,
                     logfile=None
@@ -354,7 +356,7 @@ def run_psc_pipeline(chl_dataset=None,
     Parameters:
         chl_dataset, sst_dataset (str): Dataset identifiers
         daterange (list of str): Dates to process (YYYYMMDD)
-        subset (str): The subset region (e.g. NES, NWA) to subset the data 
+        map_subset (str): The subset region (e.g. NES, NWA) to subset the data 
         overwrite (bool): If True, reprocess even if output is up-to-date
         verbose (bool): If True, print progress
         logfile (str): Optional file to log the progress
@@ -364,7 +366,7 @@ def run_psc_pipeline(chl_dataset=None,
         run_psc_pipeline(sst_dataset="CORALSST",daterange=['19980101','19980131']) # specifies a dataset and a daterange
 
     """
-    subset = subset or "NES"  # Default to NES if None provided
+    map_subset = map_subset or "NES"  # Default to NES if None provided
 
     if logfile:
         print(f"logging progress in {logfile}")
@@ -376,7 +378,7 @@ def run_psc_pipeline(chl_dataset=None,
     psc_data_map = build_psc_date_map(dates=daterange,
                                       chl_dataset=chl_dataset,
                                       sst_dataset=sst_dataset,
-                                      subset=subset,
+                                      map_subset=map_subset,
                                       verbose=verbose)
 
     # 2️⃣ Filter dates to run
@@ -400,16 +402,19 @@ def run_psc_pipeline(chl_dataset=None,
     output_files = [psc_data_map[d][2] for d in dates_to_run]
 
     # 4️⃣ Get input data information
-    chl_info = parse_dataset_info(chl_files[0])
-    sst_info = parse_dataset_info(sst_files[0])
+    chl_parse = parse_dataset_info(chl_files[0])
+    sst_parse = parse_dataset_info(sst_files[0])
 
-    chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
-    sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
-    
+    chl_info = chl_parse[0] if isinstance(chl_parse, list) else chl_parse
+    sst_info = sst_parse[0] if isinstance(sst_parse, list) else sst_parse
+
     merged_info = {
         chl_info["product"]: chl_info,
         sst_info["product"]: sst_info,
     }
+
+    chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
+    sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
 
     chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
     sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
@@ -440,10 +445,10 @@ def run_psc_pipeline(chl_dataset=None,
             raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
 
         # Subset CHL and SST if requested
-        if subset:
-            if verbose: print(f"Subsetting to region: {subset}")
-            chl = subset_dataset(chl, subset)
-            sst = subset_dataset(sst, subset)
+        if map_subset:
+            if verbose: print(f"Subsetting to region: {map_subset}")
+            chl = subset_dataset(chl, map_subset)
+            sst = subset_dataset(sst, map_subset)
         
         chl, sst = xr.align(chl, sst, join="exact")  # or "inner" if needed
 

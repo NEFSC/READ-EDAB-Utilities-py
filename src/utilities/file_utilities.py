@@ -1,9 +1,10 @@
 import os
+import glob
 from pathlib import Path
-import xarray as xr
 import stat
 from utilities.bootstrap.environment import bootstrap_environment
-from utilities import parse_dataset_info, extract_period_code, get_period_info, get_period_dates
+from utilities import parse_dataset_info, extract_period_code, get_period_info, get_period_dates, get_source_file_dates
+from utilities import product_defaults, dataset_defaults, get_dataset_products, resolve_dataset_grid, get_daterange
 env = bootstrap_environment(verbose=False)
 
 """
@@ -15,9 +16,11 @@ Main Functions:
     - file_make: Checks to see if a file exists and if it needs to be remade based on the mtimes of the input files
     - set_file_permissions: Checks the permissions of a file and changes them if they don't match the desired permissions.
     - corrupt_file_detector: Searches for corrupt files in a list of files
+    - get_filepath: Resolves the exact directory path for a product, optionally creating it if it doesn't exist.
+    - get_prod_files: Retrieves a list of NetCDF files for a specified product, optionally filtering by date range.
 
 Helper Functions:
-    - validate_inputs: Validates that input data arrays are xarray.DataArray and have matching shapes
+    - verbose_trace: Internal function for conditional debug printing.
     
 Copywrite: 
     Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
@@ -253,3 +256,167 @@ def corrupt_file_detector(file_list):
             issues.append((f, f"Corrupt/Invalid: {str(e)}"))
             
     return issues
+
+def get_filepath(prod, dataset=None, period='D',make_dir=False, verbose=False, **kwargs):
+    """
+    Resolves the exact directory path for a product.
+    If the product is new, uses the dataset's default product (e.g., CHL) as a template.
+    Optionally creates the directory if make_dir=True.
+    """
+    def verbose_trace(msg):
+        if verbose: print(f"DEBUG [PATH - {prod}]: {msg}")
+
+    # --- 1. Setup & Defaults ---
+    prod = prod.upper().strip()
+    prod_info_map = product_defaults()
+    if prod not in prod_info_map:
+        raise ValueError(f"Product '{prod}' not found in product defaults.")
+    
+    actual_prod, default_dataset, default_type = prod_info_map[prod]
+    dataset = dataset.upper().strip() if dataset else default_dataset
+
+    dataset_grid = kwargs.get('dataset_grid')
+    map_subset = kwargs.get('map_subset')   
+    data_type = kwargs.get('data_type')
+    dataset_type = kwargs.get('dataset_type', default_type).upper()
+    period = (period or 'D').upper()
+
+    dataset_info_map = dataset_defaults()
+    _, default_grid, default_product = dataset_info_map[dataset]
+
+    dataset_products = get_dataset_products(dataset)
+    filtered_structure = {dataset_type: dataset_products[dataset_type]} if dataset_type in dataset_products else dataset_products
+
+    # --- 2. Try to find the product in the dictionary ---
+    verbose_trace("Attempting to find existing grid...")
+    resolved_grid, path = resolve_dataset_grid(
+        filtered_structure, 
+        prod=actual_prod, 
+        default_grid=dataset_grid or default_grid,
+        period=period,
+        data_type=data_type,
+        verbose=verbose
+    )
+
+    # --- 3. Fallback: Template a new path if it doesn't exist ---
+    if not path:
+        verbose_trace(f"'{actual_prod}' not found. Templating from '{default_product}'...")
+        
+        #  Get the filepath for the default daily product
+        template_path = get_filepath(
+            default_product, 
+            dataset=dataset, 
+            period='D', 
+            verbose=verbose
+        )
+
+        if not template_path:
+            raise ValueError(f"Critical error: Could not find base template for {default_product}")
+
+        # Swap product name
+        base_dir, _ = os.path.split(template_path)
+        path = os.path.join(base_dir, actual_prod)
+        
+        # Reroute the folder based on the product defaults (e.g. SOURCE -> PRODUCTS)
+        if "/SOURCE/" in path and dataset_type != "SOURCE":
+            path = path.replace("/SOURCE/", f"/{dataset_type}/")
+            
+        resolved_grid = default_grid
+
+    # --- 4. Transform path for Subsets or Derived Periods ---
+    is_derived = period and period.upper() not in ['D', 'DD']
+    needs_subset = map_subset and resolved_grid and not resolved_grid.startswith(map_subset.upper())
+
+    if is_derived or data_type == 'ANOMS' or needs_subset:
+        verbose_trace("Transforming path for derived product or subset...")
+        p_info = get_period_info(period) if period else {}
+        suffix = p_info.get('folder_name', data_type or 'DERIVED').upper()
+        if data_type == 'ANOMS' or (period and 'ANOM' in period):
+            suffix = 'ANOMS'
+
+        parts = resolved_grid.split('_') if resolved_grid else ['GLOBAL', '4KM']
+        region = map_subset.upper() if map_subset else parts[0]
+        resolution_str = kwargs.get('resolution', parts[1] if len(parts) > 1 else '4KM')
+        if isinstance(resolution_str, (int, float)): 
+            resolution_str = f"{resolution_str}KM"
+
+        new_grid = f"{region}_{resolution_str}_{suffix}"
+        
+        # Replace the grid folder name in the physical string
+        res_info = parse_dataset_info(path)
+        old_grid = res_info.get("dataset_grid", res_info.get("dataset_map")) if res_info else resolved_grid        
+        if old_grid:
+            path = path.replace(old_grid, new_grid)
+        
+        # Ensure derived data goes to PRODUCTS
+        if "/SOURCE/" in path:
+            path = path.replace("/SOURCE/", "/PRODUCTS/")
+
+    # --- 5. Create Directory if requested ---
+    if make_dir:
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+            verbose_trace(f"🛠 Created directory: {path}")
+        else:
+            verbose_trace(f"Directory already exists: {path}")
+
+    return path
+
+def get_prod_files(prod, dataset=None, period='D', verbose=False, **kwargs):
+    """
+    Retrieves a list of NetCDF files for a specified product.
+    Relies on get_filepath() to resolve the correct directory.
+
+    Required Parameters:
+        prod (str): Product name (e.g. 'CHL', 'PSC', 'SST').
+
+    Optional Parameters:
+        dataset (str): Dataset name (e.g. 'OCCCI', 'ACSPO'). Defaults to a product's default dataset.
+    """
+    def verbose_trace(msg):
+        if verbose: print(f"DEBUG [FILE - {prod}]: {msg}")
+    
+
+    # 1. Get the directory path (Passing all kwargs down)
+    path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **kwargs)
+    
+    if not path or not os.path.isdir(path):
+        verbose_trace(f"Directory does not exist: {path}")
+        return []
+
+    # 2. Build the search pattern
+    if "/SOURCE/" in path:
+        search_pattern = "*.nc"
+        verbose_trace("SOURCE folder detected. Dropping period prefix for file search.")
+    else:
+        search_pattern = f"{period}_*.nc"
+    verbose_trace(f"Searching for '{search_pattern}' in: {path}")
+
+    # 3. Glob the files
+    nc_files = glob.glob(os.path.join(path, search_pattern))
+    if not nc_files:
+        verbose_trace("⚠ No .nc files found.")
+        return []
+
+    # 4. Subset by date range if provided
+    daterange = kwargs.get('daterange')
+    if daterange:
+        std_daterange = get_daterange(daterange)
+        if std_daterange:
+            start_str = str(daterange[0]).replace("-", "")
+            end_str = str(daterange[1]).replace("-", "")
+            
+            file_dates = get_source_file_dates(nc_files, format="yyyymmdd")
+            
+            filtered_files = []
+            for i, f_date in enumerate(file_dates):
+                if f_date is not None:
+                    if start_str <= f_date <= end_str:
+                        filtered_files.append(nc_files[i])
+                else:
+                    filtered_files.append(nc_files[i])
+            nc_files = filtered_files
+            
+    verbose_trace(f"📦 Found {len(nc_files)} files.")
+    nc_files.sort()
+    return nc_files
