@@ -173,16 +173,16 @@ def get_regrid_weights(target_path, source_path,
     if target_label is None:
         try:
             target_parser = parse_dataset_info(target_path)
-            target_label = f"{target_parser['dataset']}_{target_parser['dataset_map']}_{target_parser['product']}"
+            target_label = f"{target_parser.get('dataset', 'UNKNOWN')}_{target_parser.get('dataset_grid', 'UNKNOWN')}_{target_parser.get('product', 'UNKNOWN')}"        
         except Exception:
             target_label = f"CUSTOM_TARGET"
 
     if source_label is None: 
         try:
             source_parser = parse_dataset_info(source_path)
-            source_label = f"{source_parser['dataset']}_{source_parser['dataset_map']}_{source_parser['product']}"
+            source_label = f"{source_parser.get('dataset', 'UNKNOWN')}_{source_parser.get('dataset_grid', 'UNKNOWN')}_{source_parser.get('product', 'UNKNOWN')}"      
         except Exception:
-            source_parser = "CUSTOM_SOURCE"
+            source_label = "CUSTOM_SOURCE"  # <-- Typo here!
     
     target_ds = load_dataset(target_path)
     source_ds = load_dataset(source_path)

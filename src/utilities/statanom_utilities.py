@@ -151,7 +151,7 @@ def build_stats_map(prod, period, output_dir=None,
     # ---------------------------------------------------------
     # 3. Find input files
     # ---------------------------------------------------------
-    search_period = None if input_per == "D" else input_per
+    search_period = input_per
     search_type = None if input_per == "D" else "STATS"
     
     if verbose:
