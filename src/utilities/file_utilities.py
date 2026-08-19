@@ -380,9 +380,13 @@ def get_prod_files(prod, dataset=None, period='D', verbose=False, **kwargs):
     # 1. Get the directory path (Passing all kwargs down)
     path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **kwargs)
     
-    if not path or not os.path.isdir(path):
-        verbose_trace(f"Directory does not exist: {path}")
-        return []
+    if (not path or not os.path.isdir(path)) and kwargs.get('map_subset'):
+        verbose_trace(f"Subset directory not found. Falling back to base grid...")
+        
+        # Remove map_subset and try again
+        fallback_kwargs = kwargs.copy()
+        fallback_kwargs.pop('map_subset')
+        path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **fallback_kwargs)
 
     # 2. Build the search pattern
     if "/SOURCE/" in path:

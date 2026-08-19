@@ -173,9 +173,9 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
                 is_up_to_date = False
 
             if is_up_to_date:
-                print(f"✅ PSC is current for {date}")
+                print(f"✅ PP is current for {date}")
             else:
-                print(f"⏳ Need to process PSC for {date}")
+                print(f"⏳ Need to process PP for {date}")
 
             pp_data_map[date] = (chl_path, sst_path, par_path, ppd_path, is_up_to_date)
         else:
