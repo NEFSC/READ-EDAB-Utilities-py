@@ -422,6 +422,13 @@ def parse_dataset_info(pathlist, base=None):
     paths = pathlist if isinstance(pathlist, (list, tuple)) else [pathlist]
 
     for path in paths:
+        
+        path = os.path.normpath(path)
+        if os.path.splitext(path)[1]:  # If it has an extension (like .nc)
+            dirname = os.path.dirname(path)
+        else:                          # It's already a directory
+            dirname = path
+            
         # Get directory name - this is the fastest way to categorize files
         dirname = os.path.dirname(path)
         if dirname not in dir_cache:
