@@ -59,7 +59,6 @@ def bootstrap_environment(verbose=False):
     # 3. Dynamically resolve DATASETS root (and create if missing)
     # Look in the directory exactly one level above the RESOURCES root
     base_dir = root_path.parent
-    
     dataset_candidates = [
         p for p in base_dir.iterdir()
         if p.is_dir() and p.name.lower() in ["datasets", "edab_datasets"]

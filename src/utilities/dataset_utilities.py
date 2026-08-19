@@ -391,13 +391,14 @@ def resolve_dataset_grid(dataset_products, prod,
 
 
 
-def parse_dataset_info(pathlist, base=None):
+def parse_dataset_info(pathlist, base=None, verbose=False):
     """
     Extract structured metadata from a full dataset path.
     
     Parameters:
         path: str, full path to a dataset directory or file
         base: str, optional base path to strip (e.g. from get_datasets_source())
+        verbose: bool, if True, prints debugging information about path splitting
 
     Returns:
         dict: metadata including source name, version, resolution, product
@@ -405,7 +406,7 @@ def parse_dataset_info(pathlist, base=None):
     Updates:
 
     """
-   
+
     dataset_info = dataset_defaults()
 
     if base is None:
@@ -413,28 +414,41 @@ def parse_dataset_info(pathlist, base=None):
     
     base = os.path.abspath(base)
     
-    # Use a cache to avoid re-parsing the same directory structure multiple times
     dir_cache = {}
     results = []
 
-    # Ensure we are working with a list
     is_single_input = isinstance(pathlist, str)
-    paths = pathlist if isinstance(pathlist, (list, tuple)) else [pathlist]
+    paths = [pathlist] if is_single_input else pathlist
 
-    for path in paths:        
+    for path in paths:
+        # Normalize the path (removes trailing slashes)
         path = os.path.normpath(path)
-        if os.path.splitext(path)[1]:  # If it has an extension (like .nc)
+        
+        # Determine if it's a file or directory based on extension
+        if os.path.splitext(path)[1]:  
             dirname = os.path.dirname(path)
-        else:                          # It's already a directory
+        else:                          
             dirname = path
-            
-        # Get directory name - this is the fastest way to categorize files
-        dirname = os.path.dirname(path)
+
+        if verbose:
+            print(f"\n--- DEBUG parse_dataset_info ---")
+            print(f"1. Original path : {path}")
+            print(f"2. Base path     : {base}")
+            print(f"3. Evaluated dir : {dirname}")
+
         if dirname not in dir_cache:
-            # Only perform the expensive string splitting when we see a new directory
+            
+            # This is the exact line where the magic trick was happening
             abs_dir = os.path.abspath(dirname)
+            
             relative = abs_dir[len(base):].lstrip(os.sep) if abs_dir.startswith(base) else abs_dir
             parts = relative.split(os.sep)
+
+            if verbose:
+                print(f"4. Abs dir       : {abs_dir}")
+                print(f"5. Relative path : {relative}")
+                print(f"6. Parsed parts  : {parts}")
+                print(f"--------------------------------\n")
 
             if parts and parts[0].upper() in dataset_info:
                 dir_cache[dirname] = {
@@ -453,4 +467,5 @@ def parse_dataset_info(pathlist, base=None):
                     "product": "UNKNOWN"
                 }
         results.append(dir_cache[dirname])
+        
     return results[0] if is_single_input else results
