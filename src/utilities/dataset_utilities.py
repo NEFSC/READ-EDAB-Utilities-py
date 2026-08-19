@@ -421,8 +421,7 @@ def parse_dataset_info(pathlist, base=None):
     is_single_input = isinstance(pathlist, str)
     paths = pathlist if isinstance(pathlist, (list, tuple)) else [pathlist]
 
-    for path in paths:
-        
+    for path in paths:        
         path = os.path.normpath(path)
         if os.path.splitext(path)[1]:  # If it has an extension (like .nc)
             dirname = os.path.dirname(path)
