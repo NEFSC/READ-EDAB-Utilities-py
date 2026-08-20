@@ -114,7 +114,7 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
     # Get files
     chl_files = get_prod_files("CHL", dataset=chl_dataset)
     sst_files = get_prod_files("SST", dataset=sst_dataset)
-    par_files = get_prod_files("PAR", dataset=par_dataset)
+    par_files = get_prod_files("PAR", dataset=par_dataset,map_subset=map_subset)
     
     # Extract metadata from first CHL file
     if not chl_files:
@@ -528,6 +528,7 @@ def run_pp_pipeline(chl_dataset=None,
         # Compute or load daylength
         doy = pd.Timestamp(date).dayofyear
         daylength_ds = get_daylength(chl_file, daylength_dir=daylength_dir, dayofyear=doy)
+        daylength_ds = subset_dataset(daylength_ds, map_subset)
 
          # Build the ppd history
         history = " ".join([f"{build_product_attributes('PPD')['long_name']} is calculated using the VGPM {get_reference_metadata('VGPM')[0]['citation']} and VGPM-EPPLEY {get_reference_metadata('VGPM_EPPLEY')[0]['citation']} models. ",

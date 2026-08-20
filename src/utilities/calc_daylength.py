@@ -2,9 +2,10 @@ import numpy as np
 import xarray as xr
 import os
 from pathlib import Path
-from utilities import parse_dataset_info
+
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
+from utilities import parse_dataset_info, load_dataset
 
 def _validate_daylength_grid(ds):
     assert "daylength" in ds, "Missing 'daylength' variable in dataset."
@@ -83,8 +84,13 @@ def get_daylength(latitude_grid_path, daylength_dir=None,dayofyear=None):
         daylength_dir = Path(pypath) / "daylength"
     os.makedirs(daylength_dir, exist_ok=True)
 
-    target_parser = parse_dataset_info(latitude_grid_path)
-    target_label = f"{target_parser['dataset']}_{target_parser['dataset_map']}"
+    try:
+        str_path = str(latitude_grid_path)
+        target_parser = parse_dataset_info(str_path)
+        target_label = f"{target_parser.get('dataset', 'UNKNOWN')}_{target_parser.get('dataset_grid', 'UNKNOWN')}"
+    except Exception as e:
+        print(f"⚠️ DEBUG Target Label Error: {e}")
+        target_label = "CUSTOM_GRID"
 
     cache_path = Path(daylength_dir) / f"daylength_{target_label}.nc"
 

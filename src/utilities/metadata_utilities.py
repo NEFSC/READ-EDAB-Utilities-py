@@ -528,13 +528,14 @@ def get_reference_metadata(models: list, metapath: str = None, refs_only: bool =
 
     return results
 
-def get_source_metadata(dataset: str, dataset_version: str = None, source_prefix: str = "source", metapath: str = None) -> dict:
+def get_source_metadata(dataset: str, dataset_version: str = None, source_prefix: str = "source", metapath: str = None, ds_attrs: dict = None) -> dict:
     """
     Retrieves metadata for a given dataset and version from LUT_Datasets.
     - Uses nested dict structure: {dataset: {version: metadata_dict}}
     - Applies default version if none provided.
     - Supports legacy version aliasing.
     - Returns keys prefixed with 'source_'.
+    - If ds_attrs is provided, dynamically extracts and renames original file metadata.
     """
     def is_nan(val):
         return isinstance(val, float) and math.isnan(val)
@@ -597,8 +598,21 @@ def get_source_metadata(dataset: str, dataset_version: str = None, source_prefix
 
         # Include the version explicitly
         filtered["source_version"] = dataset_version
-        return filtered
 
+        # Dynamic renaming if specific attributes are provided
+        if ds_attrs is not None:
+            rename_map = {
+                "product_name": f"{source_prefix}_product_name",
+                "contact": f"{source_prefix}_contact",
+                "institution": f"{source_prefix}_institution",
+                "references": f"{source_prefix}_references",
+                "copyright": f"{source_prefix}_copyright"
+            }
+            for old_key, new_key in rename_map.items():
+                if old_key in ds_attrs:
+                    filtered[new_key] = str(ds_attrs[old_key]).strip()
+
+        return filtered
 
     # Raise error if version not found
     available_versions = sorted(version_dict.keys())

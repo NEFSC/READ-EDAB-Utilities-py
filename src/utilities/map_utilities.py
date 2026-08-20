@@ -52,19 +52,26 @@ def subset_dataset(ds, region, lat_name="lat", lon_name="lon"):
     lat_min, lat_max = bounds["lat_min"], bounds["lat_max"]
     lon_min, lon_max = bounds["lon_min"], bounds["lon_max"]
 
-    # Handle longitude wraparound if needed
-    if ds[lon_name].max() > 180:
-        lon_min = (lon_min + 360) if lon_min < 0 else lon_min
-        lon_max = (lon_max + 360) if lon_max < 0 else lon_max
+    sel_kwargs = {}
 
-    # Handle latitude direction
-    lat_vals = ds[lat_name].values
-    if lat_vals[0] > lat_vals[-1]:  # descending
-        lat_slice = slice(lat_max, lat_min)
-    else:  # ascending
-        lat_slice = slice(lat_min, lat_max)
+    # 1. Handle Latitude (if it exists in the dataset)
+    if lat_name in ds.coords or lat_name in ds.dims:
+        lat_vals = ds[lat_name].values
+        if lat_vals[0] > lat_vals[-1]:  # descending
+            sel_kwargs[lat_name] = slice(lat_max, lat_min)
+        else:  # ascending
+            sel_kwargs[lat_name] = slice(lat_min, lat_max)
 
-    return ds.sel({lat_name: lat_slice, lon_name: slice(lon_min, lon_max)})
+    # 2. Handle Longitude (if it exists in the dataset)
+    if lon_name in ds.coords or lon_name in ds.dims:
+        # Handle longitude wraparound if needed
+        if ds[lon_name].max() > 180:
+            lon_min = (lon_min + 360) if lon_min < 0 else lon_min
+            lon_max = (lon_max + 360) if lon_max < 0 else lon_max
+        sel_kwargs[lon_name] = slice(lon_min, lon_max)
+
+    # 3. Safely subset only the dimensions that exist
+    return ds.sel(**sel_kwargs)
 
 def compute_dynamic_chunks(ds: xr.Dataset, target_chunks: int = 32) -> dict:
     """
@@ -172,14 +179,16 @@ def get_regrid_weights(target_path, source_path,
 
     if target_label is None:
         try:
-            target_parser = parse_dataset_info(target_path)
+            t_path = target_path[0] if isinstance(target_path, (list, tuple)) else target_path
+            target_parser = parse_dataset_info(t_path)
             target_label = f"{target_parser.get('dataset', 'UNKNOWN')}_{target_parser.get('dataset_grid', 'UNKNOWN')}_{target_parser.get('product', 'UNKNOWN')}"        
         except Exception:
             target_label = f"CUSTOM_TARGET"
 
     if source_label is None: 
         try:
-            source_parser = parse_dataset_info(source_path)
+            s_path = source_path[0] if isinstance(source_path, (list, tuple)) else source_path
+            source_parser = parse_dataset_info(s_path)
             source_label = f"{source_parser.get('dataset', 'UNKNOWN')}_{source_parser.get('dataset_grid', 'UNKNOWN')}_{source_parser.get('product', 'UNKNOWN')}"      
         except Exception:
             source_label = "CUSTOM_SOURCE"  # <-- Typo here!

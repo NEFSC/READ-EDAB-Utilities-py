@@ -257,7 +257,7 @@ def corrupt_file_detector(file_list):
             
     return issues
 
-def get_filepath(prod, dataset=None, period='D',make_dir=False, verbose=False, **kwargs):
+def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, **kwargs):
     """
     Resolves the exact directory path for a product.
     If the product is new, uses the dataset's default product (e.g., CHL) as a template.
@@ -265,6 +265,9 @@ def get_filepath(prod, dataset=None, period='D',make_dir=False, verbose=False, *
     """
     def verbose_trace(msg):
         if verbose: print(f"DEBUG [PATH - {prod}]: {msg}")
+
+    verbose_trace(f"--- START get_filepath ---")
+    verbose_trace(f"Inputs: dataset={dataset}, period={period}, make_dir={make_dir}, kwargs={kwargs}")
 
     # --- 1. Setup & Defaults ---
     prod = prod.upper().strip()
@@ -274,21 +277,32 @@ def get_filepath(prod, dataset=None, period='D',make_dir=False, verbose=False, *
     
     actual_prod, default_dataset, default_type = prod_info_map[prod]
     dataset = dataset.upper().strip() if dataset else default_dataset
+    
+    verbose_trace(f"Mapped Product: actual_prod={actual_prod}, default_dataset={default_dataset}, default_type={default_type}")
 
     dataset_grid = kwargs.get('dataset_grid')
     map_subset = kwargs.get('map_subset')   
-    data_type = kwargs.get('data_type')
     dataset_type = kwargs.get('dataset_type', default_type).upper()
     period = (period or 'D').upper()
+    data_type = kwargs.get('data_type')
+    if data_type: data_type = data_type.upper()
+
+    verbose_trace(f"Config: dataset_grid={dataset_grid}, map_subset={map_subset}, data_type={data_type}, dataset_type={dataset_type}")
 
     dataset_info_map = dataset_defaults()
     _, default_grid, default_product = dataset_info_map[dataset]
+    
+    verbose_trace(f"Dataset Defaults: default_grid={default_grid}, default_product={default_product}")
 
     dataset_products = get_dataset_products(dataset)
+    verbose_trace(f"get_dataset_products keys: {list(dataset_products.keys())}")
+    
     filtered_structure = {dataset_type: dataset_products[dataset_type]} if dataset_type in dataset_products else dataset_products
+    verbose_trace(f"filtered_structure keys: {list(filtered_structure.keys())}")
 
     # --- 2. Try to find the product in the dictionary ---
-    verbose_trace("Attempting to find existing grid...")
+    verbose_trace(f"Calling resolve_dataset_grid with actual_prod={actual_prod}, default_grid={dataset_grid or default_grid}, data_type={data_type}")
+    
     resolved_grid, path = resolve_dataset_grid(
         filtered_structure, 
         prod=actual_prod, 
@@ -297,11 +311,17 @@ def get_filepath(prod, dataset=None, period='D',make_dir=False, verbose=False, *
         data_type=data_type,
         verbose=verbose
     )
+    
+    verbose_trace(f"Result from resolve_dataset_grid: resolved_grid={resolved_grid}, path={path}")
 
     # --- 3. Fallback: Template a new path if it doesn't exist ---
     if not path:
         verbose_trace(f"'{actual_prod}' not found. Templating from '{default_product}'...")
         
+        # 🚨 ANTI-RECURSION GUARD
+        if actual_prod == default_product:
+            raise ValueError(f"CRITICAL: Infinite loop caught. '{actual_prod}' cannot template from itself. The base grid for '{dataset}' is missing or resolve_dataset_grid failed.")
+            
         #  Get the filepath for the default daily product
         template_path = get_filepath(
             default_product, 
@@ -322,10 +342,13 @@ def get_filepath(prod, dataset=None, period='D',make_dir=False, verbose=False, *
             path = path.replace("/SOURCE/", f"/{dataset_type}/")
             
         resolved_grid = default_grid
+        verbose_trace(f"Templated path: {path}")
 
     # --- 4. Transform path for Subsets or Derived Periods ---
     is_derived = period and period.upper() not in ['D', 'DD']
     needs_subset = map_subset and resolved_grid and not resolved_grid.startswith(map_subset.upper())
+
+    verbose_trace(f"Transforming: is_derived={is_derived}, needs_subset={needs_subset}")
 
     if is_derived or data_type == 'ANOMS' or needs_subset:
         verbose_trace("Transforming path for derived product or subset...")
@@ -341,16 +364,19 @@ def get_filepath(prod, dataset=None, period='D',make_dir=False, verbose=False, *
             resolution_str = f"{resolution_str}KM"
 
         new_grid = f"{region}_{resolution_str}_{suffix}"
+        verbose_trace(f"New grid name: {new_grid}")
         
         # Replace the grid folder name in the physical string
         res_info = parse_dataset_info(path)
         old_grid = res_info.get("dataset_grid", res_info.get("dataset_map")) if res_info else resolved_grid        
         if old_grid:
             path = path.replace(old_grid, new_grid)
+            verbose_trace(f"Path after grid replacement: {path}")
         
-        # Ensure derived data goes to PRODUCTS
-        if "/SOURCE/" in path:
+        # Ensure derived data goes to PRODUCTS (but leave daily subset SOURCE data alone)
+        if "/SOURCE/" in path and (is_derived or data_type == 'ANOMS' or dataset_type != 'SOURCE'):
             path = path.replace("/SOURCE/", "/PRODUCTS/")
+            verbose_trace(f"Path after PRODUCTS routing: {path}")
 
     # --- 5. Create Directory if requested ---
     if make_dir:
@@ -360,6 +386,7 @@ def get_filepath(prod, dataset=None, period='D',make_dir=False, verbose=False, *
         else:
             verbose_trace(f"Directory already exists: {path}")
 
+    verbose_trace(f"--- END get_filepath. Returning: {path} ---")
     return path
 
 def get_prod_files(prod, dataset=None, period='D', verbose=False, **kwargs):
@@ -380,15 +407,24 @@ def get_prod_files(prod, dataset=None, period='D', verbose=False, **kwargs):
     # 1. Get the directory path (Passing all kwargs down)
     path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **kwargs)
     
+    # 2. Handle fallback logic safely
     if (not path or not os.path.isdir(path)) and kwargs.get('map_subset'):
-        verbose_trace(f"Subset directory not found. Falling back to base grid...")
-        
-        # Remove map_subset and try again
-        fallback_kwargs = kwargs.copy()
-        fallback_kwargs.pop('map_subset')
-        path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **fallback_kwargs)
+        # Prevent falling back to GLOBAL if we are explicitly looking for a SOURCE subset
+        if path and '/SOURCE/' in path.upper():  # <--- Updated condition
+            verbose_trace(f"Subset directory not found. Skipping fallback to base grid to enforce SOURCE subset match.")
+            path = None  # <--- Added to force it to fail cleanly below
+        else:
+            verbose_trace(f"Subset directory not found. Falling back to base grid...")
+            fallback_kwargs = kwargs.copy()
+            fallback_kwargs.pop('map_subset')
+            path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **fallback_kwargs)
+            
+    # 3. Catch empty paths before globbing
+    if not path or not os.path.isdir(path):
+        verbose_trace(f"⚠ Directory does not exist: {path}")
+        return []
 
-    # 2. Build the search pattern
+    # 4. Build the search pattern
     if "/SOURCE/" in path:
         search_pattern = "*.nc"
         verbose_trace("SOURCE folder detected. Dropping period prefix for file search.")
@@ -396,13 +432,13 @@ def get_prod_files(prod, dataset=None, period='D', verbose=False, **kwargs):
         search_pattern = f"{period}_*.nc"
     verbose_trace(f"Searching for '{search_pattern}' in: {path}")
 
-    # 3. Glob the files
+    # 5. Glob the files
     nc_files = glob.glob(os.path.join(path, search_pattern))
     if not nc_files:
         verbose_trace("⚠ No .nc files found.")
         return []
 
-    # 4. Subset by date range if provided
+    # 6. Subset by date range if provided
     daterange = kwargs.get('daterange')
     if daterange:
         std_daterange = get_daterange(daterange)

@@ -27,12 +27,6 @@ from utilities import get_geospatial_metadata, get_temporal_metadata, get_summar
 env = bootstrap_environment(verbose=False)
 
 xr.set_options(file_cache_maxsize=1) # Don't keep any unnecessary files open in the background
-"""
-dask.config.set({'distributed.worker.memory.target': 0.6, 
-                 'distributed.worker.memory.spill': 0.7,
-                 'distributed.worker.memory.pause': 0.8,
-                 'distributed.worker.memory.terminate': 0.95})
-"""
 
 """
 STATANOM_UTILITIES creates statistic and anomaly outputs from gridded satellite or modeled data. 
