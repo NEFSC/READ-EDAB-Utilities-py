@@ -266,7 +266,13 @@ def run_globcolour_dataset(subset_map="NWA", overwrite=False, verbose=True, debu
     # Parse the nested dictionary structure
     # e.g., {'SOURCE': {'GLOBAL_4KM_DAILY': {'CHL': '/path/...', 'PAR': '/path/...'}}}
     for source_key, source_level in prod_dict.items():
+        # Only process raw SOURCE files
+        if source_key != 'SOURCE':
+            continue
         for res_key, res_level in source_level.items():
+            # Only process the GLOBAL and DAILY base grids
+            if 'GLOBAL' not in res_key or 'DAILY' not in res_key:
+                continue
             for prod_name, input_dir in res_level.items():
                 
                 if verbose:
