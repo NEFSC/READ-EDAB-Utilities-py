@@ -33,6 +33,7 @@ Modification History
                             • It can now parse mixed file types 
                             • It now caches dataset information to reduce overhead when working with a large number of files
                             • It validates the dataset by matching it with the default datasets 
+    Oct 09, 2026 - KJWH: Updated resolve_dataset_grid() to remove data_type filtering and strictly filter by period codes only.
 
 """
 
@@ -300,26 +301,17 @@ def resolve_dataset_grid(dataset_products, prod,
 
     This function searches across all dataset types (e.g., 'SOURCE', 'PRODUCTS') and identifies
     which map folder (e.g., 'NES_4KM_DAILY', 'GLOBAL_4KM_MONTHLY') contains the requested product.
-    It supports filtering by explicit data_type and fallback logic based on period codes (e.g., 'M', 'D3', 'YEAR').
+    It supports filtering based on period codes (e.g., 'M', 'D3', 'YEAR').
 
     Parameters
     ----------
-    dataset_products : dict
-        Nested dictionary of dataset structure returned by get_dataset_products().
-        Format: {dataset_type: {map_folder: {product: path}}}
-    prod : str
-        The product name to locate (e.g., 'CHL', 'PSC').
-    data_type : str, optional
-        Explicit map type to filter by (e.g., 'DAILY', 'STATS', 'ANOMS').
-        If provided, only folders ending in _{data_type.upper()} will be considered.
-    default_grid : str, optional
-        Default map folder name (e.g., 'GLOBAL_4KM_DAILY'). Used for provenance logging.
-    period : str, optional
-        Period code (e.g., 'D', 'M', 'D3'). Used to infer map type if data_type is not provided.
-    verbose : bool, optional
-        If True, prints resolution steps and decisions.
-    provenance_log : dict, optional
-        Dictionary to append resolution steps for debugging and audit trails.
+        dataset_products (dict): Nested dictionary of dataset structure returned by get_dataset_products().
+                                 Format: {dataset_type: {map_folder: {product: path}}}
+        prod (str): The product name to locate (e.g., 'CHL', 'PSC').
+        default_grid (str, optional): Default map folder name (e.g., 'GLOBAL_4KM_DAILY'). Used for provenance logging.
+        period (str, optional): Period code (e.g., 'D', 'M', 'D3'). 
+        verbose (bool, optional): If True, prints resolution steps and decisions.
+        provenance_log (dict, optional): Dictionary to append resolution steps for debugging and audit trails.
 
     Returns
     -------
@@ -350,14 +342,7 @@ def resolve_dataset_grid(dataset_products, prod,
         if provenance_log is not None:
             provenance_log['resolution_steps'].append(f"Filtered candidates by default_grid='{default_grid}'")
                             
-    # 3. STRICTLY filter by data_type (if provided)
-    if data_type:
-        candidate_grids = [g for g in candidate_grids if g[0].endswith(f"_{data_type.upper()}")]
-        if not candidate_grids:
-            # The product exists, but NOT for this data_type. Return None to trigger creation.
-            return None, None
-
-    # 4. STRICTLY filter by period (if provided and data_type wasn't)
+    # 3. STRICTLY filter by period (if provided)
     elif period:
         p_info = get_period_info(period) if period else {}
         target_suffix = p_info.get('folder_name', period).upper()
@@ -371,7 +356,7 @@ def resolve_dataset_grid(dataset_products, prod,
             # The product exists, but NOT for this period. Return None to trigger creation.
             return None, None
 
-    # 5. Handle any remaining ambiguity
+    # 4. Handle any remaining ambiguity
     if len(candidate_grids) > 1:
         # Tie-breaker: default to DAILY if no specific period was requested
         daily_grids = [g for g in candidate_grids if g[0].endswith('_DAILY')]
@@ -382,7 +367,7 @@ def resolve_dataset_grid(dataset_products, prod,
         grids_found = [g[0] for g in candidate_grids]
         raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple grids ({grids_found}). Please specify dataset_grid.")
     
-    # ✅ 6. Return the single exact match
+    # 5. Return the single exact match
     if verbose:
         print(f"📦 Auto-resolved dataset_grid → {candidate_grids[0][0]}")
     return candidate_grids[0]

@@ -9,7 +9,8 @@ from .src.utilities.file_utilities import *
 from .src.utilities.period_utilities import *
 from .src.utilities.map_utilities import *
 from .src.utilities.metadata_utilities import *
-from .src.utilities.statanom_utilities import *
+from .src.utilities.stats_utilities import *
+from .src.utilities.anomaly_utilities import *
 from .src.utilities.calc_daylength import *
 from .src.utilities.calc_phytosizeclass import *
 from .src.utilities.calc_primprod import *

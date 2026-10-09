@@ -36,6 +36,8 @@ Modification History
     Sep 10, 2025 - KJWH: Updated documentation
     Sep 25, 2025 - KJWH: Added get_file_dates
     Mar 20, 2026 - KJWH: Added corrupt_file_detector
+    Oct 09, 2026 - KJWH: Removed data_type from get_filepath 
+                         Now using data_type (STATS, ANOM, CLIM) as part of the search string for get_prod_files
 """
 import os
 from pathlib import Path
@@ -319,7 +321,7 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         verbose_trace(f"'{actual_prod}' not found. Templating from '{default_product}'...")
         
         # 🚨 ANTI-RECURSION GUARD
-        if actual_prod == default_product:
+        if actual_prod == default_product and period in ['D', 'DD']:
             raise ValueError(f"CRITICAL: Infinite loop caught. '{actual_prod}' cannot template from itself. The base grid for '{dataset}' is missing or resolve_dataset_grid failed.")
             
         #  Get the filepath for the default daily product
@@ -386,28 +388,76 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         else:
             verbose_trace(f"Directory already exists: {path}")
 
+    # --- 6. Validate Existence (If not creating) ---
+    elif not os.path.exists(path):
+        # Find the deepest parent directory that actually exists
+        parent_dir = path
+        while parent_dir and not os.path.exists(parent_dir):
+            parent_dir = os.path.dirname(parent_dir)
+            
+        error_msg = f"⚠ WARNING: Path not found: {path}"
+        
+        # If we found an existing parent, list what is actually inside it
+        if parent_dir and os.path.isdir(parent_dir):
+            try:
+                found_items = os.listdir(parent_dir)
+                found_dirs = [d for d in found_items if os.path.isdir(os.path.join(parent_dir, d))]
+                error_msg += f"\nClosest existing parent: {parent_dir}"
+                error_msg += f"\nAvailable subdirectories in parent: {found_dirs}"
+            except PermissionError:
+                error_msg += f"\nClosest existing parent: {parent_dir} (Permission denied to list contents)"
+                
+        print(error_msg)
+
     verbose_trace(f"--- END get_filepath. Returning: {path} ---")
     return path
 
-def get_prod_files(prod, dataset=None, period='D', verbose=False, **kwargs):
+def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False, **kwargs):
     """
-    Retrieves a list of NetCDF files for a specified product.
-    Relies on get_filepath() to resolve the correct directory.
+    Purpose:
+        Retrieves a list of NetCDF files for a specified product.
+        Relies on get_filepath() to resolve the correct directory.
 
     Required Parameters:
         prod (str): Product name (e.g. 'CHL', 'PSC', 'SST').
 
     Optional Parameters:
         dataset (str): Dataset name (e.g. 'OCCCI', 'ACSPO'). Defaults to a product's default dataset.
+        period (str): Period code (e.g. 'D', 'M'). Defaults to 'D'.
+        data_type (str): File type modifier to distinguish output files (e.g., 'STATS', 'CLIM', 'ANOM').
+                         If None, inferred automatically from period_info.
+        verbose (bool): If True, prints file search paths.
+
+    Returns:
+        list: Sorted list of file paths matching the product and criteria.
     """
     def verbose_trace(msg):
         if verbose: print(f"DEBUG [FILE - {prod}]: {msg}")
     
+    # 1. Infer data_type from the period if not explicitly provided
+    if data_type is None:
+        if period in ['D', 'DD']:
+            verbose_trace(f"Period is '{period}'. Leaving data_type as None.")
+        else:
+            try:
+                # Requires get_period_info to be imported from period_utilities
+                p_info = get_period_info(period)
+                
+                # Default to CLIM for climatology periods, STATS for everything else
+                data_type = "CLIM" if p_info.get("is_climatology") else "STATS"
+                verbose_trace(f"Inferred data_type='{data_type}' based on period '{period}'.")
+            except Exception as e:
+                verbose_trace(f"Could not infer data_type for period '{period}': {e}")
 
-    # 1. Get the directory path (Passing all kwargs down)
-    path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **kwargs)
+
+    # 2. Get the directory path (Passing all kwargs down)
+    try:
+        path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **kwargs)
+    except (FileNotFoundError, ValueError) as e:
+        verbose_trace(f"Path resolution failed: {e}")
+        path = None
     
-    # 2. Handle fallback logic safely
+    # 3. Handle fallback logic safely
     if (not path or not os.path.isdir(path)) and kwargs.get('map_subset'):
         # Prevent falling back to GLOBAL if we are explicitly looking for a SOURCE subset
         if path and '/SOURCE/' in path.upper():  # <--- Updated condition
@@ -417,28 +467,39 @@ def get_prod_files(prod, dataset=None, period='D', verbose=False, **kwargs):
             verbose_trace(f"Subset directory not found. Falling back to base grid...")
             fallback_kwargs = kwargs.copy()
             fallback_kwargs.pop('map_subset')
-            path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **fallback_kwargs)
+            # Wrap the fallback call to catch the infinite loop here as well
+            try:
+                path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, **fallback_kwargs)
+            except (FileNotFoundError, ValueError) as e:
+                verbose_trace(f"Fallback path resolution failed: {e}")
+                path = None
             
-    # 3. Catch empty paths before globbing
-    if not path or not os.path.isdir(path):
+    # 4. Catch empty paths before globbing
+    if not path or not (isinstance(path, str) and os.path.isdir(path)):
         verbose_trace(f"⚠ Directory does not exist: {path}")
         return []
 
-    # 4. Build the search pattern
+    # 5. Build the search pattern
     if "/SOURCE/" in path:
         search_pattern = "*.nc"
         verbose_trace("SOURCE folder detected. Dropping period prefix for file search.")
     else:
-        search_pattern = f"{period}_*.nc"
+        if data_type:
+            # Targets format: M_200005-ACSPO-SST-NWA-STATS.nc
+            search_pattern = f"{period}_*-{data_type.upper()}*.nc"
+            verbose_trace(f"data_type specified. Restricting file search to '-{data_type.upper()}.nc'")
+        else:
+            search_pattern = f"{period}_*.nc"
+    
     verbose_trace(f"Searching for '{search_pattern}' in: {path}")
 
-    # 5. Glob the files
+    # 6. Glob the files
     nc_files = glob.glob(os.path.join(path, search_pattern))
     if not nc_files:
         verbose_trace("⚠ No .nc files found.")
         return []
 
-    # 6. Subset by date range if provided
+    # 7. Subset by date range if provided
     daterange = kwargs.get('daterange')
     if daterange:
         std_daterange = get_daterange(daterange)

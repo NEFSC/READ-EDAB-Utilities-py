@@ -1,4 +1,3 @@
-from doctest import debug
 import os
 import sys
 import re
@@ -29,14 +28,21 @@ env = bootstrap_environment(verbose=False)
 xr.set_options(file_cache_maxsize=1) # Don't keep any unnecessary files open in the background
 
 """
-STATANOM_UTILITIES creates statistic and anomaly outputs from gridded satellite or modeled data. 
+STATS_UTILITIES 
+
+Purpose:
+    This module creates statistic outputs, including climatologies, from gridded satellite or modeled data. 
+
 Main Functions:
-    - compute_stats: Description
-    - function2: Description
-    - function3: Description
+    - run_stats_pipeline: Runs a multi-product, multi-period stats pipeline.
+    - process_single_stat: Processes a single statistical task (opens files, applies spatial subsetting, computes statistics, and saves to NetCDF).
+    - build_stats_map: Resolves output directories, finds input files, and builds a processing map indicating file 'freshness'.
 
 Helper Functions:
-    - helper_function1: Description
+    - compute_stats: Computes summary statistics across the time dimension for a given DataArray.
+    - preprocess_dataset: Performs product-specific mathematical transformations and unit consistency enforcement.
+    - boost_file_limits: Raises the system limit for open file handles (Linux/Mac only).
+    - DualLogger: Intercepts standard print statements and writes them to both the terminal and a persistent log file.
 
 References:
     
@@ -52,13 +58,16 @@ Author:
 Modification History
     Sep 08, 2025 - KJWH: Initial code written
     Sep 29, 2025 - KJWH: Started building stats_period_map
+    Oct 08, 2026 - KJWH: Updated documentation
+    Oct 09, 2026 - KJWH: get_prod_files is now using the output period to add the data_type(STATS/CLIM) to the output file name
+                         Bug fix: Added a second get_prod_files search when the input period is D and map_subset is provided (will default back to GLOBAL if no files are found)
     
 """
 
 class DualLogger:
     """
-    Intercepts standard print statements and writes them to 
-    both the terminal and a persistent log file simultaneously.
+    Purpose:
+        Intercepts standard print statements and writes them to both the terminal and a persistent log file simultaneously.
     """
     def __init__(self, filepath):
         self.terminal = sys.stdout
@@ -78,7 +87,10 @@ class DualLogger:
 
 
 def boost_file_limits():
-    """Raises the system limit for open file handles (Linux/Mac only)."""
+    """
+    Purpose:
+        Raises the system limit for open file handles (Linux/Mac only).
+    """
     if platform.system() != 'Windows':
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         # Try to set it to 4096, but don't exceed the 'hard' system limit
@@ -91,13 +103,45 @@ def build_stats_map(prod, period, output_dir=None,
                     dataset=None, daterange=None,climatology_range=None,
                     dataset_version=None, dataset_map=None,
                     map_subset=None, is_running=True, overwrite=False, 
-                    data_type="STATS",verbose=False, debug=False):
+                    data_type=None,verbose=False, debug=False):
     """
-    Unified stats pipeline:
-      1) Resolve or Create Output Directory
-      2) Find input files
-      3) Generate period map via get_period_sets()
-      4) Build stats map with mtime comparison for 'freshness'
+    Purpose:
+        Unified stats pipeline.
+
+        This function orchestrates the preparation phase of the statistics pipeline by:
+        1) Resolving and creating, if needed, the output directory.
+        2) Finding valid daily input files.
+        3) Generating a period map via get_period_sets().
+        4) Building a stats processing map and evaluating file 'freshness' (mtime) to determine if reprocessing is required.
+
+    Input Parameters:
+        prod (str): The logical product name to process (e.g., 'SST', 'CHL', 'RRS').
+        period (str): The time period code for the target statistics (e.g., 'M' for monthly, 'D8' for 8-day).
+        output_dir (str, optional): The destination directory for the output files. If None, it is automatically resolved.
+        dataset (str, optional): Override for the dataset name (e.g., 'OCCCI'). Defaults to the product's default.
+        daterange (list or tuple, optional): A two-element sequence [start, end] specifying the date boundaries for filtering input files.
+        climatology_range (list or tuple, optional): A two-element sequence [start_year, end_year] to filter years for climatology calculations.
+        dataset_version (str, optional): Override for the dataset version (e.g., 'V6.0').
+        dataset_map (str, optional): Specific map folder structure to override default routing (e.g., 'NES_4KM_DAILY').
+        map_subset (str, optional): The spatial region abbreviation to subset the data to (e.g., 'NES'). Used for file naming and routing.
+        is_running (bool, optional): Whether to treat the period as a running mean (if applicable). Default is True.
+        overwrite (bool, optional): If True, flags all tasks for reprocessing regardless of existing file modification times. Default is False.
+        data_type (str, optional): The data type (STATS/CLIM) suffix appended to the output file names. Default is None and it is inferred based on the output period.
+        verbose (bool, optional): If True, prints progress updates and routing information. Default is False.
+        debug (bool, optional): If True, prints extensive troubleshooting and traceback information. Default is False.
+
+    Returns:
+        dict: A dictionary mapping each target output period to its specific processing task definition.
+        
+        Example Structure:
+        {
+            'M_199710': {
+                'inputs': ['/path/to/day1.nc', '/path/to/day2.nc', ...],
+                'output': '/path/to/M_199710-OCCCI-RRS-NES-STATS.nc',
+                'is_up_to_date': False
+            }
+        }
+      
     """
     
     # ---------------------------------------------------------
@@ -116,7 +160,6 @@ def build_stats_map(prod, period, output_dir=None,
             dataset_map=dataset_map,
             map_subset=map_subset,         # Use 'subset' to override region (GLOBAL -> NES)
             period=period,      # This triggers Step 7 logic for CLIMS/STATS
-            data_type=data_type,
             getfilepath=True,
             make_dir=True,      # Create the folder if it doesn't exist
             verbose=verbose
@@ -131,6 +174,7 @@ def build_stats_map(prod, period, output_dir=None,
             raise ValueError(f"🛑 CRITICAL: output_dir resolved to multiple paths: {output_dir}")
         else:
             raise ValueError("🛑 CRITICAL: output_dir resolved to an empty list.")
+    if verbose: print(f"✅ Output directory is: {output_dir}")
 
     # ---------------------------------------------------------
     # 2. Determine expected input period (D, M, etc.)
@@ -146,11 +190,9 @@ def build_stats_map(prod, period, output_dir=None,
     # 3. Find input files
     # ---------------------------------------------------------
     search_period = input_per
-    search_type = None if input_per == "D" else "STATS"
     
     if verbose:
         print(f"Searching for {input_per} files for {dataset}:{prod}")
-
     
     files = get_prod_files(prod,
         dataset=dataset,
@@ -158,14 +200,23 @@ def build_stats_map(prod, period, output_dir=None,
         dataset_map=dataset_map,
         map_subset=map_subset,
         period=search_period,
-        data_type=search_type,
         verbose=verbose
     )
-
+    
     # Check if the list is empty FIRST!
     if not files:
-        if verbose: print(f"⚠️ No input files found for {prod} ({period}). Returning empty map.")
-        return {} # Return an empty map so the pipeline cleanly skips it
+        if search_period == 'D':
+            # Search for the files again, but remove the map_subset filter so it will default to the GLOBAL files
+            files = get_prod_files(prod,
+                    dataset=dataset,
+                    dataset_version=dataset_version,
+                    dataset_map=dataset_map,
+                    period=search_period,
+                    verbose=verbose
+                )
+        if not files:
+            if verbose: print(f"⚠️ No input files found for {prod} ({period}). Returning empty map.")
+            return {} # Return an empty map so the pipeline cleanly skips it
 
     fp = file_parser(files[0])
     ds_name = fp[0].get('dataset') 
@@ -180,6 +231,18 @@ def build_stats_map(prod, period, output_dir=None,
     # ---------------------------------------------------------
     period_sets = get_period_sets(period, files=files, daterange=daterange, climatology_range=climatology_range)
     pm = period_sets["period_map"]
+
+    # 4a. Get the output data_type (STATS/CLIM) based on the period
+    if data_type is None:
+        try:
+            p_info = get_period_info(period)
+            data_type = "CLIM" if p_info.get("is_climatology") else "STATS"
+            if verbose:
+                print(f"Inferred data_type='{data_type}' based on period '{period}'.")
+        except Exception as e:
+            data_type = "STATS"  # Default to STATS if inference fails
+            if verbose:
+                print(f"Could not infer data_type for period '{period}': {e}")
 
     # ---------------------------------------------------------
     # 4. Build stats map with mtime comparison
@@ -256,8 +319,20 @@ def build_stats_map(prod, period, output_dir=None,
 
 def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
     """
-    Intercepts an xarray Dataset to perform product-specific mathematical transformations,
-    enforce unit consistency (e.g., Kelvin to Celsius), and define target variables before computing statistics. 
+    Purpose:
+        Intercepts an xarray Dataset to perform product-specific mathematical transformations,
+        enforce unit consistency (e.g., converting Kelvin to Celsius for SST), standardizes 
+        variable names, and identifies the exact target variables for downstream statistical 
+        computation (saved to the dataset's attributes as 'pipeline_target_vars').
+    
+    Input Parameters:
+        ds (xarray.Dataset): The raw or partially processed input dataset to be evaluated.
+        prod (str): The logical product name to process (e.g., 'SST', 'PSC', 'RRS').
+        ds_name (str, optional): The overarching dataset name used for metadata or fallback variable lookups. Defaults to None.
+        verbose (bool, optional): If True, prints detailed processing steps and transformation notifications to the terminal. Defaults to False.
+        
+    Returns:
+        ds (xarray.Dataset): The fully preprocessed dataset containing the calculated or standardized variables and the required 'pipeline_target_vars' attribute.
     """
     target_vars = []
     
@@ -355,25 +430,23 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
 
 def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None, **kwargs):
     """
-    Computes summary statistics across the time dimension for a given DataArray.    
+    Purpose:
+        Computes summary statistics across the time dimension for a given DataArray.    
     
-    Parameters
-    ----------
-    da (xarray.DataArray) - The input data array to process.
-    var_name (str) - The base variable name (e.g., 'SST') to prefix the output variables.
-    time_dim (str, optional) - The dimension to reduce over (default is 'time').
-    label (str or None) - If provided, included in the output variable name.
-    stats (list or str) - The statistics to compute.
+    Input Parameters
+        data (xarray.DataArray) - The input data array to process.
+        var_name (str) - The base variable name (e.g., 'SST') to prefix the output variables.
+        time_dim (str, optional) - The dimension to reduce over (default is 'time').
+        label (str or None) - If provided, included in the output variable name.
+        stats (list or str) - The statistics to compute.
            Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count', 'gmean', 'gstd'
            Groupings: 'fast' (mean, min, max, count)
                       'full' (all standard linear stats)
                       'log'  (full + gmean, gstd)
-    weights
+        weights (xarray.DataArray or None) - Weights for the weighted statistics.
 
     Returns
-    -------
-    xarray.Dataset
-        A dataset containing the computed statistical variables (mean, max, anomaly, etc.).
+        xarray.Dataset - A dataset containing the computed statistical variables (mean, max, anomaly, etc.).
     
     """
     
@@ -441,15 +514,19 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None
 
 def process_single_stat(task, prod, per, verbose, **kwargs):
         """
-        Processes a single statistical task: opens files, resolves product keys,
-        applies spatial subsetting, computes statistics, and saves to NetCDF.
+        Purpose:
+            Processes a single statistical task: opens files, resolves product keys,
+            applies spatial subsetting, computes statistics, and saves to NetCDF.
 
-        Args:
+        Input Parameters:
             task (dict): Dictionary containing 'inputs' (list of paths) and 'output' (path).
             prod (str): The logical product name (e.g., 'SST').
             per (str): The time period label (e.g., 'M', 'W').
             verbose (bool): If True, prints progress updates.
             **kwargs: Includes 'debug', 'subset', and 'dataset' fallbacks.
+
+        Returns:
+            tuple: A tuple containing a boolean indicating success and a list of corrupt files found.
         """
         
         boost_file_limits()
@@ -844,34 +921,32 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
 
 def run_stats_pipeline(prods, periods=None, **kwargs):
     """
-    Runs a multi-product, multi-period stats pipeline.
+    Purpose:
+        Runs a multi-product, multi-period stats pipeline.
 
-    For each product in `prods` and each period code in `periods`, this function:
-      1. Determines dataset defaults (via product_defaults).
-      2. Locates daily (D) source or derived stats files (all other periods).
-      3. Opens and subsets those files in time.
-      4. Applies xarray grouping or rolling based on period code.
-      5. Computes summary statistics (mean, min, max, etc.).
-      6. Returns a dict of xr.Dataset results keyed by (prod, period).
-      7. Adds metadata
-      8. Saves output .nc files
+        For each product in `prods` and each period code in `periods`, this function:
+        1. Determines dataset defaults (via product_defaults).
+        2. Locates daily (D) source or derived stats files (all other periods).
+        3. Opens and subsets those files in time.
+        4. Applies xarray grouping or rolling based on period code.
+        5. Computes summary statistics (mean, min, max, etc.).
+        6. Returns a dict of xr.Dataset results keyed by (prod, period).
+        7. Adds metadata
+        8. Saves output .nc files
 
-    Parameters
-    ----------
-    prods (str or list of str): Single product name or list of product names (e.g. 'CHL', ['CHL','PSC']).
-    dataset (str): Override dataset. Defaults to each product’s default from product_defaults() (optional).
-    periods (list of str): Period codes to compute (e.g. ['D','W','M']) (optional). 
-                           Defaults to ['W','WEEK','M','MONTH','A','ANNUAL','DOY'].
-    map_subset (str): Regional subset (e.g. 'NES') (optional). Passed through to get_prod_files() as data_type or map override.
-    daterange (str or tuple): Date range spec to subset time (optional). Passed to get_dates().
-    time_dim (str): Name of the time dimension in your NetCDF files (default is 'time').
-    version (str): Dataset version override (optional). Passed through to get_prod_files().
-    verbose (bool): If True, prints progress and provenance (default is False).
+    Input Parameters
+        prods (str or list of str): Single product name or list of product names (e.g. 'CHL', ['CHL','PSC']).
+        dataset (str): Override dataset. Defaults to each product’s default from product_defaults() (optional).
+        periods (list of str): Period codes to compute (e.g. ['D','W','M']) (optional). 
+                               Defaults to ['W','WEEK','M','MONTH','A','ANNUAL','DOY'].
+        map_subset (str): Regional subset (e.g. 'NES') (optional). Passed through to get_prod_files().
+        daterange (str or tuple): Date range spec to subset time (optional). Passed to get_dates().
+        time_dim (str): Name of the time dimension in your NetCDF files (default is 'time').
+        version (str): Dataset version override (optional). Passed through to get_prod_files().
+        verbose (bool): If True, prints progress and provenance (default is False).
         
     Returns
-    -------
-    results : dict
-        {(prod, period): xr.Dataset} of computed statistics.
+        results (dict): {(prod, period): xr.Dataset} of computed statistics.
     """
 
     # Set up the Log file
@@ -1046,7 +1121,3 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
             sys.stdout.close()
             sys.stdout = original_stdout # Give control back to standard Python
     
-
-def get_climatology(ds, periods=['MONTH','WEEK','ANNUAL'],variable=None):
-    """
-    """

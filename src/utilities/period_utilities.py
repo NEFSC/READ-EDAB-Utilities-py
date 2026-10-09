@@ -21,6 +21,7 @@ Main Functions:
     - extract_period_code: Extract the period code, the full period, date segments and the year(s) from a filename.
     - get_period_dates: Extracts the period encoded in a filename (e.g. 'M_202204' or 'DD3_20220401_20220403') and returns the start and end dates of that period.
     - date_to_daily_period: Convert a YYYYMMDD (or datetime/date) into a daily period token D_YYYYMMDD.
+    - get_clim_period: Returns the corresponding climatology period code for a given statistical period code.
     - generate_periods: Generate all period tokens for a given period code and date range.
     - map_inputs_to_period: Map validated input periods to a single output period token.
     - get_period_sets: Generate output period tokens and input mappings for a given date range or list of files/dates.
@@ -61,6 +62,8 @@ Modification History
     Mar 12, 2026 - KJWH: Removed period_regex_debug() and is_leap_year() because no longer used
                          Updated documentation
     Apr 15, 2026 - KJWH: Added folder_name field to period_info() metadata and updated documentation
+    Oct 08, 2026 - KJWH: Added climatology_period_code field (for anomaly calculations)to period_info() metadata and updated documentation
+    Oct 09, 2026 - KJWH: get_period_sets will default to the climatology_range if the input files are out of range of the default climatology_range
 
 """
 
@@ -111,55 +114,56 @@ def period_info(help=False):
         "9) n_date_segments": "number of date segments in the filename (e.g. 1 for YYYYMM, 2 for YYYYMMDD_YYYYMMDD)",
         "10) description": "human-readable description of the type of data associate with the period",
         "11) folder_name": "subfolder name to use for this period type (e.g. 'Daily', 'Monthly', 'Seasonal')",
+        "12) climatology_period_code":"The base climatology period code used for anomaly baselines"
     }
 
     if help:
         return fields
         
     return {
-        'D':      ('time','D',False,False,False,'P1D','time','D_YYYYMMDD','YYYYMMDD',1,'Daily','Daily'),
-        'DD':     ('time','D',True, False,False,'PnD','time','DD_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of daily data','Daily'),
-        'DOY':    ('doy','D',False,False,True,'','time.dt.dayofyear','DOY_DDD_YYYY_YYYY','DOY',3,'Climatological day of year','Climatology'),
-        'DOYS':   ('doy','DOY',False,False,True,'','time.dt.dayofyear','DOYS_YYYY_YYYY','YYYY',2,'Combined climatological days of year','Climatology'),
+        'D':      ('time','D',False,False,False,'P1D','time','D_YYYYMMDD','YYYYMMDD',1,'Daily','Daily', 'DOY'),
+        'DD':     ('time','D',True, False,False,'PnD','time','DD_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of daily data','Daily', 'DOY'),
+        'DOY':    ('doy','D',False,False,True,'','time.dt.dayofyear','DOY_DDD_YYYY_YYYY','DOY',3,'Climatological day of year','Climatology', None),
+        'DOYS':   ('doy','DOY',False,False,True,'','time.dt.dayofyear','DOYS_YYYY_YYYY','YYYY',2,'Combined climatological days of year','Climatology', None),
 
-        'D3':     ('day3','D',False,True, False,'P3D',None,'D3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 3-day','Day3'),
-        'DD3':    ('day3','D3',True, True, False,'P3D',None,'DD3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 3-day data','Day3'),
+        'D3':     ('day3','D',False,True, False,'P3D',None,'D3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 3-day','Day3', 'DOY'),
+        'DD3':    ('day3','D3',True, True, False,'P3D',None,'DD3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 3-day data','Day3', 'DOY'),
 
-        'D8':     ('day8','D',False,True, False,'P8D',None,'D8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 8-day','Day8'),
-        'DD8':    ('day8','D8',True, True, False,'P8D',None,'DD8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 8-day data','Day8'),
+        'D8':     ('day8','D',False,True, False,'P8D',None,'D8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 8-day','Day8', 'DOY'),
+        'DD8':    ('day8','D8',True, True, False,'P8D',None,'DD8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 8-day data','Day8', 'DOY'),
 
-        'W':     ('week','D',False,False,False,'P1W','time.dt.isocalendar().week','W_YYYYWW','YYYYWW',1,'Weekly (ISO week format)','Weekly'),
-        'WW':    ('week','W',True, False,False,'P1W','time.dt.isocalendar().week','WW_YYYYWW_YYYYWW','YYYYWW',2,'Range of weekly data','Weekly'),
-        'WEEK':  ('week','W',False,False,True,'','time.dt.isocalendar().week','WEEK_WW_YYYY_YYYY','YYYY',3,'Climatological ISO week','Climatology'),
-        'WEEKS': ('week','WEEK',False,False,True,'','time.dt.isocalendar().week','WEEKS_YYYY_YYYY','YYYY',2,'Combined climatological ISO week','Climatology'),
+        'W':     ('week','D',False,False,False,'P1W','time.dt.isocalendar().week','W_YYYYWW','YYYYWW',1,'Weekly (ISO week format)','Weekly', 'WEEK'),
+        'WW':    ('week','W',True, False,False,'P1W','time.dt.isocalendar().week','WW_YYYYWW_YYYYWW','YYYYWW',2,'Range of weekly data','Weekly', 'WEEK'),
+        'WEEK':  ('week','W',False,False,True,'','time.dt.isocalendar().week','WEEK_WW_YYYY_YYYY','YYYY',3,'Climatological ISO week','Climatology', None),
+        'WEEKS': ('week','WEEK',False,False,True,'','time.dt.isocalendar().week','WEEKS_YYYY_YYYY','YYYY',2,'Combined climatological ISO week','Climatology', None),
 
-        'M':      ('month','D',False,False,False,'P1M','time.dt.month','M_YYYYMM','YYYYMM',1,'Monthly','Monthly'),
-        'MM':     ('month','M',True, False,False,'P1M','time.dt.month','MM_YYYYMM_YYYYMM','YYYYMM',2,'Range of monthly data','Monthly'),
-        'MONTH':  ('month','M',False,False,True,'P1M','time.dt.month','MONTH_MM_YYYY_YYYY','YYYY',3,'Climatological month','Climatology'),
-        'MONTHS': ('month','MONTH',False,False,True,'P1M','time.dt.month','MONTHS_YYYY_YYYY','YYYY',2,'Combined climatological month','Climatology'),
+        'M':      ('month','D',False,False,False,'P1M','time.dt.month','M_YYYYMM','YYYYMM',1,'Monthly','Monthly', 'MONTH'),
+        'MM':     ('month','M',True, False,False,'P1M','time.dt.month','MM_YYYYMM_YYYYMM','YYYYMM',2,'Range of monthly data','Monthly', 'MONTH'),
+        'MONTH':  ('month','M',False,False,True,'P1M','time.dt.month','MONTH_MM_YYYY_YYYY','YYYY',3,'Climatological month','Climatology', None),
+        'MONTHS': ('month','MONTH',False,False,True,'P1M','time.dt.month','MONTHS_YYYY_YYYY','YYYY',2,'Combined climatological month','Climatology', None),
 
-        'M3':   ('month3','M',False,True, False,'P3M',None,'M3_YYYYMM_YYYYMM','YYYYMM',2,'Running 3-month','Month3'),
-        'MM3':  ('month3','M3',True, True, False,'P3M',None,'MM3_YYYYMM_YYYYMM','YYYYMM',2,'Range of running 3-month','Month3'),
+        'M3':   ('month3','M',False,True, False,'P3M',None,'M3_YYYYMM_YYYYMM','YYYYMM',2,'Running 3-month','Month3', None),
+        'MM3':  ('month3','M3',True, True, False,'P3M',None,'MM3_YYYYMM_YYYYMM','YYYYMM',2,'Range of running 3-month','Month3', None),
 
-        'JFM': ('sea','M',False,False,False,'P3M','time.dt.season','JFM_YYYY','YYYY',1,'Seasonal block JFM','Seasonal'),
-        'AMJ': ('sea','M',False,False,False,'P3M','time.dt.season','AMJ_YYYY','YYYY',1,'Seasonal block AMJ','Seasonal'),
-        'JAS': ('sea','M',False,False,False,'P3M','time.dt.season','JAS_YYYY','YYYY',1,'Seasonal block JAS','Seasonal'),
-        'OND': ('sea','M',False,False,False,'P3M','time.dt.season','OND_YYYY','YYYY',1,'Seasonal block OND','Seasonal'),
-        'SEA': ('sea','M',False,False,False,'P3M','time.dt.season','SEA_YYYY','YYYY',1,'Seasonal blocks for a single year','Seasonal'),
+        'JFM': ('sea','M',False,False,False,'P3M','time.dt.season','JFM_YYYY','YYYY',1,'Seasonal block JFM','Seasonal', 'SJFM'),
+        'AMJ': ('sea','M',False,False,False,'P3M','time.dt.season','AMJ_YYYY','YYYY',1,'Seasonal block AMJ','Seasonal', 'SAMJ'),
+        'JAS': ('sea','M',False,False,False,'P3M','time.dt.season','JAS_YYYY','YYYY',1,'Seasonal block JAS','Seasonal', 'SJAS'),
+        'OND': ('sea','M',False,False,False,'P3M','time.dt.season','OND_YYYY','YYYY',1,'Seasonal block OND','Seasonal', 'SOND'),
+        'SEA': ('sea','M',False,False,False,'P3M','time.dt.season','SEA_YYYY','YYYY',1,'Seasonal blocks for a single year','Seasonal', 'SEASON'),
 
-        'SJFM': ('sea','JFM',False,False,True,'P3M','time.dt.season','SJFM_YYYY_YYYY','YYYY',2,'Climatological seasonal JFM','Climatology'),
-        'SAMJ': ('sea','AMJ',False,False,True,'P3M','time.dt.season','SAMJ_YYYY_YYYY','YYYY',2,'Climatological seasonal AMJ','Climatology'),
-        'SJAS': ('sea','JAS',False,False,True,'P3M','time.dt.season','SJAS_YYYY_YYYY','YYYY',2,'Climatological seasonal JAS','Climatology'),
-        'SOND': ('sea','OND',False,False,True,'P3M','time.dt.season','SOND_YYYY_YYYY','YYYY',2,'Climatological seasonal OND','Climatology'),
-        'SEASON': ('season','SEA',False,False,True,'P3M','time.dt.season','SEASON_YYYY_YYYY','YYYY',2,'Combined climatological season','Climatology'),
+        'SJFM': ('sea','JFM',False,False,True,'P3M','time.dt.season','SJFM_YYYY_YYYY','YYYY',2,'Climatological seasonal JFM','Climatology', None),
+        'SAMJ': ('sea','AMJ',False,False,True,'P3M','time.dt.season','SAMJ_YYYY_YYYY','YYYY',2,'Climatological seasonal AMJ','Climatology', None),
+        'SJAS': ('sea','JAS',False,False,True,'P3M','time.dt.season','SJAS_YYYY_YYYY','YYYY',2,'Climatological seasonal JAS','Climatology', None),
+        'SOND': ('sea','OND',False,False,True,'P3M','time.dt.season','SOND_YYYY_YYYY','YYYY',2,'Climatological seasonal OND','Climatology', None),
+        'SEASON': ('season','SEA',False,False,True,'P3M','time.dt.season','SEASON_YYYY_YYYY','YYYY',2,'Combined climatological season','Climatology', None),
 
-        'A':      ('annual','M',False,False,False,'P1Y','time.dt.year','A_YYYY','YYYY',1,'Annual (monthly inputs)','Annual'),
-        'AA':     ('annual','A',True, False,False,'P1Y','time.dt.year','AA_YYYY_YYYY','YYYY',2,'Range of annual','Annual'),
-        'ANNUAL': ('annual','A',False,False,True,'P1Y','time.dt.year','ANNUAL_YYYY_YYYY','YYYY',2,'Climatological annual','Climatology'),
+        'A':      ('annual','M',False,False,False,'P1Y','time.dt.year','A_YYYY','YYYY',1,'Annual (monthly inputs)','Annual', 'ANNUAL'),
+        'AA':     ('annual','A',True, False,False,'P1Y','time.dt.year','AA_YYYY_YYYY','YYYY',2,'Range of annual','Annual', 'ANNUAL'),
+        'ANNUAL': ('annual','A',False,False,True,'P1Y','time.dt.year','ANNUAL_YYYY_YYYY','YYYY',2,'Climatological annual','Climatology', None),
 
-        'Y':      ('year','D',False,False,False,'P1Y','time.dt.year','Y_YYYY','YYYY',1,'Yearly (daily inputs)','Yearly'),
-        'YY':     ('year','Y',True, False,False,'P1Y','time.dt.year','YY_YYYY_YYYY','YYYY',2,'Range of yearly','Yearly'),
-        'YEAR':   ('year','Y',False,False,True,'PnY','time.dt.year','YEAR_YYYY_YYYY','YYYY',2,'Climatological year','Climatology'),
+        'Y':      ('year','D',False,False,False,'P1Y','time.dt.year','Y_YYYY','YYYY',1,'Yearly (daily inputs)','Yearly', 'YEAR'),
+        'YY':     ('year','Y',True, False,False,'P1Y','time.dt.year','YY_YYYY_YYYY','YYYY',2,'Range of yearly','Yearly', 'YEAR'),
+        'YEAR':   ('year','Y',False,False,True,'PnY','time.dt.year','YEAR_YYYY_YYYY','YYYY',2,'Climatological year','Climatology', None),
     }
 
 def get_period_info(period_code=None):
@@ -228,6 +232,7 @@ def get_period_info(period_code=None):
             n_date_segments,
             description,
             folder_name,
+            climatology_period_code,
         ) = info
 
         pattern, parts = build_regex(code, file_format, date_format, n_date_segments)
@@ -245,6 +250,7 @@ def get_period_info(period_code=None):
             "n_date_segments": n_date_segments,
             "description": description,
             "folder_name": folder_name,
+            "climatology_period_code": climatology_period_code,
             "regex": pattern,
             "file_format_parts": parts,
         }
@@ -1019,6 +1025,16 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
 
     # Otherwise: list input → return list of tuples
     return (results, errors) if diagnostics else results
+
+def get_clim_period(period_code):
+    """
+    Returns the corresponding climatology period code for a given statistical period code.
+    """
+    try:
+        info = get_period_info(period_code)
+        return info.get("climatology_period_code")
+    except KeyError:
+        raise ValueError(f"Period code '{period_code}' not recognized in period_info mapping.")
 
 def date_to_daily_period(date_str):
     """
@@ -1942,20 +1958,28 @@ def get_period_sets(
         y_clim_start, y_clim_end = climatology_range
     
         perinfo = extract_period_code([tok for _,_,tok,_ in spans])
+
         yearslists = [info['years'] for info in perinfo]
         
         all_years = vectorized_spans["years"]
+
         if len(all_years) > 0:
             data_start_year = int(np.min(all_years))
             data_end_year   = int(np.max(all_years))
-                  
-            # --- Clamp the years to the Climatology Range ---
-            y1 = max([data_start_year, y_clim_start]) # The later of (Data Start vs Baseline Start)
-            y2 = min([data_end_year, y_clim_end]) # The earlier of (Data End vs Baseline End)
-            
-            # Re-assign the start/end strings for the output period generation
-            start_dt = f"{y1:04d}0101"
-            end_dt   = f"{y2:04d}1231"
+
+            # --- Check if data is completely outside the climatology range ---
+            if data_start_year > y_clim_end or data_end_year < y_clim_start:
+                print(f"⚠️ WARNING: Input data years ({data_start_year}-{data_end_year}) are entirely outside the expected climatology range ({y_clim_start}-{y_clim_end}). Reverting to default fallback range.")
+                start_dt = f"{y_clim_start:04d}0101"
+                end_dt   = f"{y_clim_end:04d}1231"
+            else:    
+                # --- Clamp the years to the Climatology Range ---
+                y1 = max([data_start_year, y_clim_start]) # The later of (Data Start vs Baseline Start)
+                y2 = min([data_end_year, y_clim_end]) # The earlier of (Data End vs Baseline End)
+                
+                # Re-assign the start/end strings for the output period generation
+                start_dt = f"{y1:04d}0101"
+                end_dt   = f"{y2:04d}1231"
         else:
             # Fallback if no years were found
             start_dt = f"{y_clim_start:04d}0101"
