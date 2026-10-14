@@ -2,6 +2,7 @@ import os
 import glob
 from pathlib import Path
 import stat
+import xarray as xr
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import parse_dataset_info, extract_period_code, get_period_info, get_period_dates, get_source_file_dates
 from utilities import product_defaults, dataset_defaults, get_dataset_products, resolve_dataset_grid, get_daterange

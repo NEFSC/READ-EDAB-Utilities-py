@@ -1,10 +1,9 @@
 from utilities import dataset_defaults
 from utilities import get_current_utc_timestamp
 from utilities import format_iso_duration
-
 import pandas as pd
-import xarray as xr
 import numpy as np
+import xarray as xr
 import os
 import math
 import netCDF4
@@ -15,6 +14,47 @@ import re
 
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
+
+"""
+METADATA_UTILITIES 
+
+Purpose:
+    This module reads metadata from lookup tables (Excel) and dynamically generates CF-compliant global, geospatial, temporal, and variable-level metadata dictionaries for NetCDF files[cite: 3].
+
+Main Functions:
+    - get_metadata_table: Reads an Excel file with multiple sheets containing metadata mappings[cite: 3].
+    - load_all_metadata: Loads all metadata attributes and lookup tables from an Excel file into a nested dictionary[cite: 3].
+    - get_default_metadata: Returns a dictionary of default values for all attributes marked as required in a given sheet[cite: 3].
+    - get_lut_metadata: Dynamically injects program, project, and contributor metadata fields using lookup tables[cite: 3].
+    - get_geospatial_metadata: Generates geospatial metadata from an existing NetCDF file or current xarray Dataset[cite: 3].
+    - get_temporal_metadata: Generates temporal metadata including date stamps and time coverage[cite: 3].
+    - get_reference_metadata: Retrieves reference metadata for one or more input models from LUT_References[cite: 3].
+    - get_source_metadata: Retrieves metadata for a given dataset and version from LUT_Datasets[cite: 3].
+    - build_product_attributes: Builds a metadata dictionary for a given product short_name, handling wavelengths and anomalies[cite: 3].
+    - build_stat_attributes: Builds variable attributes for statistical products by modifying base attributes according to LUT_Stats[cite: 3].
+    - get_summary_metadata: Builds summary metadata for a given product, handling keyword expansion and product-specific overrides[cite: 3].
+
+Helper Functions:
+    - metadata_dict_to_df: Converts a metadata dictionary to a DataFrame with normalized column names[cite: 3].
+    - extract_metadata_from_attrs: Extracts metadata from existing attributes with rounding logic[cite: 3].
+    - get_lut_products: Parses the LUT_Products sheet into a dictionary keyed by short_name[cite: 3].
+    - get_fill_value: Retrieves the _FillValue for a given xarray or netCDF4 variable[cite: 3].
+
+References:
+    
+Copywrite: 
+    Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
+    Northeast Fisheries Science Center, Narragansett Laboratory.
+    This software may be used, copied, or redistributed as long as it is not sold and this copyright notice is reproduced on each copy made.
+    This routine is provided AS IS without any express or implied warranties whatsoever.
+
+Author:
+    This program was written on September 08, 2025 by Kimberly J. W. Hyde, Northeast Fisheries Science Center | NOAA Fisheries | U.S. Department of Commerce, 28 Tarzwell Dr, Narragansett, RI 02882
+  
+Modification History
+    Oct 14, 2026 - KJWH: Added `is_anomaly` flag to `build_product_attributes` to pull `long_name_anomaly` and `standard_name_anomaly` from LUT_Products.
+    
+"""
 
 ISO_RESOLUTION_MAP = {
                 "daily": "P1D",
@@ -642,7 +682,7 @@ def get_lut_products(metapath: str = None) -> dict:
 
     return lut_clean
 
-def build_product_attributes(product: str, metapath: str = None,  _FillValue=None, verbose=False) -> dict:
+def build_product_attributes(product: str, metapath: str = None,  _FillValue=None, is_anomaly=False, verbose=False) -> dict:
     """
     Builds a metadata dictionary for a given product short_name.
     - Uses 'Products' sheet to determine required attributes
@@ -650,12 +690,12 @@ def build_product_attributes(product: str, metapath: str = None,  _FillValue=Non
     - Dynamically handles wavelength-specific products (e.g., RRS_412)
     - Includes optional attributes if present
     - Allows _FillValue override
+    - Swaps in 'long_name_anomaly' and 'standard_name_anomaly' if is_anomaly is True
     - Raises message for missing required attributes with note to add manually
     """
     product_meta = get_metadata_table(metapath=metapath, sheet="Products")
     lut_products = get_lut_products(metapath)
     lut_prodnames = get_metadata_table(metapath=metapath, sheet="LUT_Prodnames")
-
 
     product_key = product.strip().upper()
 
@@ -716,6 +756,13 @@ def build_product_attributes(product: str, metapath: str = None,  _FillValue=Non
         elif is_required:
             missing_required.append(attr_name)
 
+    # 🎯 OVERRIDE WITH ANOMALY NAMES IF REQUESTED
+    if is_anomaly:
+        if "long_name_anomaly" in product_row and pd.notna(product_row["long_name_anomaly"]):
+            attributes["long_name"] = str(product_row["long_name_anomaly"]).strip()
+        if "standard_name_anomaly" in product_row and pd.notna(product_row["standard_name_anomaly"]):
+            attributes["standard_name"] = str(product_row["standard_name_anomaly"]).strip()
+    
     # Inject Wavelength Metadata
     if wavelength:
         # Append the wavelength to the long_name if it exists
@@ -736,6 +783,11 @@ def build_stat_attributes(base_prod: str, stat_name: str, metapath: str = None, 
     Builds variable attributes for statistical products by pulling base attributes 
     and modifying them according to LUT_Stats.
     """
+
+    stat_key = stat_name.strip().lower()
+    # Let build_product_attributes know if we are building an anomaly variable
+    is_anomaly = (stat_key == "anomaly")
+
     # 1. Get the base attributes (e.g., for CHL)
     attrs = build_product_attributes(base_prod, metapath=metapath, _FillValue=_FillValue, verbose=verbose)
     
