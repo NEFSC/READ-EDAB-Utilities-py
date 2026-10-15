@@ -12,18 +12,11 @@ from utilities.bootstrap.environment import bootstrap_environment
 from utilities import regrid_wrapper, subset_dataset
 from utilities import get_daylength
 from utilities import get_nc_prod
-from utilities import get_fill_value
-
-from utilities import build_product_attributes
-from utilities import get_reference_metadata
-from utilities import get_geospatial_metadata
-from utilities import get_lut_metadata
-from utilities import get_temporal_metadata
-from utilities import get_summary_metadata
-from utilities import get_default_metadata
-from utilities import get_source_metadata
+from utilities import build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
+from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value, get_source_metadata
 from utilities import parse_dataset_info
 from utilities import get_source_file_dates, get_prod_files, get_dates, get_filepath
+from utilities import generate_logfile_path
 
 
 """
@@ -63,7 +56,29 @@ Modification History
     Sep 03, 2025 - KJWH: Added metadata functions to process_daily_pp
                          Updated documentation
                          Added validate_inputs function to check input data types and shapes
+    Oct 15, 2026 - KJWH: Added DualLogger and updated logfile output
 """
+
+class DualLogger:
+    """
+    Intercepts standard print statements and writes them to both the terminal 
+    and a persistent log file simultaneously.
+    """
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, "a", encoding="utf-8")
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush() 
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+        
+    def close(self):
+        self.log.close()
 
 def validate_inputs(chl, sst, par, daylength):
     expected_type = xr.DataArray
@@ -247,7 +262,6 @@ def vgpm_models(chl,sst,par,day_length):
     # Calculate Kd_PAR (m⁻¹)
     with np.errstate(divide="ignore", invalid="ignore"):
         kdpar = xr.where(zeu > 0, -np.log(0.01) / zeu, np.nan)
-
     
     # Eppley formulation for Pb_opt (gC gChl⁻¹ h⁻¹)
     Pb_opt_eppley = 1.54 * 10.0**(0.0275 * sst - 0.07)
@@ -426,127 +440,182 @@ def run_pp_pipeline(chl_dataset=None,
         verbose (bool): If True, print progress
         logfile (str): Optional file to log the progress
     """
-    
+
+    original_stdout = sys.stdout 
+
+    if logfile in ["auto", True]:
+        logfile = generate_logfile_path("prim_prod", prods=['PPD'], dataset=chl_dataset, env_dict=env)    
+        
+    should_log = verbose or bool(logfile)
+
     if logfile:
-        print(f"logging progress in {logfile}")
-        log = open(logfile, "w")
-        sys.stdout = log
-        sys.stderr = log
+        os.makedirs(os.path.dirname(logfile), exist_ok=True)
+        sys.stdout = DualLogger(logfile)
+        print("\n" + "="*80)
+        print(f"🟢 PRIMARY PRODUCTIVITY PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"📄 Logging to: {logfile}")
+        print("="*80)
 
 
-    # 1️⃣ Build date→file map
-    pp_data_map = build_pp_date_map(dates=daterange,
-                                    chl_dataset=chl_dataset,
-                                    sst_dataset=sst_dataset,
-                                    par_dataset=par_dataset,
-                                    map_subset=map_subset,
-                                    verbose=verbose)
+    try:
+        # 1️⃣ Build date→file map
+        if should_log: print(f"\n🚀 Starting Primary Productivity Pipeline...")
+        pp_data_map = build_pp_date_map(dates=daterange,
+                                        chl_dataset=chl_dataset,
+                                        sst_dataset=sst_dataset,
+                                        par_dataset=par_dataset,
+                                        map_subset=map_subset,
+                                        verbose=verbose)
 
-    # 2️⃣ Filter dates to run
-    dates_to_run = [
-        date for date, (_, _, _, _, up_to_date) in pp_data_map.items()
-        if overwrite or not up_to_date
-    ]
-    
-    total_dates = len(dates_to_run)  # or however you're batching
-
-    if verbose:
-        print(f"🚀 Processing {total_dates} dates...")
-
-    if not dates_to_run:
-        print("✅ All outputs are up-to-date. Nothing to run.")
-        return
-
-    # 3️⃣ Collect input files
-    chl_files = [pp_data_map[d][0] for d in dates_to_run]
-    sst_files = [pp_data_map[d][1] for d in dates_to_run]
-    par_files = [pp_data_map[d][2] for d in dates_to_run]
-    output_files = [pp_data_map[d][3] for d in dates_to_run]
-
-    # 4️⃣ Get input data information
-    chl_info = parse_dataset_info(chl_files[0])
-    sst_info = parse_dataset_info(sst_files[0])
-    par_info = parse_dataset_info(par_files[0])
-
-    chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
-    sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
-    par_source = get_source_metadata(par_info["dataset"],dataset_version=par_info["version"],source_prefix="source_par")
-    
-    merged_info = {
-        chl_info["product"]: chl_info,
-        sst_info["product"]: sst_info,
-        par_info["product"]: par_info
-    }
-
-    chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
-    sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
-    par_nc_var = get_nc_prod(par_info['dataset'],'PAR')
-
-    # 5️⃣ Batch regrid SST and PAR
-    print(f"Regridding SST and PAR files to CHL grid...")
-    sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
-    par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run)
-
-    # 6️⃣ Daily loop
-    print(f"Writing PPD files to {os.path.dirname(output_files[0])}")
-    for i, (date, chl_file, sst_file, par_file, output_file) in enumerate(
-        zip(dates_to_run, chl_files, sst_files, par_files, output_files), start=1):
+        # 2️⃣ Filter dates to run and Track Progress
+        dates_to_run = []
+        skipped_tasks = []
+        created_tasks = []
+        failed_tasks = []
         
-        chl_ds = xr.open_dataset(chl_file)
-        chl = chl_ds[chl_nc_var]
+        for date, info in pp_data_map.items():
+            chl_path, sst_path, par_path, ppd_path, up_to_date = info
+            file_name = os.path.basename(ppd_path)
+            
+            if up_to_date and not overwrite:
+                skipped_tasks.append(date)
+                if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
+            else:
+                dates_to_run.append(date)
+                if should_log: print(f"  🆕 Queued for Creation: {file_name}")
         
-        target_time = pd.to_datetime(date)
+        total_dates = len(dates_to_run)
 
-        sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var]        
-        par = par_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[par_nc_var]        
+        if not dates_to_run:
+            if should_log: print("✅ All outputs are up-to-date. Nothing to run.")
+            
+            print("\n" + "="*60)
+            print("🏁 PRIMARY PRODUCTIVITY PIPELINE FINISHED SUMMARY")
+            print("="*60)
+            print(f"📥 Input dates found:       {len(pp_data_map)}")
+            print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
+            print(f"🆕 New files created:       0")
+            print("="*60)
+            return
+
+        if should_log: print(f"\n🚀 Processing {total_dates} dates...")
+
+        # 3️⃣ Collect input files
+        chl_files = [pp_data_map[d][0] for d in dates_to_run]
+        sst_files = [pp_data_map[d][1] for d in dates_to_run]
+        par_files = [pp_data_map[d][2] for d in dates_to_run]
+        output_files = [pp_data_map[d][3] for d in dates_to_run]
+
+        # 4️⃣ Get input data information
+        chl_info = parse_dataset_info(chl_files[0])
+        sst_info = parse_dataset_info(sst_files[0])
+        par_info = parse_dataset_info(par_files[0])
+
+        chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
+        sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
+        par_source = get_source_metadata(par_info["dataset"],dataset_version=par_info["version"],source_prefix="source_par")
         
-        chl_date = pd.to_datetime(chl["time"].values[0]).date()
-        sst_date = pd.to_datetime(sst["time"].values).date()
-        par_date = pd.to_datetime(par["time"].values).date()
+        merged_info = {
+            chl_info["product"]: chl_info,
+            sst_info["product"]: sst_info,
+            par_info["product"]: par_info
+        }
 
-        if chl_date == sst_date:
-            sst = sst.expand_dims(time=chl["time"])
-            sst["time"] = chl["time"]
-        else:
-            raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+        chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
+        sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
+        par_nc_var = get_nc_prod(par_info['dataset'],'PAR')
 
-        if chl_date == par_date:
-            par = par.expand_dims(time=chl["time"])
-            par["time"] = chl["time"]
-        else:
-            raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+        # 5️⃣ Batch regrid SST and PAR
+        if should_log: print(f"Regridding SST and PAR files to CHL grid...")
+        sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
+        par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run)
 
-        # Subset CHL and SST if requested
-        if map_subset:
-            if verbose: print(f"Subsetting to region: {map_subset}")
-            chl = subset_dataset(chl, map_subset)
-            sst = subset_dataset(sst, map_subset)
-            par = subset_dataset(par, map_subset)
+        # 6️⃣ Daily loop
+        if should_log: print(f"Writing PPD files to {os.path.dirname(output_files[0])}")
         
-        chl, sst, par = xr.align(chl, sst, par, join="exact")  # or "inner" if needed
+        for i, (date, chl_file, sst_file, par_file, output_file) in enumerate(
+            zip(dates_to_run, chl_files, sst_files, par_files, output_files), start=1):
+            
+            try:
+                chl_ds = xr.open_dataset(chl_file)
+                chl = chl_ds[chl_nc_var]
+                
+                target_time = pd.to_datetime(date)
 
-        # Compute or load daylength
-        doy = pd.Timestamp(date).dayofyear
-        daylength_ds = get_daylength(chl_file, daylength_dir=daylength_dir, dayofyear=doy)
-        daylength_ds = subset_dataset(daylength_ds, map_subset)
+                sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var]        
+                par = par_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[par_nc_var]        
+                
+                chl_date = pd.to_datetime(chl["time"].values[0]).date()
+                sst_date = pd.to_datetime(sst["time"].values).date()
+                par_date = pd.to_datetime(par["time"].values).date()
 
-         # Build the ppd history
-        history = " ".join([f"{build_product_attributes('PPD')['long_name']} is calculated using the VGPM {get_reference_metadata('VGPM')[0]['citation']} and VGPM-EPPLEY {get_reference_metadata('VGPM_EPPLEY')[0]['citation']} models. ",
-                f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
-                f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
-                f"The input photosynthetic active radiation file ({os.path.basename(par_file)}) is from the {par_source['source_par_title']}. ",
-                f"The SST and PAR data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}.",
-                f"Day length was calculated according to Kirk (1994)"
-        ])
+                if chl_date == sst_date:
+                    sst = sst.expand_dims(time=chl["time"])
+                    sst["time"] = chl["time"]
+                else:
+                    raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+
+                if chl_date == par_date:
+                    par = par.expand_dims(time=chl["time"])
+                    par["time"] = chl["time"]
+                else:
+                    raise ValueError(f"Date mismatch: chl={chl_date}, par={par_date}")
+
+                # Subset CHL and SST if requested
+                if map_subset:
+                    if verbose: print(f"Subsetting to region: {map_subset}")
+                    chl = subset_dataset(chl, map_subset)
+                    sst = subset_dataset(sst, map_subset)
+                    par = subset_dataset(par, map_subset)
+                
+                chl, sst, par = xr.align(chl, sst, par, join="exact")
+
+                # Compute or load daylength
+                doy = pd.Timestamp(date).dayofyear
+                daylength_ds = get_daylength(chl_file, daylength_dir=daylength_dir, dayofyear=doy)
+                daylength_ds = subset_dataset(daylength_ds, map_subset)
+
+                history = " ".join([f"{build_product_attributes('PPD')['long_name']} is calculated using the VGPM {get_reference_metadata('VGPM')[0]['citation']} and VGPM-EPPLEY {get_reference_metadata('VGPM_EPPLEY')[0]['citation']} models. ",
+                        f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
+                        f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
+                        f"The input photosynthetic active radiation file ({os.path.basename(par_file)}) is from the {par_source['source_par_title']}. ",
+                        f"The SST and PAR data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}.",
+                        f"Day length was calculated according to Kirk (1994)"
+                ])
+                
+                # 7️⃣ Process daily PP
+                start_time = time.perf_counter()
+                process_daily_pp(chl, sst, par, daylength_ds, output_file, history=history, sourceinfo=merged_info)
+                elapsed = (time.perf_counter() - start_time) / 60
+                
+                created_tasks.append(date)
+                if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
+            
+            except Exception as e:
+                failed_tasks.append(f"{date}: {str(e)}")
+                if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {e}")
+
+        # --- FINAL SUMMARY REPORT ---
+        print("\n" + "="*60)
+        print("🏁 PRIMARY PRODUCTIVITY PIPELINE FINISHED SUMMARY")
+        print("="*60)
+        print(f"📥 Input dates found:       {len(pp_data_map)}")
+        print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
+        print(f"🆕 New files created:       {len(created_tasks)}")
+        print(f"❌ Errors/Not created:      {len(failed_tasks)}")
         
-        # 7️⃣ Process daily PP
-        
-        start_time = time.perf_counter()
-        process_daily_pp(chl, sst, par, daylength_ds,output_file,history=history,sourceinfo=merged_info)
-        elapsed = (time.perf_counter() - start_time) / 60
-        if verbose: print(f"Finished writing {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
+        if failed_tasks:
+            print(f"\n📂 FAILED TASKS DETAILS:")
+            for task in failed_tasks:
+                print(f"  • {task}")
+        print("="*60)
 
-    print("🎉 Primary productivity pipeline complete.")
+    finally:
+        if logfile and logfile not in ["auto", True]:
+            print(f"\n🔴 PIPELINE RUN ENDED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("="*80 + "\n")
+            sys.stdout.close()
+            sys.stdout = original_stdout
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

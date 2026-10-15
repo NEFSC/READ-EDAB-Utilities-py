@@ -14,18 +14,11 @@ env = bootstrap_environment(verbose=False)
 
 from utilities import regrid_wrapper, subset_dataset
 from utilities import get_nc_prod
-from utilities import get_fill_value
-
-from utilities import build_product_attributes
-from utilities import get_reference_metadata
-from utilities import get_geospatial_metadata
-from utilities import get_lut_metadata
-from utilities import get_temporal_metadata
-from utilities import get_summary_metadata
-from utilities import get_default_metadata
-from utilities import get_source_metadata
+from utilities import build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
+from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value, get_source_metadata
 from utilities import parse_dataset_info
 from utilities import get_source_file_dates, get_prod_files, get_dates, get_filepath
+from utilities import generate_logfile_path
 
 
 """
@@ -60,8 +53,30 @@ Modification History
     Aug 08, 2024 - KJWH: Updated how the coefficients are extracted and the data are returned
     Sep 11, 2025 - KJWH: Converted to a full pipeline modeled after calc_primprod.py
                          Updated documentation
+    Oct 15, 2026 - KJWH: Added DualLogger and updated logfile output
 
 """
+
+class DualLogger:
+    """
+    Intercepts standard print statements and writes them to both the terminal 
+    and a persistent log file simultaneously.
+    """
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, "a", encoding="utf-8")
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush() 
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+        
+    def close(self):
+        self.log.close()
 
 def validate_inputs(chl, sst):
     expected_type = xr.DataArray
@@ -368,105 +383,159 @@ def run_psc_pipeline(chl_dataset=None,
     """
     map_subset = map_subset or "NES"  # Default to NES if None provided
 
+    original_stdout = sys.stdout 
+
+    if logfile in ["auto", True]:
+        logfile = generate_logfile_path("phytosize", prods=['PSC'], dataset=chl_dataset, env_dict=env)    
+        
+    should_log = verbose or bool(logfile)
+
     if logfile:
-        print(f"logging progress in {logfile}")
-        log = open(logfile, "w")
-        sys.stdout = log
-        sys.stderr = log
+        os.makedirs(os.path.dirname(logfile), exist_ok=True)
+        sys.stdout = DualLogger(logfile)
+        print("\n" + "="*80)
+        print(f"🟢 PHYTOPLANKTON SIZE CLASS PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"📄 Logging to: {logfile}")
+        print("="*80)
 
-    # 1️⃣ Build date→file map
-    psc_data_map = build_psc_date_map(dates=daterange,
-                                      chl_dataset=chl_dataset,
-                                      sst_dataset=sst_dataset,
-                                      map_subset=map_subset,
-                                      verbose=verbose)
+    try:
+        # 1️⃣ Build date→file map
+        if should_log: print(f"\n🚀 Starting Phytoplankton Size Class Pipeline...")
+        psc_data_map = build_psc_date_map(dates=daterange,
+                                          chl_dataset=chl_dataset,
+                                          sst_dataset=sst_dataset,
+                                          map_subset=map_subset,
+                                          verbose=verbose)
 
-    # 2️⃣ Filter dates to run
-    dates_to_run = [
-        date for date, (_, _, _, up_to_date) in psc_data_map.items()
-        if overwrite or not up_to_date
-    ]
-    
-    total_dates = len(dates_to_run)  # or however you're batching
-
-    if verbose:
-        print(f"🚀 Processing {total_dates} dates...")
-
-    if not dates_to_run:
-        print("✅ All outputs are up-to-date. Nothing to run.")
-        return
-
-    # 3️⃣ Collect input files
-    chl_files = [psc_data_map[d][0] for d in dates_to_run]
-    sst_files = [psc_data_map[d][1] for d in dates_to_run]
-    output_files = [psc_data_map[d][2] for d in dates_to_run]
-
-    # 4️⃣ Get input data information
-    chl_parse = parse_dataset_info(chl_files[0])
-    sst_parse = parse_dataset_info(sst_files[0])
-
-    chl_info = chl_parse[0] if isinstance(chl_parse, list) else chl_parse
-    sst_info = sst_parse[0] if isinstance(sst_parse, list) else sst_parse
-
-    merged_info = {
-        chl_info["product"]: chl_info,
-        sst_info["product"]: sst_info,
-    }
-
-    chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
-    sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
-
-    chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
-    sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
-
-    # 5️⃣ Batch regrid SST
-    print(f"Regridding SST files to CHL grid...")
-    sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
-    
-
-    # 6️⃣ Daily loop
-    print(f"Writing PSC files to {os.path.dirname(output_files[0])}")
-    for i, (date, chl_file, sst_file, output_file) in enumerate(
-        zip(dates_to_run, chl_files, sst_files, output_files), start=1):
+        # 2️⃣ Filter dates to run and Track Progress
+        dates_to_run = []
+        skipped_tasks = []
+        created_tasks = []
+        failed_tasks = []
         
-        chl_ds = xr.open_dataset(chl_file)
-        chl = chl_ds[chl_nc_var]
+        for date, info in psc_data_map.items():
+            chl_path, sst_path, psc_path, up_to_date = info
+            file_name = os.path.basename(psc_path)
+            
+            if up_to_date and not overwrite:
+                skipped_tasks.append(date)
+                if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
+            else:
+                dates_to_run.append(date)
+                if should_log: print(f"  🆕 Queued for Creation: {file_name}")
         
-        target_time = pd.to_datetime(date)
-        sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var]         
-              
-        chl_date = pd.to_datetime(chl["time"].values[0]).date()
-        sst_date = pd.to_datetime(sst["time"].values).date()
+        total_dates = len(dates_to_run)
 
-        if chl_date == sst_date:
-            sst = sst.expand_dims(time=chl["time"])
-            sst["time"] = chl["time"]
-        else:
-            raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+        if not dates_to_run:
+            if should_log: print("✅ All outputs are up-to-date. Nothing to run.")
+            
+            print("\n" + "="*60)
+            print("🏁 PHYTOPLANKTON SIZE CLASS PIPELINE FINISHED SUMMARY")
+            print("="*60)
+            print(f"📥 Input dates found:       {len(psc_data_map)}")
+            print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
+            print(f"🆕 New files created:       0")
+            print("="*60)
+            return
 
-        # Subset CHL and SST if requested
-        if map_subset:
-            if verbose: print(f"Subsetting to region: {map_subset}")
-            chl = subset_dataset(chl, map_subset)
-            sst = subset_dataset(sst, map_subset)
+        if should_log: print(f"\n🚀 Processing {total_dates} dates...")
+
+        # 3️⃣ Collect input files
+        chl_files = [psc_data_map[d][0] for d in dates_to_run]
+        sst_files = [psc_data_map[d][1] for d in dates_to_run]
+        output_files = [psc_data_map[d][2] for d in dates_to_run]
+
+        # 4️⃣ Get input data information
+        chl_parse = parse_dataset_info(chl_files[0])
+        sst_parse = parse_dataset_info(sst_files[0])
+
+        chl_info = chl_parse[0] if isinstance(chl_parse, list) else chl_parse
+        sst_info = sst_parse[0] if isinstance(sst_parse, list) else sst_parse
+
+        merged_info = {
+            chl_info["product"]: chl_info,
+            sst_info["product"]: sst_info,
+        }
+
+        chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
+        sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
+
+        chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
+        sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
+
+        # 5️⃣ Batch regrid SST
+        if should_log: print(f"Regridding SST files to CHL grid...")
+        sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
         
-        chl, sst = xr.align(chl, sst, join="exact")  # or "inner" if needed
-
-         # Build the psc history
-        history = " ".join([f"{build_product_attributes('PSC')['long_name']} is calculated using the Northeast U.S. regionally tuned phytoplankton size class model based on Turner et al. {get_reference_metadata('PSC_TURNER')[0]['year']}. ",
-                f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
-                f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
-                f"The SST data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}."
-        ])
+        # 6️⃣ Daily loop
+        if should_log: print(f"Writing PSC files to {os.path.dirname(output_files[0])}")
         
-        # 7️⃣ Process daily PSC
-        
-        start_time = time.perf_counter()
-        process_daily_psc(chl, sst, output_file,history=history,sourceinfo=merged_info)
-        elapsed = (time.perf_counter() - start_time) / 60
-        if verbose: print(f"Finished writing {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
+        for i, (date, chl_file, sst_file, output_file) in enumerate(
+            zip(dates_to_run, chl_files, sst_files, output_files), start=1):
+            
+            try:
+                chl_ds = xr.open_dataset(chl_file)
+                chl = chl_ds[chl_nc_var]
+                
+                target_time = pd.to_datetime(date)
+                sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var]         
+                      
+                chl_date = pd.to_datetime(chl["time"].values[0]).date()
+                sst_date = pd.to_datetime(sst["time"].values).date()
 
-    print("🎉 Phytoplankton size class pipeline complete.")
+                if chl_date == sst_date:
+                    sst = sst.expand_dims(time=chl["time"])
+                    sst["time"] = chl["time"]
+                else:
+                    raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+
+                # Subset CHL and SST if requested
+                if map_subset:
+                    if verbose: print(f"Subsetting to region: {map_subset}")
+                    chl = subset_dataset(chl, map_subset)
+                    sst = subset_dataset(sst, map_subset)
+                
+                chl, sst = xr.align(chl, sst, join="exact")
+
+                history = " ".join([f"{build_product_attributes('PSC')['long_name']} is calculated using the Northeast U.S. regionally tuned phytoplankton size class model based on Turner et al. {get_reference_metadata('PSC_TURNER')[0]['year']}. ",
+                        f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
+                        f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
+                        f"The SST data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}."
+                ])
+                
+                # 7️⃣ Process daily PSC
+                start_time = time.perf_counter()
+                process_daily_psc(chl, sst, output_file, history=history, sourceinfo=merged_info)
+                elapsed = (time.perf_counter() - start_time) / 60
+                
+                created_tasks.append(date)
+                if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
+
+            except Exception as e:
+                failed_tasks.append(f"{date}: {str(e)}")
+                if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {e}")
+
+        # --- FINAL SUMMARY REPORT ---
+        print("\n" + "="*60)
+        print("🏁 PHYTOPLANKTON SIZE CLASS PIPELINE FINISHED SUMMARY")
+        print("="*60)
+        print(f"📥 Input dates found:       {len(psc_data_map)}")
+        print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
+        print(f"🆕 New files created:       {len(created_tasks)}")
+        print(f"❌ Errors/Not created:      {len(failed_tasks)}")
+        
+        if failed_tasks:
+            print(f"\n📂 FAILED TASKS DETAILS:")
+            for task in failed_tasks:
+                print(f"  • {task}")
+        print("="*60)
+
+    finally:
+        if logfile and logfile not in ["auto", True]:
+            print(f"\n🔴 PIPELINE RUN ENDED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("="*80 + "\n")
+            sys.stdout.close()
+            sys.stdout = original_stdout
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

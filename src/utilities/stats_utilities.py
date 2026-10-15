@@ -303,7 +303,8 @@ def build_stats_map(prod, period, output_dir=None,
         stats_map[out_period] = {
             "inputs": input_files,
             "output": out_path,
-            "is_up_to_date": is_up_to_date
+            "is_up_to_date": is_up_to_date,
+            "file_exists": os.path.exists(out_path)
         }
 
     # ---------------------------------------------------------
@@ -963,7 +964,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     # Handle logfile auto-generation
     logfile = kwargs.pop('logfile', None)
     if logfile in ["auto", True]:
-        logfile = generate_logfile_path("stats", prods, dataset=dataset, env_dict=env)    
+        logfile = generate_logfile_path("stats", prods=prods, dataset=dataset, env_dict=env)    
 
     original_stdout = sys.stdout # Save the original terminal output
 
@@ -973,9 +974,10 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         print(f"🟢 PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80)
 
+    should_log = verbose or bool(logfile)
+
     # Use try/finally to GUARANTEE the terminal output is restored, even if the code crashes
     try:
-
         # Normalize inputs
         if isinstance(prods, str): prods = [prods.upper().strip()]
         if periods is None: 
@@ -1004,24 +1006,21 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         parallel_runs = kwargs.pop('parallel_runs', 1) 
         
         # 📋 Initialize an error log for the entire run
-        successful_tasks = []
-        failed_tasks = []
+        total_input_files = 0
         skipped_tasks = []
-        all_corrupt_inputs = set() # Track specific source files that are broken (use "set" to automatically deduplicate corrupt files)
-                
+        replaced_tasks = []
+        created_tasks = []
+        failed_tasks = []
+        all_corrupt_inputs = set()
+
         # Loop through prods
         for prod in prods:
             # Loop through the periods
             for period in periods:
-                if verbose:
-                    print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
+                if should_log: print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
                 
                 # Create stats period map
-                stats_map = build_stats_map(prod, period, 
-                                            dataset=dataset,
-                                            verbose=verbose,
-                                            **kwargs
-                )
+                stats_map = build_stats_map(prod, period, dataset=dataset, verbose=verbose, **kwargs)
                 
                 # --- Error Handling for Empty Maps ---
                 if not stats_map:
@@ -1030,17 +1029,27 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                     print(f"   Check: Is the 'map_subset' ({map_subset}) correct for this dataset?")
                     continue # Move to the next period/product
                 
-                # 🎯 Gather all tasks that actually need to be run
+                # Gather all tasks that actually need to be run
                 tasks_to_run = []
                 for out_period, task in stats_map.items():
+                    total_input_files += len(task['inputs'])
+                    file_name = os.path.basename(task['output'])
+
+                    # 1. Existing file skipped
                     if task['is_up_to_date']:
-                        if verbose: print(f"  ⏭ Skipping {out_period} (Up-to-date)")
+                        if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
                         skipped_tasks.append(out_period)
-                        continue
-                    
-                    if not task['inputs'] or len(task['inputs']) == 0:
-                        if verbose: print(f"  ⚠️ Skipping {out_period}: No source files found for this period.")
-                        continue
+
+                    # 2 & 3. Queued for creation or replacement
+                    elif not task['inputs']:
+                        if should_log: print(f"  ⚠️  Failed: {file_name} (No source files found)")
+                        failed_tasks.append(f"{out_period} (No inputs)")
+                    else:
+                        if task['file_exists']:
+                            if should_log: print(f"  🔄 Queued for Replacement: {file_name} (New inputs detected)")
+                        else:
+                            if should_log: print(f"  🆕 Queued for Creation: {file_name}")
+                        tasks_to_run.append((out_period, task))
                     
                     tasks_to_run.append((out_period, task))
 
@@ -1056,15 +1065,23 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                             
                             if corrupt_files: all_corrupt_inputs.update(corrupt_files)
 
-                            if success: successful_tasks.append(out_period)
-                            else: failed_tasks.append(out_period)
+                            if success: 
+                                if task['file_exists']:
+                                    replaced_tasks.append(out_period)
+                                    if should_log: print(f"  ✅ Replaced: {file_name}")
+                                else:
+                                    created_tasks.append(out_period)
+                                    if should_log: print(f"  ✅ Created: {file_name}")
+                            else: 
+                                failed_tasks.append(f"{out_period} (Processing failed)")
+                                if should_log: print(f"  ❌ Error creating: {file_name}")
                         except Exception as e:
                             failed_tasks.append(f"{out_period}: {str(e)}")
-                            print(f"\n❌ Error on {out_period}:")
+                            if should_log: print(f"\n❌ Error on {out_period}:")
                             if debug:
                                 traceback.print_exc() 
                             else:
-                                print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
+                                if should_log: print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
                         
                         if verbose: print(f"  🛠 Finished attempt for {out_period}")
                 
@@ -1082,50 +1099,44 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                         # Collect results as they finish (not necessarily in order!)
                         for future in concurrent.futures.as_completed(future_to_period):
                             out_period = future_to_period[future]
+                            task = stats_map[out_period]
+                            file_name = os.path.basename(task['output'])
                             try:
                                 success, corrupt_files = future.result()
                                 if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
                                 if success:
-                                    successful_tasks.append(out_period)
-                                    if verbose: print(f"  ✅ [Parallel] Finished {out_period}")
+                                    if task['file_exists']:
+                                        replaced_tasks.append(out_period)
+                                        if should_log: print(f"  ✅ [Parallel] Replaced: {file_name}")
+                                    else:
+                                        created_tasks.append(out_period)
+                                        if should_log: print(f"  ✅ [Parallel] Created: {file_name}")
                                 else:
-                                    failed_tasks.append(out_period)
+                                    failed_tasks.append(f"{out_period} (Processing failed)")
+                                    if should_log: print(f"  ❌ [Parallel] Error creating: {file_name}")
                             except Exception as e:
                                 failed_tasks.append(f"{out_period}: {str(e)}")
-                                print(f"\n❌ [Parallel] Error on {out_period}:\n  ⚠️  {e}")
-                                if debug:
-                                    traceback.print_exc()
-                                else:
-                                    print(f"  ⚠️  {e}")
+                                if should_log: print(f"  ❌ [Parallel] Error creating: {file_name} - {str(e)}")
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
-        print("🏁 PIPELINE FINISHED SUMMARY")
+        print("🏁 STATS PIPELINE FINISHED SUMMARY")
         print("="*60)
+        print(f"📥 Input files found:       {total_input_files}")
+        print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
+        print(f"🔄 Existing files replaced: {len(replaced_tasks)}")
+        print(f"🆕 New files created:       {len(created_tasks)}")
+        print(f"❌ Errors/Not created:      {len(failed_tasks)}")
         
-        total_processed = len(successful_tasks) + len(failed_tasks)
+        if failed_tasks:
+            print(f"\n📂 FAILED TASKS DETAILS:")
+            for task in failed_tasks:
+                print(f"  • {task}")
 
-        if not failed_tasks and not all_corrupt_inputs:
-            print("✨ Success! All files processed with 0 errors.")
-            print(f"✅ Successfully processed: {len(successful_tasks)}")
-            print(f"⏭  Skipped (up-to-date): {len(skipped_tasks)}")
-        else:
-            print(f"⚠️ Pipeline finished with ERRORS.")
-            print(f"✅ Successfully processed: {len(successful_tasks)}")
-            print(f"⏭  Skipped (up-to-date): {len(skipped_tasks)}")
-            print(f"❌ Failed tasks: {len(failed_tasks)}")
-            
-            if failed_tasks:
-                print(f"\n📂 FAILED TASKS (Output not created):")
-                for task in failed_tasks:
-                    print(f"  • {task}")
-
-            if all_corrupt_inputs:
-                print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED ({len(all_corrupt_inputs)}):")
-                for err in sorted(all_corrupt_inputs):
-                    print(f"  • {os.path.basename(err)}")
-                print("\n💡 ACTION: Delete the corrupt files listed above and re-run the pipeline.")
-        
+        if all_corrupt_inputs:
+            print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED ({len(all_corrupt_inputs)}):")
+            for err in sorted(all_corrupt_inputs):
+                print(f"  • {os.path.basename(err)}")
         print("="*60)
     finally:
         # Close the Log File and restore the terminal

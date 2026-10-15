@@ -484,7 +484,7 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
     # Handle logfile auto-generation
     logfile = kwargs.pop('logfile', None)
     if logfile in ["auto", True]:
-        logfile = generate_logfile_path("anomaly", prods, dataset=dataset, env_dict=env)    
+        logfile = generate_logfile_path("anomaly", prods=prods, dataset=dataset, env_dict=env)    
     
     original_stdout = sys.stdout 
 
@@ -493,6 +493,8 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
         print("\n" + "="*80)
         print(f"🟢 ANOMALY PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80)
+
+    should_log = verbose or bool(logfile)
 
     try:
         if isinstance(prods, str): prods = [prods.upper().strip()]
@@ -510,8 +512,14 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
             warnings.filterwarnings('default', category=RuntimeWarning)
             np.seterr(all='warn')
 
-        successful_tasks, failed_tasks, skipped_tasks = [], [], []
-        missing_climatologies = [] # 🎯 Track periods with missing baselines
+        # 📋 Initialize trackers
+        total_input_files = 0
+        total_clim_files = set()
+        skipped_tasks = []
+        replaced_tasks = []
+        created_tasks = []
+        failed_tasks = []
+        missing_climatologies = [] 
         all_corrupt_inputs = set()
                 
         for prod in prods:
