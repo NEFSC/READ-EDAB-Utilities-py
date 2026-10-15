@@ -34,6 +34,8 @@ Modification History
                             • It now caches dataset information to reduce overhead when working with a large number of files
                             • It validates the dataset by matching it with the default datasets 
     Oct 09, 2026 - KJWH: Updated resolve_dataset_grid() to remove data_type filtering and strictly filter by period codes only.
+    Oct 14, 2026 - KJWH: Add the dataset start year to the dataset_defaults() to allow for proper clamping of the climatology_range
+                         
 
 """
 
@@ -50,17 +52,17 @@ def dataset_defaults():
 
     # The default source data location and product for each dataset
     dataset_info_map = {
-        'ACSPO': ('V2.8.1','GLOBAL_2KM', 'SST'),
-        'ACSPONRT': ('V2.8.1','GLOBAL_2KM', 'SST'),
-        'AVHRR': ('V5.3','GLOBAL_4KM', 'SST'),
-        'CORALSST': ('V3.1','GLOBAL_5KM', 'SST'),
-        'GLOBCOLOUR': ('V4.2.1','GLOBAL_4KM', 'CHL'),
-        'GLORYS': ('V12','GLOBAL_9KM','BTEMP'),
-        'MUR': ('V4.1','GLOBAL_1KM', 'SST'),
-        'OCCCI': ('V6.0','GLOBAL_4KM', 'CHL'),
-        'OISST': ('V2','GLOBAL_25KM', 'SST'),
-        'PACE': ('V3.1','GLOBAL_4KM','CHL'),
-        'MOM6': ('V0.0','NES_9KM','BTEMP')
+        'ACSPO': ('V2.8.1','GLOBAL_2KM', 'SST',2000),
+        'ACSPONRT': ('V2.8.1','GLOBAL_2KM', 'SST',2025),
+        'AVHRR': ('V5.3','GLOBAL_4KM', 'SST',1981),
+        'CORALSST': ('V3.1','GLOBAL_5KM', 'SST',1985),
+        'GLOBCOLOUR': ('V4.2.1','GLOBAL_4KM', 'CHL',1997),
+        'GLORYS': ('V12','GLOBAL_9KM','BTEMP',1993),
+        'MUR': ('V4.1','GLOBAL_1KM', 'SST',2002),
+        'OCCCI': ('V6.0','GLOBAL_4KM', 'CHL',1997),
+        'OISST': ('V2','GLOBAL_25KM', 'SST',1981),
+        'PACE': ('V3.1','GLOBAL_4KM','CHL',2024),
+        'MOM6': ('V0.0','NES_9KM','BTEMP',1993)
     }
 
     return dataset_info_map
@@ -372,10 +374,6 @@ def resolve_dataset_grid(dataset_products, prod,
         print(f"📦 Auto-resolved dataset_grid → {candidate_grids[0][0]}")
     return candidate_grids[0]
 
-    
-
-
-
 def parse_dataset_info(pathlist, base=None, verbose=False):
     """
     Extract structured metadata from a full dataset path.
@@ -387,8 +385,6 @@ def parse_dataset_info(pathlist, base=None, verbose=False):
 
     Returns:
         dict: metadata including source name, version, resolution, product
-
-    Updates:
 
     """
 

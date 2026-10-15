@@ -14,8 +14,9 @@ import dask
 
 # Local utilities (Adapted from stats_utilities)
 from utilities.bootstrap.environment import bootstrap_environment
-from utilities import get_period_info, extract_period_code, get_clim_period, get_prod_files, get_filepath
-from utilities import get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
+from utilities import get_default_climatology_range, extract_period_code, get_clim_period 
+from utilities import get_prod_files, get_filepath, file_parser, corrupt_file_detector
+from utilities import generate_logfile_path
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
 from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value, get_source_metadata
 
@@ -77,55 +78,65 @@ def is_log_anomaly(prod):
     
     return prod.upper() in log_products
 
-def batch_anomaly_match(input_files, clim_files):
+def batch_anomaly_match(input_files, clim_files, climatology_range=None):
     """
     Takes a list of input files and matches them to climatology files.
+    Applies baseline clamping logic to enforce specific year ranges.
     Returns a dictionary: {input_file: matched_clim_file}
     """
+   
     matched_pairs = {}
     
     for input_file in input_files:
-        # file_parser returns a list of dictionaries; grab the first one
         parsed_data = file_parser(input_file)[0]
+        dataset_name = parsed_data.get('dataset', 'UNKNOWN').upper()
         
-        # Navigate the nested dictionary to find the temporal resolution
+        # Get the dataset-specific baseline if no override is provided
+        current_clim_range = climatology_range if climatology_range else get_default_climatology_range(dataset=dataset_name)
+        y_clim_start, y_clim_end = current_clim_range
+        
+        expected_suffix = f"_{y_clim_start:04d}_{y_clim_end:04d}"
+        
         metadata = parsed_data['period_details']['metadata']
-        groupby = metadata.get('groupby')  # e.g., 'month'
+        groupby = metadata.get('groupby')
+        period_code = parsed_data['period_details']['period_code']
         
-        # Extract the date string (e.g., '20000201')
-        start_date = parsed_data['start_date']
+        # Extract dates to support center-date calculation
+        start_date_str = parsed_data['start_date']
+        end_date_str = parsed_data.get('end_date') or start_date_str
         
-        # Construct the target climatology string
         if groupby == 'month':
-            # Slice characters 4 and 5 from 'YYYYMMDD' to get the 2-digit month
             month = start_date[4:6] 
-            target_period = f"MONTH_{month}"
-            
+            target_period = f"MONTH_{month}{expected_suffix}"
         elif groupby == 'week':
             week = start_date[4:6]
-            target_period = f"WEEK_{week}" 
-            
+            target_period = f"WEEK_{week}{expected_suffix}" 
         elif groupby in ['annual']:
-            target_period = "ANNUAL"
-
+            target_period = f"ANNUAL{expected_suffix}"
         elif groupby in ['year']:
-            target_period = "YEAR"
+            target_period = f"YEAR{expected_suffix}"
+        elif period_code in ['D', 'D3', 'D7', 'D8', 'DD']:
+            # Calculate the center date and extract the DOY for daily/running mean files
+            start_dt = datetime.strptime(start_date_str, "%Y%m%d")
+            end_dt = datetime.strptime(end_date_str, "%Y%m%d")
+            center_dt = start_dt + (end_dt - start_dt) / 2
+            doy = center_dt.timetuple().tm_yday
             
+            target_period = f"DOY_{doy:03d}{expected_suffix}"
         else:
             print(f"Skipping {input_file}: Unsupported groupby '{groupby}'")
             continue
 
-        # Scan the climatology files for the target string
         match_found = False
         for clim_file in clim_files:
             if target_period in clim_file:
                 matched_pairs[input_file] = clim_file
                 match_found = True
-                break  # Stop searching once a match is found
+                break  
                 
         if not match_found:
             matched_pairs[input_file] = "NA"
-            print(f"Warning: No climatology match found for '{target_period}' ({os.path.basename(input_file)})")
+            print(f"Warning: No climatology match (looking for '{target_period}') found for {os.path.basename(input_file)}")
             
     return matched_pairs
 
@@ -194,7 +205,7 @@ def build_anomaly_map(prod, period, output_dir=None,
     # 3. Pair Stats with Climatologies based on time period mapping
     #period_sets = get_period_sets(period, files=stat_files, daterange=daterange)
     #pm = period_sets.get("period_map", {})
-    file_matching = batch_anomaly_match(stat_files, clim_files)
+    file_matching = batch_anomaly_match(stat_files, clim_files,climatology_range=climatology_range)
 
     anomaly_map = {}
     total_tasks = len(file_matching)
@@ -296,13 +307,22 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
     try:
         if verbose: print(f"  📖 Loading climatology baseline into RAM: {os.path.basename(clim_file)}")
         
+        # Parse the climatology file to extract the baseline range
+        clim_parsed = file_parser(clim_file)[0]
+        clim_range = clim_parsed.get('period_details', {}).get('climatology_range')
+        clim_range_str = f"{clim_range[0]}-{clim_range[1]}" if clim_range else "Unknown"
+        
         # Open and fully load the climatology file into memory ONCE per group
         ds_clim = xr.open_dataset(clim_file, engine='h5netcdf')
         with dask.config.set(scheduler='single-threaded'):
             ds_clim = ds_clim.load()
 
-        # Check anomaly method once for the group
+        # Determine anomaly method and target statistic
         use_ratio = is_log_anomaly(prod)
+        target_stat = kwargs.get('stat_var')
+                
+        if not target_stat:
+            target_stat = 'median' if use_ratio else 'mean'        
 
         # Iterate through every statistical period assigned to this climatology
         for out_period, task in task_list:
@@ -326,9 +346,9 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
 
                 anom_results = {}
 
-                # Loop through and process only the _mean variables
+                # Loop through and process only the target statistic variables
                 for var in ds_stat.data_vars:
-                    if not str(var).endswith('_mean'):
+                    if not str(var).endswith(f'_{target_stat}'):
                         continue
                         
                     if var in ds_clim.data_vars:
@@ -343,7 +363,7 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                                 anom_da = anom_da.load()
                         
                         # Rename for output formatting (e.g. SST_mean -> SST_anom)
-                        base_var = str(var).replace('_mean', '')
+                        base_var = str(var).replace(f'_{target_stat}', '')
                         out_var_name = f"{base_var}_anom"
                         
                         anom_results[out_var_name] = anom_da
@@ -351,7 +371,7 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                         if debug: print(f"      ⚠️ Climatology variable matching '{var}' not found. Skipping.")
 
                 if not anom_results:
-                    raise ValueError(f"❌ No valid variables computed for anomaly {out_path}.")
+                    raise ValueError(f"❌ No valid '{target_stat}' variables computed for anomaly {out_path}.")
                 
                 # Rebuild into a new Dataset, forcing it to inherit ALL coordinates exactly as they appear in ds_stat
                 anom_ds = xr.Dataset(anom_results, coords=ds_stat.coords)
@@ -378,14 +398,12 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                     # Override units and add a comment if using the ratio method
                     if use_ratio:
                         var_attrs["units"] = "unitless"
-                        var_attrs["comment"] = "Anomaly calculated as a ratio (stat / clim), resulting in a unitless value."
+                        var_attrs["comment"] = f"Anomaly calculated as a ratio (stat / clim) of the {target_stat}, resulting in a unitless value."
 
                     # Remove _FillValue from attrs to prevent xarray conflict with encoding dictionary
                     var_attrs.pop("_FillValue", None)
 
                     anom_ds[out_var].attrs = var_attrs
-
-                # (The old 'if time not in anom_ds.coords:' block has been completely removed)
 
                 # Global Metadata
                 attrs = get_default_metadata(sheet="General") | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
@@ -402,10 +420,11 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                 # Define the anomaly method used for global attributes
                 anomaly_method = "ratio (stat / clim)" if is_log_anomaly(prod) else "difference (stat - clim)"
                 attrs['anomaly_method'] = anomaly_method
+                attrs['climatology_baseline'] = clim_range_str
 
                 all_input_basenames = [os.path.basename(f) for f in stat_files] + [os.path.basename(clim_file)]
                 attrs['source_files'] = ", ".join(all_input_basenames)
-                attrs["history"] = f"{get_current_utc_timestamp()} Computed {prod} anomalies against climatological baselines using xarray via {anomaly_method}."
+                attrs["history"] = f"{get_current_utc_timestamp()} Computed {prod} anomalies against climatological baselines ({clim_range_str}) using xarray via {anomaly_method} of the {target_stat}."                
                 
                 try:
                     ds_name = kwargs.get('dataset', 'UNKNOWN')
@@ -461,7 +480,12 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
     Purpose:
         Executes a multi-product, multi-period anomaly calculation pipeline.
     """
+    
+    # Handle logfile auto-generation
     logfile = kwargs.pop('logfile', None)
+    if logfile in ["auto", True]:
+        logfile = generate_logfile_path("anomaly", prods, dataset=dataset, env_dict=env)    
+    
     original_stdout = sys.stdout 
 
     if logfile:

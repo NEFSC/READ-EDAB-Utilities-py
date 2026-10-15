@@ -1,4 +1,5 @@
 # __init__.py
+from .src.utilities.processing_utilities import *
 from .src.utilities.notebook_utilities import *
 from .src.utilities.function_utilities import *
 from .src.utilities.date_utilities import *

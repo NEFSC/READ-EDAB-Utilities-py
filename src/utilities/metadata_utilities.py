@@ -789,7 +789,7 @@ def build_stat_attributes(base_prod: str, stat_name: str, metapath: str = None, 
     is_anomaly = (stat_key == "anomaly")
 
     # 1. Get the base attributes (e.g., for CHL)
-    attrs = build_product_attributes(base_prod, metapath=metapath, _FillValue=_FillValue, verbose=verbose)
+    attrs = build_product_attributes(base_prod, metapath=metapath, _FillValue=_FillValue, is_anomaly=is_anomaly, verbose=verbose)
     
     # 2. Load the new LUT_Stats table
     lut_stats = get_metadata_table(metapath=metapath, sheet="LUT_Stats")
