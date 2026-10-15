@@ -18,7 +18,9 @@ import dask
 
 # Local utilities
 from utilities.bootstrap.environment import bootstrap_environment
-from utilities import get_period_info, get_period_sets, get_prod_files, get_filepath
+from utilities import get_period_info, get_period_sets
+from utilities import get_prod_files, get_filepath
+from utilities import generate_logfile_path
 from utilities import get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
 from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value,get_source_metadata
@@ -61,6 +63,8 @@ Modification History
     Oct 08, 2026 - KJWH: Updated documentation
     Oct 09, 2026 - KJWH: get_prod_files is now using the output period to add the data_type(STATS/CLIM) to the output file name
                          Bug fix: Added a second get_prod_files search when the input period is D and map_subset is provided (will default back to GLOBAL if no files are found)
+    Oct 14, 2026 - KJWH: Added dataset to the get_period_sets() call to ensure the climatology_range is properly clamped to the dataset's start year if the input files are out of range of the default climatology_range
+
     
 """
 
@@ -229,7 +233,7 @@ def build_stats_map(prod, period, output_dir=None,
     # ---------------------------------------------------------
     # 4. Build period map using get_period_sets()
     # ---------------------------------------------------------
-    period_sets = get_period_sets(period, files=files, daterange=daterange, climatology_range=climatology_range)
+    period_sets = get_period_sets(period, files=files, daterange=daterange, climatology_range=climatology_range,dataset=ds_name)
     pm = period_sets["period_map"]
 
     # 4a. Get the output data_type (STATS/CLIM) based on the period
@@ -439,10 +443,10 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None
         time_dim (str, optional) - The dimension to reduce over (default is 'time').
         label (str or None) - If provided, included in the output variable name.
         stats (list or str) - The statistics to compute.
-           Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count', 'gmean', 'gstd'
+           Options: 'mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'skew','kurt','count', 'gmean', 'gstd'
            Groupings: 'fast' (mean, min, max, count)
                       'full' (all standard linear stats)
-                      'log'  (full + gmean, gstd)
+                      'log'  (full + gmean, gstd, gskew, gkurt)
         weights (xarray.DataArray or None) - Weights for the weighted statistics.
 
     Returns
@@ -458,8 +462,12 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None
             'sum':    lambda x: x.weighted(weights).sum(dim=time_dim, skipna=True),
             'var':    lambda x: x.weighted(weights).var(dim=time_dim, skipna=True),
             'std':    lambda x: x.weighted(weights).std(dim=time_dim, skipna=True),
+            'skew':   lambda x: ((x - x.weighted(weights).mean(dim=time_dim, skipna=True))**3).weighted(weights).mean(dim=time_dim, skipna=True) / (x.weighted(weights).std(dim=time_dim, skipna=True)**3),
+            'kurt':   lambda x: ((x - x.weighted(weights).mean(dim=time_dim, skipna=True))**4).weighted(weights).mean(dim=time_dim, skipna=True) / (x.weighted(weights).std(dim=time_dim, skipna=True)**4),
             'gmean':  lambda x: np.exp(np.log(x.where(x > 0)).weighted(weights).mean(dim=time_dim, skipna=True)),
             'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).weighted(weights).std(dim=time_dim, skipna=True)),
+            'gskew':  lambda x: ((np.log(x.where(x > 0)) - np.log(x.where(x > 0)).weighted(weights).mean(dim=time_dim, skipna=True))**3).weighted(weights).mean(dim=time_dim, skipna=True) / (np.log(x.where(x > 0)).weighted(weights).std(dim=time_dim, skipna=True)**3),
+            'gkurt':  lambda x: ((np.log(x.where(x > 0)) - np.log(x.where(x > 0)).weighted(weights).mean(dim=time_dim, skipna=True))**4).weighted(weights).mean(dim=time_dim, skipna=True) / (np.log(x.where(x > 0)).weighted(weights).std(dim=time_dim, skipna=True)**4),
             
             # 🎯 Unweighted fallbacks for everything else
             'min':    lambda x: x.min(dim=time_dim, skipna=True),
@@ -476,14 +484,17 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None
             'median': lambda x: x.median(dim=time_dim, skipna=True),
             'std':    lambda x: x.std(dim=time_dim, skipna=True),
             'sum':    lambda x: x.sum(dim=time_dim, skipna=True),
-            'var':    lambda x: x.var(dim=time_dim, skipna=True),
+            'skew':   lambda x: ((x - x.mean(dim=time_dim, skipna=True))**3).mean(dim=time_dim, skipna=True) / (x.std(dim=time_dim, skipna=True)**3),
+            'kurt':   lambda x: ((x - x.mean(dim=time_dim, skipna=True))**4).mean(dim=time_dim, skipna=True) / (x.std(dim=time_dim, skipna=True)**4),
             'count':  lambda x: x.notnull().sum(dim=time_dim),
             'gmean':  lambda x: np.exp(np.log(x.where(x > 0)).mean(dim=time_dim, skipna=True)),
-            'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).std(dim=time_dim, skipna=True))
+            'gstd':   lambda x: np.exp(np.log(x.where(x > 0)).std(dim=time_dim, skipna=True)),
+            'gskew':  lambda x: ((np.log(x.where(x > 0)) - np.log(x.where(x > 0)).mean(dim=time_dim, skipna=True))**3).mean(dim=time_dim, skipna=True) / (np.log(x.where(x > 0)).std(dim=time_dim, skipna=True)**3),
+            'gkurt':  lambda x: ((np.log(x.where(x > 0)) - np.log(x.where(x > 0)).mean(dim=time_dim, skipna=True))**4).mean(dim=time_dim, skipna=True) / (np.log(x.where(x > 0)).std(dim=time_dim, skipna=True)**4)
         }
 
     # Define standard grouping
-    standard_stats = ['mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'count']
+    standard_stats = ['mean', 'min', 'max', 'median', 'std', 'sum', 'var', 'skew', 'kurt', 'count']
 
     # 2. Resolve the "Requested" stats
     if stats is None or stats == 'full':
@@ -491,7 +502,7 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None
     elif stats == 'fast':
         requested = ['mean', 'min', 'max', 'count']
     elif stats == 'log':
-        requested = standard_stats + ['gmean', 'gstd']
+        requested = standard_stats + ['gmean', 'gstd', 'gskew', 'gkurt']
     elif isinstance(stats, str):
         requested = [stats]
     else:
@@ -949,8 +960,11 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         results (dict): {(prod, period): xr.Dataset} of computed statistics.
     """
 
-    # Set up the Log file
+    # Handle logfile auto-generation
     logfile = kwargs.pop('logfile', None)
+    if logfile in ["auto", True]:
+        logfile = generate_logfile_path("stats", prods, dataset=dataset, env_dict=env)    
+
     original_stdout = sys.stdout # Save the original terminal output
 
     if logfile:

@@ -1,4 +1,5 @@
 import re
+import os
 import calendar
 import datetime
 from datetime import datetime, timedelta, date
@@ -64,8 +65,28 @@ Modification History
     Apr 15, 2026 - KJWH: Added folder_name field to period_info() metadata and updated documentation
     Oct 08, 2026 - KJWH: Added climatology_period_code field (for anomaly calculations)to period_info() metadata and updated documentation
     Oct 09, 2026 - KJWH: get_period_sets will default to the climatology_range if the input files are out of range of the default climatology_range
+    Oct 14, 2026 - KJWH: extract_period_code now returns a climatology range if applicable
+                         Added get_default_climatology_range() to return the default climatology range (1991-2020) and updated get_period_sets to use this default if not provided 
+                         Using the new start years added to the dataset_defaults() to clamp the start year of the climatology_range if the input files are out of range of the default climatology_range
 
 """
+
+def get_default_climatology_range(dataset=None):
+    """
+    Returns the default baseline year range used for climatologies and anomalies.
+    If a dataset is provided, clamps the start year to the dataset's first available year.
+    """
+    from utilities import dataset_defaults
+    base_start, base_end = (1991, 2020)
+    
+    if dataset:
+        defaults = dataset_defaults()
+        ds_info = defaults.get(dataset.upper())
+        if ds_info and len(ds_info) >= 4:
+            ds_start = ds_info[3]
+            return (max(base_start, ds_start), base_end)
+            
+    return (base_start, base_end)
 
 def get_token_lengths():
     """
@@ -128,6 +149,9 @@ def period_info(help=False):
 
         'D3':     ('day3','D',False,True, False,'P3D',None,'D3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 3-day','Day3', 'DOY'),
         'DD3':    ('day3','D3',True, True, False,'P3D',None,'DD3_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 3-day data','Day3', 'DOY'),
+
+        'D7':     ('day7','D',False,True, False,'P7D',None,'D7_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 7-day','Day7', 'DOY'),
+        'DD7':    ('day7','D7',True, True, False,'P7D',None,'DD7_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 7-day data','Day7', 'DOY'),
 
         'D8':     ('day8','D',False,True, False,'P8D',None,'D8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Running 8-day','Day8', 'DOY'),
         'DD8':    ('day8','D8',True, True, False,'P8D',None,'DD8_YYYYMMDD_YYYYMMDD','YYYYMMDD',2,'Range of running 8-day data','Day8', 'DOY'),
@@ -417,12 +441,18 @@ def extract_period_code(filenames):
                 elif part.startswith("YYYY"):  # YYYYMM, YYYYWW, YYYYMMDD
                     years.append(int(seg[:4]))
 
+            # --- Extract climatology range if applicable ---
+            clim_range = None
+            if info.get("is_climatology") and len(years) >= 2:
+                clim_range = (years[0], years[-1])
+
             # --- 3. Return the fully populated dictionary ---
             return {
                 "code": code,
                 "full_period": base,
                 "segments": segs,
                 "years": years,
+                "climatology_range": clim_range,
             }
     
     # If no regex match is found
@@ -1663,7 +1693,8 @@ def get_period_sets(
         dates=None, 
         date_format="%Y%m%d",
         range_by_year=False,
-        climatology_range=(1991,2020),
+        climatology_range=None,
+        dataset=None,
         daterange=None,
         diagnostics=False
 ):
@@ -1783,7 +1814,7 @@ def get_period_sets(
     """
     # --- Establish climatology range  if the input is None ---
     if climatology_range is None:
-        climatology_range = (1991, 2020)
+        climatology_range = get_default_climatology_range()
     
     # --- Normalize period_code to a single code (not iterable) ---
     if isinstance(period_code, str):
@@ -1955,12 +1986,24 @@ def get_period_sets(
     
     # Clamp data_start_year to climatology range
     if target_info['is_climatology']: 
-        y_clim_start, y_clim_end = climatology_range
-    
-        perinfo = extract_period_code([tok for _,_,tok,_ in spans])
-
-        yearslists = [info['years'] for info in perinfo]
         
+        # Try to infer dataset if not explicitly provided
+        if not dataset and files:
+            try:
+                base_name = os.path.basename(files[0])
+                parts = base_name.split('-')
+                if len(parts) > 1:
+                    dataset = parts[1].upper()
+            except Exception:
+                pass
+                
+        # Use the centralized generator to handle defaults and clamping
+        if climatology_range is None:
+            climatology_range = get_default_climatology_range(dataset=dataset)
+    
+        y_clim_start, y_clim_end = climatology_range
+        perinfo = extract_period_code([tok for _,_,tok,_ in spans])
+        yearslists = [info['years'] for info in perinfo]    
         all_years = vectorized_spans["years"]
 
         if len(all_years) > 0:
