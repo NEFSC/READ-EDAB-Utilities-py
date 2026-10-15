@@ -58,7 +58,6 @@ def product_defaults():
         'MOANA': ('MOANA','PACE','SOURCE'),
         'CARBON': ('CARBON','PACE','SOURCE'),
         'FLH': ('FLH','PACE','SOURCE'),
-        'CHL_TEMP': ('CHL1','GLOBCOLOUR','SOURCE'),
         'PIC': ('PIC','GLOBCOLOUR','SOURCE'),
         'POC': ('POC','GLOBCOLOUR','SOURCE'),
         'SST_TEMP': ('SST','ACSPONRT', 'SOURCE'),
@@ -66,6 +65,11 @@ def product_defaults():
         'SST_FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCTS'),
         'FRONTS': ('SST_FRONTS','ACSPO', 'PRODUCTS'),
         'BTEMP': ('BTEMP','GLORYS','SOURCE'),
+        'TEMP': ('TEMP','GLORYS','SOURCE'),
+        'BSAL':('BSAL','GLORYS','SOURCE'),
+        'SSAL':('SSAL','GLORYS','SOURCE'),
+        'MLD':('MLD','NA','SOURCE'),
+        'MLT':('MLT','GLORYS','SOURCE'),
         'DO': ('DO','MOM6','SOURCE'),
         'ARAG': ('ARAG','MOM6','SOURCE')
     }
@@ -139,6 +143,7 @@ def netcdf_product_defaults():
         'GLORYS': {
             'BTEMP': 'bottomT',
             'BSAL': 'bottomS',
+            'MLT': 'mlotst'
         },
         'TESTDATASET': {
             'SST_MEAN': 'sst_mean',
