@@ -117,6 +117,7 @@ def build_stats_map(prod, period, output_dir=None,
         2) Finding valid daily input files.
         3) Generating a period map via get_period_sets().
         4) Building a stats processing map and evaluating file 'freshness' (mtime) to determine if reprocessing is required.
+        5) Built in functionality to work with NRT and RAN processing level files
 
     Input Parameters:
         prod (str): The logical product name to process (e.g., 'SST', 'CHL', 'RRS').
@@ -222,16 +223,32 @@ def build_stats_map(prod, period, output_dir=None,
             if verbose: print(f"⚠️ No input files found for {prod} ({period}). Returning empty map.")
             return {} # Return an empty map so the pipeline cleanly skips it
 
+    # ---------------------------------------------------------
+    # 4 Exclude NRT from Climatologies (unless allow_nrt=True)
+    # ---------------------------------------------------------
+    is_clim = per_info.get("is_climatology", False)
+    allow_nrt = kwargs.get('allow_nrt', False)
+    
+    if is_clim and not allow_nrt:
+        parsed_files = file_parser(files)
+        filtered_files = []
+        for f, p in zip(files, parsed_files):
+            # Exclude if it came from an _NRT source dir or is a derived -NRT.nc file
+            if p.get('processing_level') == 'NRT' or f.upper().endswith('-NRT.NC'):
+                if verbose: print(f"  🚫 Excluding NRT file from climatology: {os.path.basename(f)}")
+                continue
+            filtered_files.append(f)
+        files = filtered_files
+        
+        if not files:
+            if verbose: print(f"⚠️ All available inputs were NRT and excluded for climatology {prod} ({period}).")
+            return {}
+
     fp = file_parser(files[0])
     ds_name = fp[0].get('dataset') 
 
-    if not files:
-        if verbose:
-            print(f"No {input_per} files found for {dataset}:{prod}")
-        return {}
-
     # ---------------------------------------------------------
-    # 4. Build period map using get_period_sets()
+    # 5. Build period map using get_period_sets()
     # ---------------------------------------------------------
     period_sets = get_period_sets(period, files=files, daterange=daterange, climatology_range=climatology_range,dataset=ds_name)
     pm = period_sets["period_map"]
@@ -239,27 +256,33 @@ def build_stats_map(prod, period, output_dir=None,
     # 4a. Get the output data_type (STATS/CLIM) based on the period
     if data_type is None:
         try:
-            p_info = get_period_info(period)
-            data_type = "CLIM" if p_info.get("is_climatology") else "STATS"
+            data_type = "CLIM" if is_clim else "STATS"
             if verbose:
                 print(f"Inferred data_type='{data_type}' based on period '{period}'.")
         except Exception as e:
-            data_type = "STATS"  # Default to STATS if inference fails
+            data_type = "STATS"  
             if verbose:
                 print(f"Could not infer data_type for period '{period}': {e}")
 
     # ---------------------------------------------------------
-    # 4. Build stats map with mtime comparison
+    # 6. Build stats map with mtime comparison
     # ---------------------------------------------------------
     stats_map = {}
     total_tasks = len(pm)
     up_to_date_count = 0
+    nrt_replaced_count = 0
 
     for out_period, info in pm.items():
         input_files = info["input_files"]
 
+        # Determine if the output needs the NRT suffix
+        parsed_inputs = file_parser(input_files)
+        has_nrt = any(p.get('processing_level') == 'NRT' or f.upper().endswith('-NRT.NC') for f, p in zip(input_files, parsed_inputs))
+
         # Build output filename
-        out_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{data_type}.nc"
+        out_suffix = f"{data_type}-NRT" if has_nrt else data_type
+        out_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{out_suffix}.nc"
+
         if verbose: print(f"Processing {out_period}: {len(input_files)} input files -> {out_name}")
         out_path = os.path.join(output_dir, out_name)
 
@@ -274,7 +297,6 @@ def build_stats_map(prod, period, output_dir=None,
                 # Check 2: Does the internal list of files perfectly match our current list?
                 try:
                     # Use xarray to quickly peek at the attributes (no decoding saves time/RAM)
-                    import xarray as xr
                     with xr.open_dataset(out_path, engine='netcdf4', decode_times=False, decode_coords=False) as existing_ds:
                         stored_files_str = existing_ds.attrs.get('source_files', '')
                         
@@ -295,6 +317,16 @@ def build_stats_map(prod, period, output_dir=None,
 
         if is_up_to_date:
             up_to_date_count += 1
+
+        # Look for obsolete NRT files
+        obsolete_nrt_file = None
+        if not has_nrt:
+            nrt_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{data_type}-NRT.nc"
+            nrt_path = os.path.join(output_dir, nrt_name)
+            if os.path.exists(nrt_path):
+                nrt_replaced_count += 1
+                # Flag the file for deletion by the execution pipeline
+                obsolete_nrt_file = nrt_path
         
         if verbose:
             status = "✓ up-to-date" if is_up_to_date else "⏳ needs update"
@@ -304,7 +336,8 @@ def build_stats_map(prod, period, output_dir=None,
             "inputs": input_files,
             "output": out_path,
             "is_up_to_date": is_up_to_date,
-            "file_exists": os.path.exists(out_path)
+            "file_exists": os.path.exists(out_path),
+            "obsolete_nrt_file": obsolete_nrt_file
         }
 
     # ---------------------------------------------------------
@@ -318,6 +351,7 @@ def build_stats_map(prod, period, output_dir=None,
     print(f"📁 Output Dir: {output_dir}")
     print(f"✅ Up-to-date:  {up_to_date_count}/{total_tasks} ({completion_pct:.1f}%)")
     print(f"⏳ To process:  {needs_update_count} files")
+    if nrt_replaced_count > 0: print(f"🗑️ NRT replaced: {nrt_replaced_count} files")
     print("-" * 60)
     
     return stats_map
@@ -1038,6 +1072,11 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                     # 1. Existing file skipped
                     if task['is_up_to_date']:
                         if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
+                        # Delete obsolete NRT file if the pure RAN file is already up-to-date
+                        obsolete = task.get('obsolete_nrt_file')
+                        if obsolete and os.path.exists(obsolete):
+                            os.remove(obsolete)
+                            if should_log: print(f"  🗑️ Deleted obsolete NRT file: {os.path.basename(obsolete)}")
                         skipped_tasks.append(out_period)
 
                     # 2 & 3. Queued for creation or replacement
@@ -1066,6 +1105,12 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                             if corrupt_files: all_corrupt_inputs.update(corrupt_files)
 
                             if success: 
+                                # Delete obsolete NRT file if applicable
+                                obsolete = task.get('obsolete_nrt_file')
+                                if obsolete and os.path.exists(obsolete):
+                                    os.remove(obsolete)
+                                    if should_log: print(f"  🗑️ Deleted obsolete NRT file: {os.path.basename(obsolete)}")
+
                                 if task['file_exists']:
                                     replaced_tasks.append(out_period)
                                     if should_log: print(f"  ✅ Replaced: {file_name}")
@@ -1105,6 +1150,12 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                                 success, corrupt_files = future.result()
                                 if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
                                 if success:
+                                    # Delete obsolete NRT file if applicable
+                                    obsolete = task.get('obsolete_nrt_file')
+                                    if obsolete and os.path.exists(obsolete):
+                                        os.remove(obsolete)
+                                        if should_log: print(f"  🗑️ [Parallel] Deleted obsolete NRT file: {os.path.basename(obsolete)}")
+
                                     if task['file_exists']:
                                         replaced_tasks.append(out_period)
                                         if should_log: print(f"  ✅ [Parallel] Replaced: {file_name}")
