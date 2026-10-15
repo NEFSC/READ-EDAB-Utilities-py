@@ -35,6 +35,8 @@ Modification History
                             • It validates the dataset by matching it with the default datasets 
     Oct 09, 2026 - KJWH: Updated resolve_dataset_grid() to remove data_type filtering and strictly filter by period codes only.
     Oct 14, 2026 - KJWH: Add the dataset start year to the dataset_defaults() to allow for proper clamping of the climatology_range
+    Oct 15, 2026 - KJWH: Added a processing_level to the dataset_grid to distinguish between near-real-time (NRT) and reanalysis (RAN) files
+                         Updated resolve_dataset_grid and parse_dataset_info to handle the processing_level
                          
 
 """
@@ -296,6 +298,7 @@ def resolve_dataset_grid(dataset_products, prod,
                         data_type=None,
                         default_grid=None,
                         period=None,
+                        processing_level=None,
                         verbose=False,
                         provenance_log=None):
     """
@@ -312,6 +315,7 @@ def resolve_dataset_grid(dataset_products, prod,
         prod (str): The product name to locate (e.g., 'CHL', 'PSC').
         default_grid (str, optional): Default map folder name (e.g., 'GLOBAL_4KM_DAILY'). Used for provenance logging.
         period (str, optional): Period code (e.g., 'D', 'M', 'D3'). 
+        processing_level (str, optional): 'NRT' or 'RAN' to distinguish SOURCE data streams.
         verbose (bool, optional): If True, prints resolution steps and decisions.
         provenance_log (dict, optional): Dictionary to append resolution steps for debugging and audit trails.
 
@@ -330,27 +334,36 @@ def resolve_dataset_grid(dataset_products, prod,
     # 1. Gather all grids containing the product
     candidate_grids = []
     for dtype in dataset_products:
+        if data_type and dtype != data_type:
+            continue
         for grid_key, prod_dict in dataset_products[dtype].items():
             if prod in prod_dict:
-                candidate_grids.append((grid_key, prod_dict[prod]))
+                candidate_grids.append((grid_key, prod_dict[prod], dtype))
 
     if not candidate_grids:
         return None, None
     
-    # 2. Prioritize the default_grid if provided    if default_grid:
-    preferred_grids = [g for g in candidate_grids if default_grid in g[0]]
-    if preferred_grids:
-        candidate_grids = preferred_grids
-        if provenance_log is not None:
-            provenance_log['resolution_steps'].append(f"Filtered candidates by default_grid='{default_grid}'")
+    # 2. Prioritize the default_grid if provided
+    if default_grid:
+        preferred_grids = [g for g in candidate_grids if default_grid in g[0]]
+        if preferred_grids:
+            candidate_grids = preferred_grids
+            if provenance_log is not None:
+                provenance_log['resolution_steps'].append(f"Filtered candidates by default_grid='{default_grid}'")
                             
     # 3. STRICTLY filter by period (if provided)
-    elif period:
+    if period:
         p_info = get_period_info(period) if period else {}
         target_suffix = p_info.get('folder_name', period).upper()
         
-        # e.g., filter to only grids ending in _DAILY or _MONTHLY
-        period_grids = [g for g in candidate_grids if g[0].endswith(f"_{target_suffix}")]
+        period_grids = []
+        for g in candidate_grids:
+            grid_name = g[0]
+            # Match standard ending OR ending followed by _NRT / _RAN
+            if grid_name.endswith(f"_{target_suffix}") or \
+               grid_name.endswith(f"_{target_suffix}_NRT") or \
+               grid_name.endswith(f"_{target_suffix}_RAN"):
+                period_grids.append(g)
         
         if period_grids:
             candidate_grids = period_grids
@@ -358,21 +371,45 @@ def resolve_dataset_grid(dataset_products, prod,
             # The product exists, but NOT for this period. Return None to trigger creation.
             return None, None
 
-    # 4. Handle any remaining ambiguity
-    if len(candidate_grids) > 1:
-        # Tie-breaker: default to DAILY if no specific period was requested
-        daily_grids = [g for g in candidate_grids if g[0].endswith('_DAILY')]
-        if daily_grids:
-            return daily_grids[0]
+    # 4. Filter by processing_level (NRT or RAN) ONLY for SOURCE files
+    if processing_level:
+        level_grids = []
+        for g in candidate_grids:
+            grid_name, path, dtype = g
+            if dtype == 'SOURCE':
+                if grid_name.endswith(f"_{processing_level.upper()}"):
+                    level_grids.append(g)
+            else:
+                # Ignore processing_level filtering for PRODUCTS
+                level_grids.append(g)
+                
+        if level_grids:
+            candidate_grids = level_grids
+            if provenance_log is not None:
+                provenance_log['resolution_steps'].append(f"Filtered candidates by processing_level='{processing_level}'")
 
-        # Raise an error if it can't be resolved
+    # 5. Handle any remaining ambiguity
+    if len(candidate_grids) > 1:
+        # Tie-breaker 1: Default to RAN if both exist for SOURCE and neither was requested
+        ran_grids = [g for g in candidate_grids if g[2] == 'SOURCE' and g[0].endswith('_RAN')]
+        if ran_grids:
+            candidate_grids = ran_grids
+
+    if len(candidate_grids) > 1:
+        # Tie-breaker 2: default to DAILY if no specific period was requested
+        daily_grids = [g for g in candidate_grids if '_DAILY' in g[0]]
+        if daily_grids:
+            candidate_grids = [daily_grids[0]]
+
+    if len(candidate_grids) > 1:
+        # Raise an error if it still can't be resolved
         grids_found = [g[0] for g in candidate_grids]
-        raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple grids ({grids_found}). Please specify dataset_grid.")
+        raise ValueError(f"❌ Ambiguous product location: '{prod}' found in multiple grids ({grids_found}). Please specify dataset_grid or processing_level.")
     
-    # 5. Return the single exact match
+    # 6. Return the single exact match (dropping the dtype helper item)
     if verbose:
         print(f"📦 Auto-resolved dataset_grid → {candidate_grids[0][0]}")
-    return candidate_grids[0]
+    return candidate_grids[0][:2]
 
 def parse_dataset_info(pathlist, base=None, verbose=False):
     """
@@ -432,11 +469,23 @@ def parse_dataset_info(pathlist, base=None, verbose=False):
                 print(f"--------------------------------\n")
 
             if parts and parts[0].upper() in dataset_info:
+                dataset_type = parts[2] if len(parts) > 2 else "UNKNOWN"
+                dataset_grid = parts[3] if len(parts) > 3 else "UNKNOWN"
+
+                # Extract processing level for SOURCE datasets
+                processing_level = "UNKNOWN"
+                if dataset_type == "SOURCE" and dataset_grid != "UNKNOWN":
+                    if dataset_grid.endswith("_NRT"):
+                        processing_level = "NRT"
+                    elif dataset_grid.endswith("_RAN"):
+                        processing_level = "RAN"
+
                 dir_cache[dirname] = {
                     "dataset": parts[0] if len(parts) > 0 else "UNKNOWN",
                     "version": parts[1] if len(parts) > 1 else "UNKNOWN",
-                    "dataset_type": parts[2] if len(parts) > 2 else "UNKNOWN",
-                    "dataset_grid": parts[3] if len(parts) > 3 else "UNKNOWN",
+                    "dataset_type": dataset_type,
+                    "dataset_grid": dataset_grid,
+                    "processing_level": processing_level,
                     "product": parts[4] if len(parts) > 4 else "UNKNOWN"
                 }
             else:
@@ -445,6 +494,7 @@ def parse_dataset_info(pathlist, base=None, verbose=False):
                     "version": "UNKNOWN",
                     "dataset_type": "UNKNOWN",
                     "dataset_grid": "UNKNOWN",
+                    "processing_level": "UNKNOWN",
                     "product": "UNKNOWN"
                 }
         results.append(dir_cache[dirname])

@@ -117,6 +117,7 @@ def build_stats_map(prod, period, output_dir=None,
         2) Finding valid daily input files.
         3) Generating a period map via get_period_sets().
         4) Building a stats processing map and evaluating file 'freshness' (mtime) to determine if reprocessing is required.
+        5) Built in functionality to work with NRT and RAN processing level files
 
     Input Parameters:
         prod (str): The logical product name to process (e.g., 'SST', 'CHL', 'RRS').
@@ -222,16 +223,32 @@ def build_stats_map(prod, period, output_dir=None,
             if verbose: print(f"⚠️ No input files found for {prod} ({period}). Returning empty map.")
             return {} # Return an empty map so the pipeline cleanly skips it
 
+    # ---------------------------------------------------------
+    # 4 Exclude NRT from Climatologies (unless allow_nrt=True)
+    # ---------------------------------------------------------
+    is_clim = per_info.get("is_climatology", False)
+    allow_nrt = kwargs.get('allow_nrt', False)
+    
+    if is_clim and not allow_nrt:
+        parsed_files = file_parser(files)
+        filtered_files = []
+        for f, p in zip(files, parsed_files):
+            # Exclude if it came from an _NRT source dir or is a derived -NRT.nc file
+            if p.get('processing_level') == 'NRT' or f.upper().endswith('-NRT.NC'):
+                if verbose: print(f"  🚫 Excluding NRT file from climatology: {os.path.basename(f)}")
+                continue
+            filtered_files.append(f)
+        files = filtered_files
+        
+        if not files:
+            if verbose: print(f"⚠️ All available inputs were NRT and excluded for climatology {prod} ({period}).")
+            return {}
+
     fp = file_parser(files[0])
     ds_name = fp[0].get('dataset') 
 
-    if not files:
-        if verbose:
-            print(f"No {input_per} files found for {dataset}:{prod}")
-        return {}
-
     # ---------------------------------------------------------
-    # 4. Build period map using get_period_sets()
+    # 5. Build period map using get_period_sets()
     # ---------------------------------------------------------
     period_sets = get_period_sets(period, files=files, daterange=daterange, climatology_range=climatology_range,dataset=ds_name)
     pm = period_sets["period_map"]
@@ -239,27 +256,33 @@ def build_stats_map(prod, period, output_dir=None,
     # 4a. Get the output data_type (STATS/CLIM) based on the period
     if data_type is None:
         try:
-            p_info = get_period_info(period)
-            data_type = "CLIM" if p_info.get("is_climatology") else "STATS"
+            data_type = "CLIM" if is_clim else "STATS"
             if verbose:
                 print(f"Inferred data_type='{data_type}' based on period '{period}'.")
         except Exception as e:
-            data_type = "STATS"  # Default to STATS if inference fails
+            data_type = "STATS"  
             if verbose:
                 print(f"Could not infer data_type for period '{period}': {e}")
 
     # ---------------------------------------------------------
-    # 4. Build stats map with mtime comparison
+    # 6. Build stats map with mtime comparison
     # ---------------------------------------------------------
     stats_map = {}
     total_tasks = len(pm)
     up_to_date_count = 0
+    nrt_replaced_count = 0
 
     for out_period, info in pm.items():
         input_files = info["input_files"]
 
+        # Determine if the output needs the NRT suffix
+        parsed_inputs = file_parser(input_files)
+        has_nrt = any(p.get('processing_level') == 'NRT' or f.upper().endswith('-NRT.NC') for f, p in zip(input_files, parsed_inputs))
+
         # Build output filename
-        out_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{data_type}.nc"
+        out_suffix = f"{data_type}-NRT" if has_nrt else data_type
+        out_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{out_suffix}.nc"
+
         if verbose: print(f"Processing {out_period}: {len(input_files)} input files -> {out_name}")
         out_path = os.path.join(output_dir, out_name)
 
@@ -274,7 +297,6 @@ def build_stats_map(prod, period, output_dir=None,
                 # Check 2: Does the internal list of files perfectly match our current list?
                 try:
                     # Use xarray to quickly peek at the attributes (no decoding saves time/RAM)
-                    import xarray as xr
                     with xr.open_dataset(out_path, engine='netcdf4', decode_times=False, decode_coords=False) as existing_ds:
                         stored_files_str = existing_ds.attrs.get('source_files', '')
                         
@@ -295,6 +317,16 @@ def build_stats_map(prod, period, output_dir=None,
 
         if is_up_to_date:
             up_to_date_count += 1
+
+        # Look for obsolete NRT files
+        obsolete_nrt_file = None
+        if not has_nrt:
+            nrt_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{data_type}-NRT.nc"
+            nrt_path = os.path.join(output_dir, nrt_name)
+            if os.path.exists(nrt_path):
+                nrt_replaced_count += 1
+                # Flag the file for deletion by the execution pipeline
+                obsolete_nrt_file = nrt_path
         
         if verbose:
             status = "✓ up-to-date" if is_up_to_date else "⏳ needs update"
@@ -303,7 +335,9 @@ def build_stats_map(prod, period, output_dir=None,
         stats_map[out_period] = {
             "inputs": input_files,
             "output": out_path,
-            "is_up_to_date": is_up_to_date
+            "is_up_to_date": is_up_to_date,
+            "file_exists": os.path.exists(out_path),
+            "obsolete_nrt_file": obsolete_nrt_file
         }
 
     # ---------------------------------------------------------
@@ -317,6 +351,7 @@ def build_stats_map(prod, period, output_dir=None,
     print(f"📁 Output Dir: {output_dir}")
     print(f"✅ Up-to-date:  {up_to_date_count}/{total_tasks} ({completion_pct:.1f}%)")
     print(f"⏳ To process:  {needs_update_count} files")
+    if nrt_replaced_count > 0: print(f"🗑️ NRT replaced: {nrt_replaced_count} files")
     print("-" * 60)
     
     return stats_map
@@ -963,7 +998,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
     # Handle logfile auto-generation
     logfile = kwargs.pop('logfile', None)
     if logfile in ["auto", True]:
-        logfile = generate_logfile_path("stats", prods, dataset=dataset, env_dict=env)    
+        logfile = generate_logfile_path("stats", prods=prods, dataset=dataset, env_dict=env)    
 
     original_stdout = sys.stdout # Save the original terminal output
 
@@ -973,9 +1008,10 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         print(f"🟢 PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80)
 
+    should_log = verbose or bool(logfile)
+
     # Use try/finally to GUARANTEE the terminal output is restored, even if the code crashes
     try:
-
         # Normalize inputs
         if isinstance(prods, str): prods = [prods.upper().strip()]
         if periods is None: 
@@ -1004,24 +1040,21 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         parallel_runs = kwargs.pop('parallel_runs', 1) 
         
         # 📋 Initialize an error log for the entire run
-        successful_tasks = []
-        failed_tasks = []
+        total_input_files = 0
         skipped_tasks = []
-        all_corrupt_inputs = set() # Track specific source files that are broken (use "set" to automatically deduplicate corrupt files)
-                
+        replaced_tasks = []
+        created_tasks = []
+        failed_tasks = []
+        all_corrupt_inputs = set()
+
         # Loop through prods
         for prod in prods:
             # Loop through the periods
             for period in periods:
-                if verbose:
-                    print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
+                if should_log: print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
                 
                 # Create stats period map
-                stats_map = build_stats_map(prod, period, 
-                                            dataset=dataset,
-                                            verbose=verbose,
-                                            **kwargs
-                )
+                stats_map = build_stats_map(prod, period, dataset=dataset, verbose=verbose, **kwargs)
                 
                 # --- Error Handling for Empty Maps ---
                 if not stats_map:
@@ -1030,17 +1063,32 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                     print(f"   Check: Is the 'map_subset' ({map_subset}) correct for this dataset?")
                     continue # Move to the next period/product
                 
-                # 🎯 Gather all tasks that actually need to be run
+                # Gather all tasks that actually need to be run
                 tasks_to_run = []
                 for out_period, task in stats_map.items():
+                    total_input_files += len(task['inputs'])
+                    file_name = os.path.basename(task['output'])
+
+                    # 1. Existing file skipped
                     if task['is_up_to_date']:
-                        if verbose: print(f"  ⏭ Skipping {out_period} (Up-to-date)")
+                        if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
+                        # Delete obsolete NRT file if the pure RAN file is already up-to-date
+                        obsolete = task.get('obsolete_nrt_file')
+                        if obsolete and os.path.exists(obsolete):
+                            os.remove(obsolete)
+                            if should_log: print(f"  🗑️ Deleted obsolete NRT file: {os.path.basename(obsolete)}")
                         skipped_tasks.append(out_period)
-                        continue
-                    
-                    if not task['inputs'] or len(task['inputs']) == 0:
-                        if verbose: print(f"  ⚠️ Skipping {out_period}: No source files found for this period.")
-                        continue
+
+                    # 2 & 3. Queued for creation or replacement
+                    elif not task['inputs']:
+                        if should_log: print(f"  ⚠️  Failed: {file_name} (No source files found)")
+                        failed_tasks.append(f"{out_period} (No inputs)")
+                    else:
+                        if task['file_exists']:
+                            if should_log: print(f"  🔄 Queued for Replacement: {file_name} (New inputs detected)")
+                        else:
+                            if should_log: print(f"  🆕 Queued for Creation: {file_name}")
+                        tasks_to_run.append((out_period, task))
                     
                     tasks_to_run.append((out_period, task))
 
@@ -1056,15 +1104,29 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                             
                             if corrupt_files: all_corrupt_inputs.update(corrupt_files)
 
-                            if success: successful_tasks.append(out_period)
-                            else: failed_tasks.append(out_period)
+                            if success: 
+                                # Delete obsolete NRT file if applicable
+                                obsolete = task.get('obsolete_nrt_file')
+                                if obsolete and os.path.exists(obsolete):
+                                    os.remove(obsolete)
+                                    if should_log: print(f"  🗑️ Deleted obsolete NRT file: {os.path.basename(obsolete)}")
+
+                                if task['file_exists']:
+                                    replaced_tasks.append(out_period)
+                                    if should_log: print(f"  ✅ Replaced: {file_name}")
+                                else:
+                                    created_tasks.append(out_period)
+                                    if should_log: print(f"  ✅ Created: {file_name}")
+                            else: 
+                                failed_tasks.append(f"{out_period} (Processing failed)")
+                                if should_log: print(f"  ❌ Error creating: {file_name}")
                         except Exception as e:
                             failed_tasks.append(f"{out_period}: {str(e)}")
-                            print(f"\n❌ Error on {out_period}:")
+                            if should_log: print(f"\n❌ Error on {out_period}:")
                             if debug:
                                 traceback.print_exc() 
                             else:
-                                print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
+                                if should_log: print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
                         
                         if verbose: print(f"  🛠 Finished attempt for {out_period}")
                 
@@ -1082,50 +1144,50 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                         # Collect results as they finish (not necessarily in order!)
                         for future in concurrent.futures.as_completed(future_to_period):
                             out_period = future_to_period[future]
+                            task = stats_map[out_period]
+                            file_name = os.path.basename(task['output'])
                             try:
                                 success, corrupt_files = future.result()
                                 if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
                                 if success:
-                                    successful_tasks.append(out_period)
-                                    if verbose: print(f"  ✅ [Parallel] Finished {out_period}")
+                                    # Delete obsolete NRT file if applicable
+                                    obsolete = task.get('obsolete_nrt_file')
+                                    if obsolete and os.path.exists(obsolete):
+                                        os.remove(obsolete)
+                                        if should_log: print(f"  🗑️ [Parallel] Deleted obsolete NRT file: {os.path.basename(obsolete)}")
+
+                                    if task['file_exists']:
+                                        replaced_tasks.append(out_period)
+                                        if should_log: print(f"  ✅ [Parallel] Replaced: {file_name}")
+                                    else:
+                                        created_tasks.append(out_period)
+                                        if should_log: print(f"  ✅ [Parallel] Created: {file_name}")
                                 else:
-                                    failed_tasks.append(out_period)
+                                    failed_tasks.append(f"{out_period} (Processing failed)")
+                                    if should_log: print(f"  ❌ [Parallel] Error creating: {file_name}")
                             except Exception as e:
                                 failed_tasks.append(f"{out_period}: {str(e)}")
-                                print(f"\n❌ [Parallel] Error on {out_period}:\n  ⚠️  {e}")
-                                if debug:
-                                    traceback.print_exc()
-                                else:
-                                    print(f"  ⚠️  {e}")
+                                if should_log: print(f"  ❌ [Parallel] Error creating: {file_name} - {str(e)}")
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
-        print("🏁 PIPELINE FINISHED SUMMARY")
+        print("🏁 STATS PIPELINE FINISHED SUMMARY")
         print("="*60)
+        print(f"📥 Input files found:       {total_input_files}")
+        print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
+        print(f"🔄 Existing files replaced: {len(replaced_tasks)}")
+        print(f"🆕 New files created:       {len(created_tasks)}")
+        print(f"❌ Errors/Not created:      {len(failed_tasks)}")
         
-        total_processed = len(successful_tasks) + len(failed_tasks)
+        if failed_tasks:
+            print(f"\n📂 FAILED TASKS DETAILS:")
+            for task in failed_tasks:
+                print(f"  • {task}")
 
-        if not failed_tasks and not all_corrupt_inputs:
-            print("✨ Success! All files processed with 0 errors.")
-            print(f"✅ Successfully processed: {len(successful_tasks)}")
-            print(f"⏭  Skipped (up-to-date): {len(skipped_tasks)}")
-        else:
-            print(f"⚠️ Pipeline finished with ERRORS.")
-            print(f"✅ Successfully processed: {len(successful_tasks)}")
-            print(f"⏭  Skipped (up-to-date): {len(skipped_tasks)}")
-            print(f"❌ Failed tasks: {len(failed_tasks)}")
-            
-            if failed_tasks:
-                print(f"\n📂 FAILED TASKS (Output not created):")
-                for task in failed_tasks:
-                    print(f"  • {task}")
-
-            if all_corrupt_inputs:
-                print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED ({len(all_corrupt_inputs)}):")
-                for err in sorted(all_corrupt_inputs):
-                    print(f"  • {os.path.basename(err)}")
-                print("\n💡 ACTION: Delete the corrupt files listed above and re-run the pipeline.")
-        
+        if all_corrupt_inputs:
+            print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED ({len(all_corrupt_inputs)}):")
+            for err in sorted(all_corrupt_inputs):
+                print(f"  • {os.path.basename(err)}")
         print("="*60)
     finally:
         # Close the Log File and restore the terminal

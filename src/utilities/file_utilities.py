@@ -44,6 +44,10 @@ Modification History
                          Added climatology_range to file_parser output if applicable
                          Updated get_filepath to handle the fourth (start year) value returned by dataset_defaults()
     Oct 15, 2026 - KJWH: Changed verbose_trace to debug_trace and added debug flag to get_filepath and get_prod_files
+                         Implemented updates to work with the new processing_level to distinguish between near-real-time (NRT) and reanalysis (RAN) files
+                         get_filepath defaults to the RAN processing_level
+                         get_prod_files by default will look for both RAN and NRT files and retain the RAN files if there are duplicate dates
+
     
 
 """
@@ -96,6 +100,7 @@ def file_parser(files):
         directory, full_name = os.path.split(file_path)
         file_name, extension = os.path.splitext(full_name)
         idataset = dataset_metadata[i]
+        
         file_entry = {
             'full_file_path': file_path,
             'directory': directory,
@@ -298,8 +303,15 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
     data_type = kwargs.get('data_type')
     if data_type: data_type = data_type.upper()
 
-    debug_trace(f"Config: dataset_grid={dataset_grid}, map_subset={map_subset}, data_type={data_type}, dataset_type={dataset_type}")
+    # Extract processing_level and default to RAN only for SOURCE datasets
+    processing_level = kwargs.get('processing_level')
+    if processing_level:
+        processing_level = processing_level.upper()
+    elif dataset_type == 'SOURCE':
+        processing_level = 'RAN'
 
+    debug_trace(f"Config: dataset_grid={dataset_grid}, map_subset={map_subset}, data_type={data_type}, dataset_type={dataset_type}, processing_level={processing_level}")
+    
     dataset_info_map = dataset_defaults()
     _, default_grid, default_product, _ = dataset_info_map[dataset]
     
@@ -319,6 +331,7 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         prod=actual_prod, 
         default_grid=dataset_grid or default_grid,
         period=period,
+        processing_level=processing_level,
         data_type=data_type,
         verbose=debug
     )
@@ -458,57 +471,105 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
             except Exception as e:
                 debug_trace(f"Could not infer data_type for period '{period}': {e}")
 
+    # Determine dataset_type to know if it's SOURCE
+    prod_info_map = product_defaults()
+    if prod in prod_info_map:
+        default_type = prod_info_map[prod][2]
+    else:
+        default_type = 'UNKNOWN'
+    dataset_type = kwargs.get('dataset_type', default_type).upper()
 
-    # 2. Get the directory path (Passing all kwargs down)
-    try:
-        path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, debug=debug, **kwargs)
-    except (FileNotFoundError, ValueError) as e:
-        debug_trace(f"Path resolution failed: {e}")
-        path = None
-    
-    # 3. Handle fallback logic safely
-    if (not path or not os.path.isdir(path)) and kwargs.get('map_subset'):
-        # Prevent falling back to GLOBAL if we are explicitly looking for a SOURCE subset
-        if path and '/SOURCE/' in path.upper():  # <--- Updated condition
-            debug_trace(f"Subset directory not found. Skipping fallback to base grid to enforce SOURCE subset match.")
-            path = None  # <--- Added to force it to fail cleanly below
-        else:
-            debug_trace(f"Subset directory not found. Falling back to base grid...")
-            fallback_kwargs = kwargs.copy()
-            fallback_kwargs.pop('map_subset')
-            # Wrap the fallback call to catch the infinite loop here as well
-            try:
-                path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, debug=debug, **fallback_kwargs)
-            except (FileNotFoundError, ValueError) as e:
-                debug_trace(f"Fallback path resolution failed: {e}")
-                path = None
+    # 2. Determine processing levels to search
+    processing_level = kwargs.get('processing_level')
+    if dataset_type == 'SOURCE' and not processing_level:
+        levels_to_search = ['RAN', 'NRT']
+        debug_trace(f"SOURCE dataset with no processing_level specified. Searching both RAN and NRT.")
+    else:
+        levels_to_search = [processing_level]
+
+    search_paths = []
+
+    # 3. Get directory paths for all requested processing levels
+    for lvl in levels_to_search:
+        current_kwargs = kwargs.copy()
+        if lvl:
+            current_kwargs['processing_level'] = lvl
             
-    # 4. Catch empty paths before globbing
-    if not path or not (isinstance(path, str) and os.path.isdir(path)):
-        debug_trace(f"⚠ Directory does not exist: {path}")
+        try:
+            path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, debug=debug, **current_kwargs)
+        except (FileNotFoundError, ValueError) as e:
+            debug_trace(f"Path resolution failed for level {lvl}: {e}")
+            path = None
+
+
+   # Handle fallback logic safely
+        if (not path or not os.path.isdir(path)) and current_kwargs.get('map_subset'):
+            # Prevent falling back to GLOBAL if we are explicitly looking for a SOURCE subset
+            if path and '/SOURCE/' in path.upper():  
+                debug_trace(f"Subset directory not found. Skipping fallback to base grid to enforce SOURCE subset match.")
+                path = None  
+            else:
+                debug_trace(f"Subset directory not found. Falling back to base grid...")
+                fallback_kwargs = current_kwargs.copy()
+                fallback_kwargs.pop('map_subset')
+                try:
+                    path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, debug=debug, **fallback_kwargs)
+                except (FileNotFoundError, ValueError) as e:
+                    debug_trace(f"Fallback path resolution failed: {e}")
+                    path = None
+
+        if path and isinstance(path, str) and os.path.isdir(path):
+            if path not in search_paths:
+                search_paths.append(path)
+
+    # Catch empty paths before globbing
+    if not search_paths:
+        debug_trace(f"⚠ No valid directories found.")
         return []
 
-    # 5. Build the search pattern
-    if "/SOURCE/" in path:
-        search_pattern = "*.nc"
-        debug_trace("SOURCE folder detected. Dropping period prefix for file search.")
-    else:
-        if data_type:
-            # Targets format: M_200005-ACSPO-SST-NWA-STATS.nc
-            search_pattern = f"{period}_*-{data_type.upper()}*.nc"
-            debug_trace(f"data_type specified. Restricting file search to '-{data_type.upper()}.nc'")
+    nc_files = []
+    for path in search_paths:
+        # 4. Build the search pattern
+        if "/SOURCE/" in path:
+            search_pattern = "*.nc"
+            debug_trace("SOURCE folder detected. Dropping period prefix for file search.")
         else:
-            search_pattern = f"{period}_*.nc"
-    
-    if verbose: print(f"Searching for '{search_pattern}' in: {path}")
+            if data_type:
+                # Targets format: M_200005-ACSPO-SST-NWA-STATS.nc
+                search_pattern = f"{period}_*-{data_type.upper()}*.nc"
+                debug_trace(f"data_type specified. Restricting file search to '-{data_type.upper()}.nc'")
+            else:
+                search_pattern = f"{period}_*.nc"
+        
+        if verbose: print(f"Searching for '{search_pattern}' in: {path}")
+        found_files = glob.glob(os.path.join(path, search_pattern))
+        nc_files.extend(found_files)
 
-    # 6. Glob the files
-    nc_files = glob.glob(os.path.join(path, search_pattern))
     if not nc_files:
         if verbose: print("⚠ No .nc files found.")
         return []
 
-    # 7. Subset by date range if provided
+    # 5. Deduplicate SOURCE files if multiple paths were searched (i.e. RAN and NRT combo)
+    if dataset_type == 'SOURCE' and len(search_paths) > 1:
+        debug_trace("Deduplicating files across RAN and NRT, preferring RAN...")
+        file_dates = get_source_file_dates(nc_files, format="yyyymmdd")
+        unique_files = {}
+        
+        for f, f_date in zip(nc_files, file_dates):
+            if f_date is None:
+                # If date parsing fails, use full path as key to prevent discarding
+                unique_files[f] = f
+            else:
+                if f_date in unique_files:
+                    # Prefer RAN over NRT if duplicate date exists
+                    if '_RAN' in f:
+                        unique_files[f_date] = f
+                else:
+                    unique_files[f_date] = f
+                    
+        nc_files = list(unique_files.values())
+
+    # 6. Subset by date range if provided
     daterange = kwargs.get('daterange')
     if daterange:
         std_daterange = get_daterange(daterange)
@@ -516,6 +577,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
             start_str = str(daterange[0]).replace("-", "")
             end_str = str(daterange[1]).replace("-", "")
             
+            # Extract dates again because indexes may have changed after deduplication
             file_dates = get_source_file_dates(nc_files, format="yyyymmdd")
             
             filtered_files = []
@@ -528,5 +590,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
             nc_files = filtered_files
             
     if verbose: print(f"📦 Found {len(nc_files)} files.")
-    nc_files.sort()
+    # Sort by the filename (basename) rather than the full directory path 
+    # to ensure NRT and RAN files are interleaved chronologically.
+    nc_files.sort(key=lambda f: os.path.basename(f))
     return nc_files
