@@ -156,6 +156,7 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
 
      # Build mapping for dates present in CHL and all other inputs
     psc_data_map = {}
+    up_to_date_count = 0  # Initialize the tracker
     for date in target_dates:
         if date in chl_map and date in sst_map:
             chl_path = chl_map[date]
@@ -171,15 +172,22 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
                 is_up_to_date = False
 
             if is_up_to_date:
-                print(f"✅ PSC is current for {date}")
+                up_to_date_count += 1  # Increment for existing files
+                if verbose: print(f"✅ PSC is current for {date}")
             else:
-                print(f"⏳ Need to process PSC for {date}")
+                if verbose: print(f"⏳ Need to process PSC for {date}")
 
             psc_data_map[date] = (chl_path, sst_path, psc_path, is_up_to_date)
         else:
-            print(f"⚠ Missing data for {date}: CHL {'✅' if date in chl_map else '❌'}  SST {'✅' if date in sst_map else '❌'} ")
+            if verbose: print(f"⚠ Missing data for {date}: CHL {'✅' if date in chl_map else '❌'}  SST {'✅' if date in sst_map else '❌'} ")
 
-    print(f"📅 Mapped {len(psc_data_map)} dates with complete product files.")
+    # --- FINAL MAP SUMMARY ---
+    needs_update_count = len(psc_data_map) - up_to_date_count
+    print("-" * 60)
+    print(f"📊 PHYTOPLANKTON SIZE CLASS SUMMARY: PSC | DAILY | {map_subset or 'GLOBAL'}")
+    print(f"✅ Up-to-date:  {up_to_date_count}/{len(psc_data_map)}")
+    print(f"⏳ To process:  {needs_update_count} files")
+    print("-" * 60)
     return psc_data_map
 
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -359,7 +367,8 @@ def run_psc_pipeline(chl_dataset=None,
                     daterange=None,
                     map_subset='NES',
                     overwrite=False,
-                    verbose=True,
+                    verbose=False,
+                    debug=False,
                     logfile=None
                     ):
     """
@@ -511,9 +520,13 @@ def run_psc_pipeline(chl_dataset=None,
                 created_tasks.append(date)
                 if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
 
+                pass
             except Exception as e:
                 failed_tasks.append(f"{date}: {str(e)}")
                 if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {e}")
+                if debug:
+                    import traceback
+                    traceback.print_exc()
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)

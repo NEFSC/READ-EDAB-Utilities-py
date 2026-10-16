@@ -151,6 +151,8 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
     #output_dir = make_product_output_dir('CHL','PPD',dataset=chl_dataset,subset=subset)
     output_dir = get_filepath('PPD',dataset=chl_dataset,map_subset=map_subset,getfilepath=True,make_dir=True)
     ppd_map = {}
+    up_to_date_count = 0
+
     for date in chl_dates:
         filename = f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_grid']}-PPD.nc"
         ppd_map[date] = os.path.join(output_dir, filename)
@@ -188,15 +190,22 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
                 is_up_to_date = False
 
             if is_up_to_date:
-                print(f"✅ PP is current for {date}")
+                up_to_date_count += 1
+                if verbose: print(f"✅ PP is current for {date}")
             else:
-                print(f"⏳ Need to process PP for {date}")
+                if verbose: print(f"⏳ Need to process PP for {date}")
 
             pp_data_map[date] = (chl_path, sst_path, par_path, ppd_path, is_up_to_date)
         else:
-            print(f"⚠ Missing data for {date}: CHL {'✅' if date in chl_map else '❌'}  SST {'✅' if date in sst_map else '❌'}  PAR {'✅' if date in par_map else '❌'}")
+            if verbose: print(f"⚠ Missing data for {date}: CHL {'✅' if date in chl_map else '❌'}  SST {'✅' if date in sst_map else '❌'}  PAR {'✅' if date in par_map else '❌'}")
 
-    print(f"📅 Mapped {len(pp_data_map)} dates with complete product files.")
+    # --- FINAL MAP SUMMARY ---
+    needs_update_count = len(pp_data_map) - up_to_date_count
+    print("-" * 60)
+    print(f"📊 PRIMARY PRODUCTIVITY SUMMARY: PPD | DAILY | {map_subset or 'GLOBAL'}")
+    print(f"✅ Up-to-date:  {up_to_date_count}/{len(pp_data_map)}")
+    print(f"⏳ To process:  {needs_update_count} files")
+    print("-" * 60)
     return pp_data_map
 
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -295,7 +304,7 @@ def vgpm_models(chl,sst,par,day_length):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sourceinfo=None):
+def process_daily_pp(chl, sst, par, daylength, output_pp_file, verbose=False, history=None, sourceinfo=None):
     """
     Process daily CHL, SST, PAR and Daylength inputs:
     - Checks if data are valid and creates a valid data mask
@@ -328,7 +337,7 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sou
     pp_eppley, pp_vgpm, kdpar, chl_euphotic, zeu = vgpm_models(
         chl_valid, sst_valid, par_valid, day_length_valid)
     elapsed_vgpm = (time.perf_counter() - start_vgpm) / 60
-    print(f"    Finished running the VGPM models after {elapsed_vgpm:.2f} minutes.")
+    if verbose: print(f"    Finished running the VGPM models after {elapsed_vgpm:.2f} minutes.")
 
         
     # 4️⃣ Create output dataset
@@ -404,14 +413,14 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sou
     # Add metadta to the output dataset
     ds_out.attrs = attrs
     elapsed_meta = (time.perf_counter() - start_meta) / 60
-    print(f"    Finished building the dataset after {elapsed_meta:.2f} minutes.")
+    if verbose: print(f"    Finished building the dataset after {elapsed_meta:.2f} minutes.")
 
     # 7️⃣ Save results
-    print (f"    Starting to write {output_pp_file}")
+    if verbose: print (f"    Starting to write {output_pp_file}")
     start_netcdf = time.perf_counter()
     ds_out.to_netcdf(output_pp_file,encoding=encoding)
     elapsed_netcdf = (time.perf_counter() - start_netcdf) / 60
-    print(f"    Finished writing {output_pp_file} after {elapsed_netcdf:.2f} minutes.")
+    if verbose: print(f"    Finished writing {output_pp_file} after {elapsed_netcdf:.2f} minutes.")
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -423,7 +432,8 @@ def run_pp_pipeline(chl_dataset=None,
                     map_subset=None,
                     daylength_dir=None,
                     overwrite=False,
-                    verbose=True,
+                    verbose=False,
+                    debug=False,
                     logfile=None
                     ):
     """
@@ -460,6 +470,8 @@ def run_pp_pipeline(chl_dataset=None,
     try:
         # 1️⃣ Build date→file map
         if should_log: print(f"\n🚀 Starting Primary Productivity Pipeline...")
+        if should_log: print(f"\n🚀 Building PP data map...")
+        
         pp_data_map = build_pp_date_map(dates=daterange,
                                         chl_dataset=chl_dataset,
                                         sst_dataset=sst_dataset,
@@ -490,7 +502,7 @@ def run_pp_pipeline(chl_dataset=None,
             if should_log: print("✅ All outputs are up-to-date. Nothing to run.")
             
             print("\n" + "="*60)
-            print("🏁 PRIMARY PRODUCTIVITY PIPELINE FINISHED SUMMARY")
+            print("🏁 PRIMARY PRODUCTIVITY PIPELINE SUMMARY")
             print("="*60)
             print(f"📥 Input dates found:       {len(pp_data_map)}")
             print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
@@ -529,10 +541,9 @@ def run_pp_pipeline(chl_dataset=None,
         if should_log: print(f"Regridding SST and PAR files to CHL grid...")
         sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
         par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run)
+        if should_log: print(f"...Finished regridding SST and PAR files to CHL grid.")
 
-        # 6️⃣ Daily loop
-        if should_log: print(f"Writing PPD files to {os.path.dirname(output_files[0])}")
-        
+        # 6️⃣ Daily loop        
         for i, (date, chl_file, sst_file, par_file, output_file) in enumerate(
             zip(dates_to_run, chl_files, sst_files, par_files, output_files), start=1):
             
@@ -585,15 +596,19 @@ def run_pp_pipeline(chl_dataset=None,
                 
                 # 7️⃣ Process daily PP
                 start_time = time.perf_counter()
-                process_daily_pp(chl, sst, par, daylength_ds, output_file, history=history, sourceinfo=merged_info)
+                process_daily_pp(chl, sst, par, daylength_ds, output_file, history=history, verbose=verbose, sourceinfo=merged_info)
                 elapsed = (time.perf_counter() - start_time) / 60
                 
                 created_tasks.append(date)
                 if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
-            
+                
+                pass
             except Exception as e:
                 failed_tasks.append(f"{date}: {str(e)}")
                 if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {e}")
+                if debug:
+                    import traceback
+                    traceback.print_exc()
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
