@@ -304,7 +304,7 @@ def vgpm_models(chl,sst,par,day_length):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sourceinfo=None):
+def process_daily_pp(chl, sst, par, daylength, output_pp_file, verbose=False, history=None, sourceinfo=None):
     """
     Process daily CHL, SST, PAR and Daylength inputs:
     - Checks if data are valid and creates a valid data mask
@@ -337,7 +337,7 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sou
     pp_eppley, pp_vgpm, kdpar, chl_euphotic, zeu = vgpm_models(
         chl_valid, sst_valid, par_valid, day_length_valid)
     elapsed_vgpm = (time.perf_counter() - start_vgpm) / 60
-    print(f"    Finished running the VGPM models after {elapsed_vgpm:.2f} minutes.")
+    if verbose: print(f"    Finished running the VGPM models after {elapsed_vgpm:.2f} minutes.")
 
         
     # 4️⃣ Create output dataset
@@ -413,14 +413,14 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, history=None, sou
     # Add metadta to the output dataset
     ds_out.attrs = attrs
     elapsed_meta = (time.perf_counter() - start_meta) / 60
-    print(f"    Finished building the dataset after {elapsed_meta:.2f} minutes.")
+    if verbose: print(f"    Finished building the dataset after {elapsed_meta:.2f} minutes.")
 
     # 7️⃣ Save results
-    print (f"    Starting to write {output_pp_file}")
+    if verbose: print (f"    Starting to write {output_pp_file}")
     start_netcdf = time.perf_counter()
     ds_out.to_netcdf(output_pp_file,encoding=encoding)
     elapsed_netcdf = (time.perf_counter() - start_netcdf) / 60
-    print(f"    Finished writing {output_pp_file} after {elapsed_netcdf:.2f} minutes.")
+    if verbose: print(f"    Finished writing {output_pp_file} after {elapsed_netcdf:.2f} minutes.")
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -502,7 +502,7 @@ def run_pp_pipeline(chl_dataset=None,
             if should_log: print("✅ All outputs are up-to-date. Nothing to run.")
             
             print("\n" + "="*60)
-            print("🏁 PRIMARY PRODUCTIVITY PIPELINE FINISHED SUMMARY")
+            print("🏁 PRIMARY PRODUCTIVITY PIPELINE SUMMARY")
             print("="*60)
             print(f"📥 Input dates found:       {len(pp_data_map)}")
             print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
@@ -583,7 +583,6 @@ def run_pp_pipeline(chl_dataset=None,
 
                 # Compute or load daylength
                 doy = pd.Timestamp(date).dayofyear
-                print(f"Getting daylength from chl_file={chl_file}")
                 daylength_ds = get_daylength(chl_file, daylength_dir=daylength_dir, dayofyear=doy)
                 daylength_ds = subset_dataset(daylength_ds, map_subset)
 
@@ -597,7 +596,7 @@ def run_pp_pipeline(chl_dataset=None,
                 
                 # 7️⃣ Process daily PP
                 start_time = time.perf_counter()
-                process_daily_pp(chl, sst, par, daylength_ds, output_file, history=history, sourceinfo=merged_info)
+                process_daily_pp(chl, sst, par, daylength_ds, output_file, history=history, verbose=verbose, sourceinfo=merged_info)
                 elapsed = (time.perf_counter() - start_time) / 60
                 
                 created_tasks.append(date)
