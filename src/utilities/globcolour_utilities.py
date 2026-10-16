@@ -4,6 +4,7 @@ import xarray as xr
 import pandas as pd
 import traceback
 import gc
+import sys
 from datetime import datetime
 
 from utilities.bootstrap.environment import bootstrap_environment
@@ -11,15 +12,9 @@ env = bootstrap_environment(verbose=False)
 from utilities import (
     subset_dataset, 
     get_dataset_products, parse_dataset_info, get_prod_files, get_source_file_dates,
-    get_default_metadata, 
-    get_lut_metadata, 
-    get_geospatial_metadata, 
-    get_temporal_metadata, 
-    build_product_attributes, 
-    get_summary_metadata, 
-    get_reference_metadata, 
-    get_source_metadata, 
-    get_current_utc_timestamp
+    get_default_metadata, get_lut_metadata, get_geospatial_metadata, get_temporal_metadata, build_product_attributes, 
+    get_summary_metadata, get_reference_metadata, get_source_metadata, get_current_utc_timestamp,
+    generate_logfile_path
 )
 
 """
@@ -50,6 +45,28 @@ Author:
 Modification History
     Aug 19, 2026 - KJWH: Initial code written for GlobColour preprocessing and subsetting workflow.
 """
+
+# 🎯 Add the DualLogger Class
+class DualLogger:
+    """
+    Intercepts standard print statements and writes them to both the terminal 
+    and a persistent log file simultaneously.
+    """
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, "a", encoding="utf-8")
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush() 
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+        
+    def close(self):
+        self.log.close()
 
 def build_globcolour_map(input_files, output_dir, overwrite=False, verbose=False):
     """
@@ -124,7 +141,7 @@ def build_globcolour_map(input_files, output_dir, overwrite=False, verbose=False
     return processing_map, dataset_info
 
 
-def preprocess_globcolour(task, subset_map, dataset_info, verbose=False, debug=False):
+def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=False):
     """
     Processes a single GlobColour file by extracting the date to create a time dimension,
     spatially subsetting to the target region, and injecting CF-compliant global metadata.
@@ -135,7 +152,7 @@ def preprocess_globcolour(task, subset_map, dataset_info, verbose=False, debug=F
         A dictionary containing 'input', 'output', and 'date_str' for the file to process.
     dataset_info : dict
         Dictionary containing parsed dataset attributes (dataset, version, product, etc.).
-    subset_map : str
+    map_subset : str
         The regional string identifier (e.g., 'NWA') to subset the data.
     verbose : bool, optional
         If True, prints step-by-step progress.
@@ -166,9 +183,9 @@ def preprocess_globcolour(task, subset_map, dataset_info, verbose=False, debug=F
             ds = ds.expand_dims('time').assign_coords(time=[parsed_date])
             
         # Subset to predefined region
-        if subset_map and subset_map != "GLOB":
-            if debug: print(f"      🗺️ Subsetting to region: {subset_map}...")
-            ds = subset_dataset(ds, subset_map)
+        if map_subset and map_subset != "GLOB":
+            if debug: print(f"      🗺️ Subsetting to region: {map_subset}...")
+            ds = subset_dataset(ds, map_subset)
             
         # 3. Add Global metadata
         if debug: print(f"      🏷️ Updating metadata attributes...")
@@ -200,7 +217,7 @@ def preprocess_globcolour(task, subset_map, dataset_info, verbose=False, debug=F
             if debug: print(f"      ⚠️ Product metadata warning: {e}")
 
         # Modification History[cite: 3]
-        new_history = f"{get_current_utc_timestamp()} Added time coordinate and subset to {subset_map} from global file {os.path.basename(in_path)}."
+        new_history = f"{get_current_utc_timestamp()} Added time coordinate and subset to {map_subset} from global file {os.path.basename(in_path)}."
         attrs["history"] = f"{ds.attrs.get('history', '')}\n{new_history}".strip()
         
         # Source Metadata[cite: 3]
@@ -236,14 +253,14 @@ def preprocess_globcolour(task, subset_map, dataset_info, verbose=False, debug=F
 
 
 
-def run_globcolour_dataset(subset_map="NWA", overwrite=False, verbose=True, debug=False, dry_run=False):
+def run_globcolour_dataset(map_subset="NWA", overwrite=False, verbose=True, debug=False, dry_run=False):
     """
     High-level orchestrator that discovers all GlobColour products, fetches their global 
     daily files, evaluates processing needs, and executes the preprocessing loop for each product.
     
     Parameters
     ----------
-    subset_map : str, optional
+    map_subset : str, optional
         The regional string identifier (default is 'NWA') to subset the dataset.
     overwrite : bool, optional
         If True, forces the regeneration of all files.
@@ -256,70 +273,97 @@ def run_globcolour_dataset(subset_map="NWA", overwrite=False, verbose=True, debu
         without reading the data or writing to disk.
     """
 
-    if verbose: 
-        mode = "[DRY RUN] " if dry_run else ""
-        print(f"🚀 {mode} Initializing GLOBCOLOUR preprocessing pipeline...")
-    
-    # Fetch the dictionary of products and paths
-    prod_dict = get_dataset_products('GLOBCOLOUR')
-    
-    # Parse the nested dictionary structure
-    # e.g., {'SOURCE': {'GLOBAL_4KM_DAILY': {'CHL': '/path/...', 'PAR': '/path/...'}}}
-    for source_key, source_level in prod_dict.items():
-        # Only process raw SOURCE files
-        if source_key != 'SOURCE':
-            continue
-        for res_key, res_level in source_level.items():
-            # Only process the GLOBAL and DAILY base grids
-            if 'GLOBAL' not in res_key or 'DAILY' not in res_key:
+    original_stdout = sys.stdout
+
+    if logfile in ["auto", True]:
+        logfile = generate_logfile_path("globcolour", dataset="GLOBCOLOUR", env_dict=env)    
+
+    should_log = verbose or bool(logfile)
+
+    if logfile:
+        os.makedirs(os.path.dirname(logfile), exist_ok=True)
+        sys.stdout = DualLogger(logfile)
+        print("\n" + "="*80)
+        print(f"🟢 GLOBCOLOUR PREPROCESSING PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"📄 Logging to: {logfile}")
+        print("="*80)
+
+    try:
+        if should_log: 
+            mode = "[DRY RUN] " if dry_run else ""
+            print(f"🚀 {mode} Initializing GLOBCOLOUR preprocessing pipeline...")
+        
+        # Fetch the dictionary of products and paths
+        prod_dict = get_dataset_products('GLOBCOLOUR')
+        
+        # Parse the nested dictionary structure
+        # e.g., {'SOURCE': {'GLOBAL_4KM_DAILY': {'CHL': '/path/...', 'PAR': '/path/...'}}}
+        for source_key, source_level in prod_dict.items():
+            # Only process raw SOURCE files
+            if source_key != 'SOURCE':
                 continue
-            for prod_name, input_dir in res_level.items():
-                
-                if verbose:
-                    print("=" * 60)
-                    print(f"🧪 Processing product: {prod_name} ({source_key} -> {res_key})")
-                    print("=" * 60)
-
-                # 1. Fetch input files using get_prod_files looking for GLOBAL files
-                input_files = get_prod_files(prod_name, dataset='GLOBCOLOUR', map_subset='GLOBAL', verbose=debug)
-
-                if not input_files:
-                    if verbose: print(f"⚠️ No input files found for {prod_name}. Skipping.")
+            for res_key, res_level in source_level.items():
+                # Only process the GLOBAL and DAILY base grids
+                if 'GLOBAL' not in res_key or 'DAILY' not in res_key:
                     continue
-
-                # 2. Define dynamic output directory
-                output_dir = input_dir.replace("GLOBAL", subset_map)
-
-                # 3. Build the task map
-                proc_map, dataset_info = build_globcolour_map(input_files, output_dir, overwrite, verbose)
-                
-                # 4. Execute the preprocessing tasks
-                successful, failed = 0, 0
-                for filename, task in proc_map.items():
-                    if task['is_up_to_date']:
-                        continue
-
-                    if dry_run:
-                        if verbose:
-                            print(f"    🌵 [DRY RUN] Would process: {filename}")
-                            print(f"       -> {os.path.basename(task['output'])}")
-                        successful += 1
-                        continue
-                        
-                    success = preprocess_globcolour(
-                        task=task, 
-                        dataset_info=dataset_info, 
-                        subset_map=subset_map, 
-                        verbose=verbose, 
-                        debug=debug
-                    )
+                for prod_name, input_dir in res_level.items():
                     
-                    if success:
-                        successful += 1
-                    else:
-                        failed += 1
+                    if should_log: print(f"🧪 Processing product: {prod_name} ({source_key} -> {res_key})")
                         
-                if verbose: print(f"🏁 {prod_name} COMPLETE: {successful} processed, {failed} failed.")
+
+                    # 1. Fetch input files using get_prod_files looking for GLOBAL files
+                    input_files = get_prod_files(prod_name, dataset='GLOBCOLOUR', map_subset='GLOBAL', verbose=debug)
+
+                    if not input_files:
+                        if should_log: print(f"⚠️ No input files found for {prod_name}. Skipping.")
+                        continue
+
+                    # 2. Define dynamic output directory
+                    output_dir = input_dir.replace("GLOBAL", map_subset)
+
+                    # 3. Build the task map
+                    proc_map, dataset_info = build_globcolour_map(input_files, output_dir, overwrite, verbose)
+                    
+                    # 4. Execute the preprocessing tasks
+                    successful, failed = 0, 0
+                    for filename, task in proc_map.items():
+                        if task['is_up_to_date']:
+                            continue
+
+                        if dry_run:
+                            if should_log:
+                                print(f"    🌵 [DRY RUN] Would process: {filename}")
+                                print(f"       -> {os.path.basename(task['output'])}")
+                            successful += 1
+                            continue
+                            
+                        success = preprocess_globcolour(
+                            task=task, 
+                            dataset_info=dataset_info, 
+                            map_subset=map_subset, 
+                            verbose=verbose, 
+                            debug=debug
+                        )
+                        
+                        if success:
+                            successful += 1
+                        else:
+                            failed += 1
+                            
+                    if should_log: print(f"🏁 {prod_name} COMPLETE: {successful} processed, {failed} failed.")
+    except Exception as e:
+        print("\n" + "="*80)
+        print(f"❌ CRITICAL PIPELINE ERROR: {e}")
+        if debug:
+            traceback.print_exc()
+            
+    finally:
+        # 🎯 Clean up the terminal hooks
+        if logfile and logfile not in ["auto", True]:
+            print(f"\n🔴 PIPELINE RUN ENDED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("="*80 + "\n")
+            sys.stdout.close()
+            sys.stdout = original_stdout
 
 # Example usage:
 # run_globcolour_workflow("/path/to/raw/globcolour", "/path/to/processed/globcolour", region="NES")
