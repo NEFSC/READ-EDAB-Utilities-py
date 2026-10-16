@@ -98,7 +98,12 @@ def get_daylength(latitude_grid_path, daylength_dir=None,dayofyear=None):
     if cache_path.exists():
         da = xr.open_dataset(cache_path)
     else:
-        lat_ds = xr.open_mfdataset(os.path.join(latitude_grid_path,'*.nc'),combine='by_coords')
+        #  Check if it's a directory or a single file
+        if os.path.isdir(latitude_grid_path):
+            lat_ds = xr.open_mfdataset(os.path.join(latitude_grid_path,'*.nc'), combine='by_coords')
+        else:
+            lat_ds = xr.open_dataset(latitude_grid_path)
+        
         latitudes = lat_ds["lat"].values
         days = np.arange(1, 367)
 
@@ -150,7 +155,11 @@ def get_daylength_grid(latitude_grid_path):
     # Get the daylength
     daylength_ds = get_daylength(latitude_grid_path)
 
-    input_ds = xr.open_mfdataset(os.path.join(latitude_grid_path,'*.nc'))
+    # Check if it's a directory or a single file here too
+    if os.path.isdir(latitude_grid_path):
+        input_ds = xr.open_mfdataset(os.path.join(latitude_grid_path,'*.nc'), combine='by_coords')
+    else:
+        input_ds = xr.open_dataset(latitude_grid_path)
     
     # Extract coordinates
     time = input_ds["time"]
