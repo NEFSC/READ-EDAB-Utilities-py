@@ -138,7 +138,7 @@ def build_psc_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_da
 
     psc_map = {}
     for date in chl_dates:
-        filename = f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_grid']}-PSC-Turner.nc"
+        filename = f"D_{date}-{map_subset or 'GLOBAL'}-{info['dataset']}-PSC-Turner.nc"
         psc_map[date] = os.path.join(output_dir, filename)
 
     # Normalize get_date_prod

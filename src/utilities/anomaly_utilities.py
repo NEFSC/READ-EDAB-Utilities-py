@@ -217,7 +217,7 @@ def build_anomaly_map(prod, period, output_dir=None,
         out_period = extract_period_code(stat_file)['full_period']
         stat_input = [stat_file]  # Process single anomaly expects a list
 
-        out_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{data_type}.nc"
+        out_name = f"{out_period}-{map_subset or 'GLOBAL'}-{ds_name}-{prod}-{data_type}.nc"
         out_path = os.path.join(output_dir, out_name)
 
         is_up_to_date = False

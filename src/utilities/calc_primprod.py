@@ -7,7 +7,7 @@ import numpy as np
 from datetime import datetime
 
 from utilities.bootstrap.environment import bootstrap_environment
-
+env = bootstrap_environment(verbose=False)
 
 from utilities import regrid_wrapper, subset_dataset
 from utilities import get_daylength
@@ -177,7 +177,7 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
             chl_path = chl_map[date]
             sst_path = sst_map[date]
             par_path = par_map[date]
-            ppd_path = os.path.join(output_dir, f"D_{date}-{info['dataset']}-{info['version']}-{info['dataset_grid']}-PPD.nc")
+            ppd_path = os.path.join(output_dir, f"D_{date}-{map_subset or 'GLOBAL'}-{info['dataset']}-PPD.nc")
 
             # Check if PPD file exists and is newer than all inputs
             if os.path.exists(ppd_path):
@@ -435,7 +435,7 @@ def run_pp_pipeline(chl_dataset=None,
     Parameters:
         chl_dataset, sst_dataset, par_dataset (str): Dataset identifiers
         daterange (list of str): Dates to process (YYYYMMDD)
-        mapmap_subset (str): The map region (e.g. NES, NWA) to subset the data to
+        map_subset (str): The map region (e.g. NES, NWA) to subset the data to
         overwrite (bool): If True, reprocess even if output is up-to-date
         verbose (bool): If True, print progress
         logfile (str): Optional file to log the progress

@@ -12,7 +12,6 @@ def generate_logfile_path(pipeline_type, prods=None, dataset=None, env_dict=None
     """
            
     if env_dict is None:
-        from utilities.bootstrap.environment import bootstrap_environment
         env_dict = env
     
     base_log_dir = env_dict.get('satlogs_path')
