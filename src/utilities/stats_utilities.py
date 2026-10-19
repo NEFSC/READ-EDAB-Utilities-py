@@ -1009,8 +1009,6 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         print(f"🟢 PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80)
 
-    should_log = verbose or bool(logfile)
-
     # Use try/finally to GUARANTEE the terminal output is restored, even if the code crashes
     try:
         # Normalize inputs
@@ -1022,6 +1020,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
 
         verbose = kwargs.pop('verbose', False)
         debug   = kwargs.get('debug', False) # Get it, but don't pop yet if others need it
+        should_log = verbose or bool(logfile)
 
         # --- 🛡️ THE WARNING FILTER ---
         # This block controls the "NaN chatter" from Dask/NumPy
