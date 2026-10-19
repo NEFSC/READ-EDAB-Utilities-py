@@ -997,8 +997,9 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
 
     # Handle logfile auto-generation
     logfile = kwargs.pop('logfile', None)
+    logdataset = kwargs.pop('dataset', None)
     if logfile in ["auto", True]:
-        logfile = generate_logfile_path("stats", prods=prods, dataset=dataset, env_dict=env)    
+        logfile = generate_logfile_path("stats", prods=prods, dataset=logdataset, env_dict=env)    
 
     original_stdout = sys.stdout # Save the original terminal output
 
