@@ -107,7 +107,8 @@ def build_stats_map(prod, period, output_dir=None,
                     dataset=None, daterange=None,climatology_range=None,
                     dataset_version=None, dataset_map=None,
                     map_subset=None, is_running=True, overwrite=False, 
-                    data_type=None,verbose=False, debug=False):
+                    data_type=None,verbose=False, debug=False,
+                    allow_nrt=False, **kwargs):
     """
     Purpose:
         Unified stats pipeline.
@@ -227,7 +228,6 @@ def build_stats_map(prod, period, output_dir=None,
     # 4 Exclude NRT from Climatologies (unless allow_nrt=True)
     # ---------------------------------------------------------
     is_clim = per_info.get("is_climatology", False)
-    allow_nrt = kwargs.get('allow_nrt', False)
     
     if is_clim and not allow_nrt:
         parsed_files = file_parser(files)
@@ -1038,6 +1038,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         dataset = kwargs.pop('dataset',None)
         map_subset  = kwargs.get('map_subset', 'GLOBAL')
         parallel_runs = kwargs.pop('parallel_runs', 1) 
+        allow_nrt = kwargs.pop('allow_nrt', False)
         
         # 📋 Initialize an error log for the entire run
         total_input_files = 0
@@ -1054,7 +1055,7 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                 if should_log: print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
                 
                 # Create stats period map
-                stats_map = build_stats_map(prod, period, dataset=dataset, verbose=verbose, **kwargs)
+                stats_map = build_stats_map(prod, period, dataset=dataset, verbose=verbose, allow_nrt=allow_nrt, **kwargs)
                 
                 # --- Error Handling for Empty Maps ---
                 if not stats_map:
