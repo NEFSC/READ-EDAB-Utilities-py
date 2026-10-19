@@ -113,7 +113,7 @@ def build_globcolour_map(input_files, output_dir, overwrite=False, verbose=False
         filename = os.path.basename(in_path)
             
         # Construct standard output filename using parsed info
-        out_name = f"D_{date_str}-{dataset_info['dataset']}-{dataset_info['version']}-{dataset_info['dataset_grid']}-{dataset_info['product']}.nc"
+        out_name = f"D_{date_str}-{dataset_info['dataset']}-{dataset_info['product']}.nc"
         out_path = os.path.join(output_dir, out_name)
         
         is_up_to_date = False
