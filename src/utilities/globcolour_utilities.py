@@ -253,7 +253,7 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
 
 
 
-def run_globcolour_dataset(map_subset="NWA", overwrite=False, verbose=True, debug=False, dry_run=False):
+def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verbose=True, debug=False, dry_run=False):
     """
     High-level orchestrator that discovers all GlobColour products, fetches their global 
     daily files, evaluates processing needs, and executes the preprocessing loop for each product.
