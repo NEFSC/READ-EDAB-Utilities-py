@@ -273,6 +273,9 @@ def build_stats_map(prod, period, output_dir=None,
     total_tasks = len(pm)
     up_to_date_count = 0
     nrt_replaced_count = 0
+    # Initialize corrupt file trackers
+    deleted_corrupt_files = []
+    manual_delete_files = []
 
     for out_period, info in pm.items():
         input_files = info["input_files"]
@@ -320,6 +323,14 @@ def build_stats_map(prod, period, output_dir=None,
                         
                 except Exception as e:
                     if verbose: print(f"  ⚠️ Could not read attributes of {out_name}: {e}. Forcing update.")
+                    # Attempt to delete the corrupt/locked file
+                    try:
+                        os.remove(out_path)
+                        deleted_corrupt_files.append(out_name) # Track successful deletions
+                        if verbose: print(f"  🗑️ Deleted corrupt file: {out_name}. Forcing recreation.")
+                    except Exception as del_e:
+                        manual_delete_files.append(out_name) # Track locked files
+                        if verbose: print(f"  🚨 Failed to delete corrupt file {out_name}: {del_e}. Manual removal may be required.")
                     is_up_to_date = False
 
         if is_up_to_date:
@@ -361,7 +372,7 @@ def build_stats_map(prod, period, output_dir=None,
     if nrt_replaced_count > 0: print(f"🗑️ NRT replaced: {nrt_replaced_count} files")
     print("-" * 60)
     
-    return stats_map
+    return stats_map, deleted_corrupt_files, manual_delete_files
 
 def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
     """
@@ -1054,6 +1065,8 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         created_tasks = []
         failed_tasks = []
         all_corrupt_inputs = set()
+        all_deleted_corrupt = [] 
+        all_manual_delete = []   
 
         # Loop through prods
         for prod in prods:
@@ -1062,7 +1075,11 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                 if should_log: print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
                 
                 # Create stats period map
-                stats_map = build_stats_map(prod, period, dataset=dataset, verbose=verbose, allow_nrt=allow_nrt, **kwargs)
+                stats_map, deleted_files, manual_delete_files = build_stats_map(prod, period, dataset=dataset, verbose=verbose, allow_nrt=allow_nrt, **kwargs)
+
+                # Aggregate the corrupt file lists
+                all_deleted_corrupt.extend(deleted_files)
+                all_manual_delete.extend(manual_delete_files)
                 
                 # --- Error Handling for Empty Maps ---
                 if not stats_map:
@@ -1191,6 +1208,13 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
             print(f"\n📂 FAILED TASKS DETAILS:")
             for task in failed_tasks:
                 print(f"  • {task}")
+
+        # Output the manual deletion list
+        if all_manual_delete:
+            print(f"\n🚨 REQUIRES MANUAL DELETION ({len(all_manual_delete)}):")
+            print("  The following files are corrupted but locked by the OS. Delete them manually:")
+            for f in all_manual_delete:
+                print(f"  • {f}")
 
         if all_corrupt_inputs:
             print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED ({len(all_corrupt_inputs)}):")

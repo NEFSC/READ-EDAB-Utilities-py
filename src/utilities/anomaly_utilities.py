@@ -228,6 +228,10 @@ def build_anomaly_map(prod, period, output_dir=None,
     total_tasks = len(file_matching)
     up_to_date_count = 0
 
+    # Initialize corrupt file trackers
+    deleted_corrupt_files = []
+    manual_delete_files = []
+
     for stat_file, target_clim_file in file_matching.items():
 
         # Extract the specific output period from the stat_input filename (e.g., 'M_200005')
@@ -261,6 +265,17 @@ def build_anomaly_map(prod, period, output_dir=None,
                         else:
                             is_up_to_date = False
                     except Exception:
+                        if verbose: print(f"  ⚠️ Could not read {out_name}: {e}")
+                        
+                        #  Attempt to delete the corrupt/locked file
+                        try:
+                            os.remove(out_path)
+                            deleted_corrupt_files.append(out_name) # 🎯 Track successful deletions
+                            if verbose: print(f"  🗑️ Deleted corrupt file: {out_name}. Forcing recreation.")
+                        except Exception as del_e:
+                            manual_delete_files.append(out_name) # 🎯 Track locked files
+                            if verbose: print(f"  🚨 Failed to delete corrupt file {out_name}: {del_e}. Manual removal may be required.")
+
                         is_up_to_date = False
 
         if is_up_to_date:
@@ -280,7 +295,7 @@ def build_anomaly_map(prod, period, output_dir=None,
     print(f"⏳ To process:  {needs_update_count} files")
     print("-" * 60)
     
-    return anomaly_map
+    return anomaly_map, deleted_corrupt_files, manual_delete_files
 
 
 def compute_anomaly(stat_da, clim_da, prod):
@@ -548,12 +563,19 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
         failed_tasks = []
         missing_climatologies = [] 
         all_corrupt_inputs = set()
+        all_deleted_corrupt = [] 
+        all_manual_delete = []   
                 
         for prod in prods:
             for period in periods:
                 if verbose: print(f"\n🚀 Starting anomaly pipeline for {prod} | Period: {period}")
                 
-                anomaly_map = build_anomaly_map(prod, period, verbose=verbose, **kwargs)
+                anomaly_map, deleted_files, manual_delete_files = build_anomaly_map(prod, period, verbose=verbose, **kwargs)
+                
+                # Aggregate the corrupt file lists
+                all_deleted_corrupt.extend(deleted_files)
+                all_manual_delete.extend(manual_delete_files)
+
                 if not anomaly_map: continue
                 
                 # 🎯 Group tasks by their climatology file
@@ -602,8 +624,15 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
-        print("🏁 ANOMALY PIPELINE FINISHED")
-        print(f"✅ Processed: {len(successful_tasks)} | ⏭ Skipped: {len(skipped_tasks)} | ❌ Failed: {len(failed_tasks)}")
+        print("🏁 ANOMALY PIPELINE FINISHED SUMMARY")
+        print("="*60)
+        print(f"📥 Input files found:       {total_input_files}")
+        print(f"🗺️  Climatology files found: {len(total_clim_files)}")
+        print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
+        print(f"🔄 Existing files replaced: {len(replaced_tasks)}")
+        print(f"🆕 New files created:       {len(created_tasks)}")
+        print(f"🗑️ Corrupt outputs deleted: {len(all_deleted_corrupt)}") 
+        print(f"❌ Errors/Not created:      {len(failed_tasks)}")
         
         if failed_tasks:
             print(f"\n📂 FAILED TASKS:\n" + "\n".join([f"  • {task}" for task in failed_tasks]))
@@ -616,6 +645,14 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
             
         if all_corrupt_inputs:
             print(f"\n🚨 CORRUPT FILES ({len(all_corrupt_inputs)}):\n" + "\n".join([f"  • {os.path.basename(err)}" for err in sorted(all_corrupt_inputs)]))
+        
+        # Output the manual deletion list
+        if all_manual_delete:
+            print(f"\n🚨 REQUIRES MANUAL DELETION ({len(all_manual_delete)}):")
+            print("  The following files are corrupted but locked by the OS. Delete them manually:")
+            for f in all_manual_delete:
+                print(f"  • {f}")
+        
         print("="*60)
 
     finally:
