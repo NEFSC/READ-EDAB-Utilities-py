@@ -4,6 +4,7 @@ import re
 import xarray as xr
 import numpy as np
 import pandas as pd
+import h5netcdf
 import warnings
 import traceback
 import concurrent.futures
@@ -64,7 +65,7 @@ Modification History
     Oct 09, 2026 - KJWH: get_prod_files is now using the output period to add the data_type(STATS/CLIM) to the output file name
                          Bug fix: Added a second get_prod_files search when the input period is D and map_subset is provided (will default back to GLOBAL if no files are found)
     Oct 14, 2026 - KJWH: Added dataset to the get_period_sets() call to ensure the climatology_range is properly clamped to the dataset's start year if the input files are out of range of the default climatology_range
-    Oct 20, 2026 - KJWH: Changed the xr.open_dataset engine from netcdf5 to h5netcdf
+    Oct 20, 2026 - KJWH: Removed xr.open_dataset() in build_stats_map() and using the native h5netcdf to read the file attributes
 
     
 """
@@ -297,19 +298,24 @@ def build_stats_map(prod, period, output_dir=None,
             if mtime_ok:
                 # Check 2: Does the internal list of files perfectly match our current list?
                 try:
-                    # Use xarray to quickly peek at the attributes (no decoding saves time/RAM)
-                    with xr.open_dataset(out_path, engine='h5netcdf', decode_times=False, decode_coords=False) as existing_ds:
+                    # Use native h5netcdf to read the file attributes
+                    with h5netcdf.File(out_path, 'r') as existing_ds:
                         stored_files_str = existing_ds.attrs.get('source_files', '')
                         
+                        # Safely decode if the library returns bytes instead of a string
+                        if isinstance(stored_files_str, bytes):
+                            stored_files_str = stored_files_str.decode('utf-8')
+                        elif isinstance(stored_files_str, np.ndarray): # Handle numpy array strings
+                            stored_files_str = str(stored_files_str[0]) if stored_files_str.size > 0 else ""
+                            
                     if stored_files_str:
                         # Convert both to sets so order doesn't matter
-                        stored_basenames = set(f.strip() for f in stored_files_str.split(','))
+                        stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
                         current_basenames = set(os.path.basename(f) for f in input_files)
                         
                         # If the sets match perfectly, it is truly up-to-date!
                         is_up_to_date = (stored_basenames == current_basenames)
                     else:
-                        # If the attribute doesn't exist (e.g., an old run), force an update
                         is_up_to_date = False
                         
                 except Exception as e:

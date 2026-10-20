@@ -3,6 +3,7 @@ import sys
 import re
 import xarray as xr
 import numpy as np
+import h5netcdf
 import warnings
 import traceback
 import concurrent.futures
@@ -54,8 +55,7 @@ Author:
   
 Modification History
     Oct 13, 2026 - KJWH: Initial code written (based off of stats_utilities)
-    Oct 20, 2026 - KJWH: Changed the xr.open_dataset engine from netcdf5 to h5netcdf
-
+    Oct 20, 2026 - KJWH: Removed xr.open_dataset() in build_stats_map() and using the native h5netcdf to read the file attributes
     
 """
 
@@ -238,18 +238,28 @@ def build_anomaly_map(prod, period, output_dir=None,
         out_path = os.path.join(output_dir, out_name)
 
         is_up_to_date = False
+        # Only check for up-to-date status if we actually have a climatology file
         if target_clim_file != "NA":
             all_inputs = stat_input + [target_clim_file]
             if os.path.exists(out_path) and not overwrite:
                 out_mtime = os.path.getmtime(out_path)
                 if all(out_mtime > os.path.getmtime(f) for f in all_inputs):
                     try:
-                        with xr.open_dataset(out_path, engine='h5netcdf', decode_times=False, decode_coords=False) as existing_ds:
+                        # Use native h5netcdf to read the input file attributes
+                        with h5netcdf.File(out_path, 'r') as existing_ds:
                             stored_files_str = existing_ds.attrs.get('source_files', '')
+                            
+                            if isinstance(stored_files_str, bytes):
+                                stored_files_str = stored_files_str.decode('utf-8')
+                            elif isinstance(stored_files_str, np.ndarray):
+                                stored_files_str = str(stored_files_str[0]) if stored_files_str.size > 0 else ""
+                                
                         if stored_files_str:
-                            stored_basenames = set(f.strip() for f in stored_files_str.split(','))
+                            stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
                             current_basenames = set(os.path.basename(f) for f in all_inputs)
                             is_up_to_date = (stored_basenames == current_basenames)
+                        else:
+                            is_up_to_date = False
                     except Exception:
                         is_up_to_date = False
 
