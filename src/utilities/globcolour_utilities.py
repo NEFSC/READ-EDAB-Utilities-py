@@ -166,6 +166,23 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
     bool
         True if the file was processed and saved successfully, False otherwise.
     """
+    # NetCDF sanitizer to strip out unhashable dictionaries
+    def sanitize_for_netcdf(dataset):
+        for obj in [dataset] + [dataset[var] for var in dataset.variables]:
+            for k, val in list(obj.attrs.items()):
+                if isinstance(val, dict):
+                    # Convert unhashable dicts safely to strings
+                    obj.attrs[k] = val.get('default', str(val))
+                elif isinstance(val, list):
+                    # Catch lists of dictionaries or complex objects
+                    try:
+                        set(val)
+                    except TypeError:
+                        obj.attrs[k] = str(val)
+                elif val is None:
+                    obj.attrs[k] = "None"
+        return dataset
+    
     in_path = task['input']
     out_path = task['output']
     date_str = task['date_str']
@@ -185,9 +202,9 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
             ds = ds.expand_dims('time').assign_coords(time=[parsed_date])
             
         # Subset to predefined region
-        if map_subset and map_subset != "GLOB":
-            if debug: print(f"      🗺️ Subsetting to region: {map_subset}...")
-            ds = subset_dataset(ds, map_subset)
+        if subset_map and subset_map != "GLOB":
+            if debug: print(f"      🗺️ Subsetting to region: {subset_map}...")
+            ds = subset_dataset(ds, subset_map)
             
         # 3. Add Global metadata
         if debug: print(f"      🏷️ Updating metadata attributes...")
@@ -210,7 +227,7 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
             if k in ds.attrs:
                 attrs[k] = ds.attrs[k]
 
-        # Product Specific Attributes[cite: 3]
+        # Product Specific Attributes
         try:
             attrs["product_name"] = build_product_attributes(dataset_info['product'])["long_name"]
             attrs = attrs | get_summary_metadata(dataset_info['product'])
@@ -218,11 +235,11 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
         except Exception as e:
             if debug: print(f"      ⚠️ Product metadata warning: {e}")
 
-        # Modification History[cite: 3]
-        new_history = f"{get_current_utc_timestamp()} Added time coordinate and subset to {map_subset} from global file {os.path.basename(in_path)}."
+        # Modification History
+        new_history = f"{get_current_utc_timestamp()} Added time coordinate and subset to {subset_map} from global file {os.path.basename(in_path)}."
         attrs["history"] = f"{ds.attrs.get('history', '')}\n{new_history}".strip()
         
-        # Source Metadata[cite: 3]
+        # Source Metadata
         try:
             source_meta = get_source_metadata(dataset_info["dataset"], dataset_version=dataset_info["version"], source_prefix=f"source",ds_attrs=ds.attrs)
             attrs = attrs | source_meta
@@ -236,6 +253,9 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
         for var, v_attrs in orig_var_attrs.items():
             if var in ds.data_vars:
                 ds[var].attrs = v_attrs
+
+        # 🎯 ADDED: Sanitize dataset immediately before saving
+        ds = sanitize_for_netcdf(ds)
 
         # 4. Save output
         if verbose: print(f"      💾 Saving {os.path.basename(out_path)}...")
