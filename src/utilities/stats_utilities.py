@@ -510,7 +510,7 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None
     # 1. Define the Available Library
     if weights is not None:
         stats_library = {
-            # 🎯 Apply weights for mathematically supported statistics
+            # Apply weights for mathematically supported statistics
             'mean':   lambda x: x.weighted(weights).mean(dim=time_dim, skipna=True),
             'sum':    lambda x: x.weighted(weights).sum(dim=time_dim, skipna=True),
             'var':    lambda x: x.weighted(weights).var(dim=time_dim, skipna=True),
@@ -522,7 +522,7 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None
             'gskew':  lambda x: ((np.log(x.where(x > 0)) - np.log(x.where(x > 0)).weighted(weights).mean(dim=time_dim, skipna=True))**3).weighted(weights).mean(dim=time_dim, skipna=True) / (np.log(x.where(x > 0)).weighted(weights).std(dim=time_dim, skipna=True)**3),
             'gkurt':  lambda x: ((np.log(x.where(x > 0)) - np.log(x.where(x > 0)).weighted(weights).mean(dim=time_dim, skipna=True))**4).weighted(weights).mean(dim=time_dim, skipna=True) / (np.log(x.where(x > 0)).weighted(weights).std(dim=time_dim, skipna=True)**4),
             
-            # 🎯 Unweighted fallbacks for everything else
+            # Unweighted fallbacks for everything else
             'min':    lambda x: x.min(dim=time_dim, skipna=True),
             'max':    lambda x: x.max(dim=time_dim, skipna=True),
             'median': lambda x: x.median(dim=time_dim, skipna=True),
@@ -537,6 +537,7 @@ def compute_stats(data, var_name, time_dim, label=None, stats=None, weights=None
             'median': lambda x: x.median(dim=time_dim, skipna=True),
             'std':    lambda x: x.std(dim=time_dim, skipna=True),
             'sum':    lambda x: x.sum(dim=time_dim, skipna=True),
+            'var':    lambda x: x.var(dim=time_dim, skipna=True),
             'skew':   lambda x: ((x - x.mean(dim=time_dim, skipna=True))**3).mean(dim=time_dim, skipna=True) / (x.std(dim=time_dim, skipna=True)**3),
             'kurt':   lambda x: ((x - x.mean(dim=time_dim, skipna=True))**4).mean(dim=time_dim, skipna=True) / (x.std(dim=time_dim, skipna=True)**4),
             'count':  lambda x: x.notnull().sum(dim=time_dim),
