@@ -64,6 +64,7 @@ Modification History
     Oct 09, 2026 - KJWH: get_prod_files is now using the output period to add the data_type(STATS/CLIM) to the output file name
                          Bug fix: Added a second get_prod_files search when the input period is D and map_subset is provided (will default back to GLOBAL if no files are found)
     Oct 14, 2026 - KJWH: Added dataset to the get_period_sets() call to ensure the climatology_range is properly clamped to the dataset's start year if the input files are out of range of the default climatology_range
+    Oct 20, 2026 - KJWH: Changed the xr.open_dataset engine from netcdf5 to h5netcdf
 
     
 """
@@ -297,7 +298,7 @@ def build_stats_map(prod, period, output_dir=None,
                 # Check 2: Does the internal list of files perfectly match our current list?
                 try:
                     # Use xarray to quickly peek at the attributes (no decoding saves time/RAM)
-                    with xr.open_dataset(out_path, engine='netcdf4', decode_times=False, decode_coords=False) as existing_ds:
+                    with xr.open_dataset(out_path, engine='h5netcdf', decode_times=False, decode_coords=False) as existing_ds:
                         stored_files_str = existing_ds.attrs.get('source_files', '')
                         
                     if stored_files_str:

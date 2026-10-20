@@ -40,6 +40,23 @@ Helper Functions:
     - compute_anomalies: Subtracts climatology from statistics and standardizes variable names.
     - boost_file_limits: Raises the system limit for open file handles (Linux/Mac only).
     - DualLogger: Intercepts standard print statements and writes them to both the terminal and a persistent log file.
+
+References:
+    
+Copywrite: 
+    Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
+    Northeast Fisheries Science Center, Narragansett Laboratory.
+    This software may be used, copied, or redistributed as long as it is not sold and this copyright notice is reproduced on each copy made.
+    This routine is provided AS IS without any express or implied warranties whatsoever.
+
+Author:
+    This program was written on October 13, 2026 by Kimberly J. W. Hyde, Northeast Fisheries Science Center | NOAA Fisheries | U.S. Department of Commerce, 28 Tarzwell Dr, Narragansett, RI 02882
+  
+Modification History
+    Oct 13, 2026 - KJWH: Initial code written (based off of stats_utilities)
+    Oct 20, 2026 - KJWH: Changed the xr.open_dataset engine from netcdf5 to h5netcdf
+
+    
 """
 
 class DualLogger:
@@ -227,7 +244,7 @@ def build_anomaly_map(prod, period, output_dir=None,
                 out_mtime = os.path.getmtime(out_path)
                 if all(out_mtime > os.path.getmtime(f) for f in all_inputs):
                     try:
-                        with xr.open_dataset(out_path, engine='netcdf4', decode_times=False, decode_coords=False) as existing_ds:
+                        with xr.open_dataset(out_path, engine='h5netcdf', decode_times=False, decode_coords=False) as existing_ds:
                             stored_files_str = existing_ds.attrs.get('source_files', '')
                         if stored_files_str:
                             stored_basenames = set(f.strip() for f in stored_files_str.split(','))
