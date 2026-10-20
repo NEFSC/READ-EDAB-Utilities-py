@@ -638,8 +638,10 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                     try:
                         input_fp = file_parser(input_files[0])
                         ds_name = input_fp[0].get('dataset') 
+                        ds_version = input_fp[0].get('version')
                     except Exception:
                         ds_name = kwargs.get('dataset', 'UNKNOWN') 
+                        ds_version = kwargs.get('dataset_version', None) 
                     if ds_name: ds_name = ds_name.upper()
 
                     # Route 1: Safe, manual loading for complex multi-wavelength products
@@ -777,14 +779,14 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
 
                         if debug: print(f" Checking period ({per}) if weights are needed for the stats caclulations")
                         
-                        #  🎯 Extract the number of days per month
+                        # Extract the number of days per month
                         if per in monthly_weights:
                             weights = da.time.dt.days_in_month
                             weights.name = "weights"
                             if verbose and var_name == target_vars[0]: # Only print once per file
                                 print(f"      ⚖️ Applying days_in_month weights for {per} period...")
                         
-                        # 🎯  Apply Triangle Weights [1, 2, 1] to the 3-Day Running Mean
+                        # Apply Triangle Weights [1, 2, 1] to the 3-Day Running Mean
                         elif per == 'D3':
                             # Safety check: Ensure we actually found 3 days of inputs
                             if da.sizes['time'] == 3:
@@ -796,7 +798,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                                 if verbose and var_name == target_vars[0]:
                                     print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 3. Falling back to unweighted mean.")
                         
-                        # 🎯 Apply Symmetric Tent Weights to the 8-Day Running Mean
+                        # Apply Symmetric Tent Weights to the 8-Day Running Mean
                         elif per == 'D8':
                             if da.sizes['time'] == 8:
                                 weights = xr.DataArray([1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.0], dims=['time'], coords={'time': da.time})
@@ -929,7 +931,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 attrs["history"] = f"{attrs['history']}\n{new_history}" if attrs.get("history") else new_history
                 attrs['source_files'] = source_files_str  
                             
-                # 🎯 Source Metadata
+                # Source Metadata
                 try:
                     # Make sure dataset and dataset_version variables are defined in your scope
                     # Merges the flat dict returned by get_source_metadata into attrs
