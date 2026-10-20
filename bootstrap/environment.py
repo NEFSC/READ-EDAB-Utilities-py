@@ -91,6 +91,7 @@ def bootstrap_environment(verbose=False):
         "workflow_path": root_path / "workflow_resources",
         "metadata_path": root_path / "workflow_resources" / "metadata",
         "lookup_path": root_path / "workflow_resources" / "lookuptables",
+        "shapefile_path": root_path / "workflow_resources" / "shapefiles",
         "satlog_path": root_path / "logs" / "satprocessing"
     }
 
@@ -108,11 +109,11 @@ def bootstrap_environment(verbose=False):
         print(f"[BOOTSTRAP] Hostname: {hostname}")
         print(f"[BOOTSTRAP] Python path: {python_path}")
         print(f"[BOOTSTRAP] Utilities path: {utilities_path}")
-        print(f"[BOOTSTRAP] Workflow resources: {workflow_path}")
-        print(f"[BOOTSTRAP] Metadata path: {metadata_path}")
-        print(f"[BOOTSTRAP] Look-up table path: {lookup_path}")
+        print(f"[BOOTSTRAP] Workflow resources: {operational_dirs['workflow_path']}")
+        print(f"[BOOTSTRAP] Metadata path: {operational_dirs['metadata_path']}")
+        print(f"[BOOTSTRAP] Look-up table path: {operational_dirs['lookup_path']}")
         print(f"[BOOTSTRAP] Dataset path: {dataset_path}")
-        print(f"[BOOTSTRAP] Satprocessing logs path: {satlog_path}")
+        print(f"[BOOTSTRAP] Satprocessing logs path: {operational_dirs['satlog_path']}")
         print(f"[BOOTSTRAP] Timestamp: {datetime.now().isoformat()}")
 
     return {
@@ -123,6 +124,7 @@ def bootstrap_environment(verbose=False):
         "workflow_resources": operational_dirs["workflow_path"],
         "metadata_path": operational_dirs["metadata_path"],
         "lookuptable_path": operational_dirs["lookup_path"],
+        "shapefile_path": operational_dirs["shapefile_path"],
         "dataset_path": dataset_path,
         "satlogs_path": operational_dirs["satlog_path"],
         "timestamp": datetime.now()
