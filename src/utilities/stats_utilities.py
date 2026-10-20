@@ -285,7 +285,7 @@ def build_stats_map(prod, period, output_dir=None,
         out_suffix = f"{data_type}-NRT" if has_nrt else data_type
         out_name = f"{out_period}-{map_subset or 'GLOBAL'}-{ds_name}-{prod}-{out_suffix}.nc"
 
-        if verbose: print(f"Processing {out_period}: {len(input_files)} input files -> {out_name}")
+        if verbose: print(f"Checking {out_period}: {len(input_files)} input files -> {out_name}")
         out_path = os.path.join(output_dir, out_name)
 
         # Determine freshness
