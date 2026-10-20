@@ -6,6 +6,7 @@ import traceback
 import gc
 import sys
 from datetime import datetime
+import concurrent.futures
 
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
@@ -44,6 +45,7 @@ Author:
   
 Modification History
     Aug 19, 2026 - KJWH: Initial code written for GlobColour preprocessing and subsetting workflow.
+    Oct 20, 2026 - KJHW: Added parallel processing functionality
 """
 
 # 🎯 Add the DualLogger Class
@@ -253,24 +255,20 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
 
 
 
-def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verbose=True, debug=False, dry_run=False):
+def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verbose=True, debug=False, parallel_runs=1, dry_run=False):
     """
     High-level orchestrator that discovers all GlobColour products, fetches their global 
     daily files, evaluates processing needs, and executes the preprocessing loop for each product.
     
     Parameters
     ----------
-    map_subset : str, optional
-        The regional string identifier (default is 'NWA') to subset the dataset.
-    overwrite : bool, optional
-        If True, forces the regeneration of all files.
-    verbose : bool, optional
-        If True, prints detailed pipeline progress.
-    debug : bool, optional
-        If True, prints tracebacks for any failed processing tasks.
-    dry_run : bool, optional
-        If True, simulates the processing step, printing the intended input and output paths
-        without reading the data or writing to disk.
+    map_subset (str, optional): The regional string identifier (default is 'NWA') to subset the dataset.
+    overwrite (bool, optional): If True, forces the regeneration of all files.
+    verbose (bool, optional): If True, prints detailed pipeline progress.
+    debug (bool, optional): If True, prints tracebacks for any failed processing tasks.
+    parallel_runs (int, optional): Number of files to process in parallel
+    dry_run (bool, optional): If True, simulates the processing step, printing the intended input and output 
+                              paths without reading the data or writing to disk.
     """
 
     original_stdout = sys.stdout
@@ -323,34 +321,62 @@ def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verb
 
                     # 3. Build the task map
                     proc_map, dataset_info = build_globcolour_map(input_files, output_dir, overwrite, verbose)
-                    
-                    # 4. Execute the preprocessing tasks
-                    successful, failed = 0, 0
-                    for filename, task in proc_map.items():
-                        if task['is_up_to_date']:
-                            continue
 
-                        if dry_run:
-                            if should_log:
-                                print(f"    🌵 [DRY RUN] Would process: {filename}")
-                                print(f"       -> {os.path.basename(task['output'])}")
-                            successful += 1
-                            continue
+                    # 4. Filter out up-to-date tasks
+                    tasks_to_run = {k: v for k, v in proc_map.items() if not v['is_up_to_date']}
+                    successful, failed = 0, 0
+
+                    # 5. Check if any files need to be processed
+                    if not tasks_to_run:
+                        if should_log: print(f"🏁 {prod_name} COMPLETE: All files are up-to-date.")
+                        continue
+                    
+                    # 6. Log "dry run" files
+                    if dry_run:
+                        if should_log: print(f"    🌵 [DRY RUN] Would process {len(tasks_to_run)} files.")
+                        continue
+
+                    # 7. Process files
+                    # Sequential Execution
+                    if parallel_runs == 1:
+                        for filename, task in tasks_to_run.items():
+                            success = preprocess_globcolour(
+                                task=task, 
+                                dataset_info=dataset_info, 
+                                map_subset=map_subset, 
+                                verbose=verbose, 
+                                debug=debug
+                            )
+                            if success:
+                                successful += 1
+                            else:
+                                failed += 1
+                                
+                    # Parallel Execution
+                    else:
+                        if should_log: print(f"  ⚡ Launching {len(tasks_to_run)} parallel tasks across {parallel_runs} workers...")
+                        with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                            future_to_file = {
+                                executor.submit(preprocess_globcolour, task, dataset_info, map_subset, verbose, debug): filename
+                                for filename, task in tasks_to_run.items()
+                            }
                             
-                        success = preprocess_globcolour(
-                            task=task, 
-                            dataset_info=dataset_info, 
-                            map_subset=map_subset, 
-                            verbose=verbose, 
-                            debug=debug
-                        )
-                        
-                        if success:
-                            successful += 1
-                        else:
-                            failed += 1
+                            for future in concurrent.futures.as_completed(future_to_file):
+                                filename = future_to_file[future]
+                                try:
+                                    success = future.result()
+                                    if success:
+                                        successful += 1
+                                        if should_log: print(f"      ✅ [Parallel] Saved: {os.path.basename(proc_map[filename]['output'])}")
+                                    else:
+                                        failed += 1
+                                        if should_log: print(f"      ❌ [Parallel] Error processing: {filename}")
+                                except Exception as e:
+                                    failed += 1
+                                    if should_log: print(f"      ❌ [Parallel] Exception on {filename}: {e}")
                             
                     if should_log: print(f"🏁 {prod_name} COMPLETE: {successful} processed, {failed} failed.")
+
     except Exception as e:
         print("\n" + "="*80)
         print(f"❌ CRITICAL PIPELINE ERROR: {e}")
