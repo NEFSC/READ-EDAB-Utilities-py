@@ -9,6 +9,7 @@ Purpose:
 
 Main Functions:
     - product_defaults: Returns the default/primary dataset and datatype location for each product
+    - get_default_product_dataset: Returns the default dataset name for a given product.
     - netcdf_product_defaults: Returns the data product name found in the original source netcdf files
     - get_nc_prod: Returns internal variable name and metadata for a given dataset and product.
     - get_prod_files: Get the files for the specified product.
@@ -29,6 +30,7 @@ Author:
 Modification History
     Sep 18, 2025 - KJWH: Moved product specific functions from file_utilities to dataset_utitlities
                          Overhauled get_prod_files to by more dynamic and find STATS files based on the period code
+    Oct 21, 2026 - KJHW: Added get_default_product_dataset function to quickly get the default dataset for a given product
 
 """
 def product_defaults():
@@ -75,6 +77,36 @@ def product_defaults():
     }
 
     return prod_info_map
+
+def get_default_product_dataset(product_name):
+    """
+    Returns the default dataset name for a given product.
+
+    Parameters:
+        product_name (str): Name of the product (e.g., 'CHL', 'SST').
+
+    Returns:
+        The default dataset name for the specified product (str).
+
+    Raises:
+        KeyError - If the product is unknown.
+        ValueError - If the product entry does not contain a dataset field.
+    """
+    info = product_defaults()
+    prod_key = product_name.upper().strip()
+    
+    if prod_key not in info:
+        raise KeyError(f"Unknown product '{prod_key}'. "
+                       f"Available products: {list(info.keys())}")
+    
+    entry = info[prod_key]
+    if len(entry) < 2:
+        raise ValueError(
+            f"Product '{prod_key}' does not contain a dataset entry. "
+            f"Expected tuple of length ≥ 2, got: {entry}"
+        )
+        
+    return entry[1]
 
 def netcdf_product_defaults():
     """
