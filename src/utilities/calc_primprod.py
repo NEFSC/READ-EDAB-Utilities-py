@@ -418,7 +418,7 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, verbose=False, hi
     # 7️⃣ Save results
     if verbose: print (f"    Starting to write {output_pp_file}")
     start_netcdf = time.perf_counter()
-    ds_out.to_netcdf(output_pp_file,encoding=encoding)
+    ds_out.to_netcdf(output_pp_file,encoding=encoding,format='NETCDF4', engine='h5netcdf')
     elapsed_netcdf = (time.perf_counter() - start_netcdf) / 60
     if verbose: print(f"    Finished writing {output_pp_file} after {elapsed_netcdf:.2f} minutes.")
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

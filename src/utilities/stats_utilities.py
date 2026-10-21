@@ -948,7 +948,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 
                 # 6. Write the netcdf file to disk 
                 if debug: print(f"      💾 Saving {out_path}")
-                stats_ds.to_netcdf(out_path,format='NETCDF4')
+                stats_ds.to_netcdf(out_path,format='NETCDF4', engine='h5netcdf')
                         
                 print(f"  Saved: {os.path.basename(out_path)}")
                             
