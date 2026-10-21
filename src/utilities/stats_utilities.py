@@ -20,7 +20,7 @@ import dask
 # Local utilities
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import get_period_info, get_period_sets
-from utilities import get_prod_files, get_filepath
+from utilities import get_prod_files, get_filepath, get_default_product_dataset, get_default_dataset_product
 from utilities import generate_logfile_path
 from utilities import get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
@@ -65,7 +65,17 @@ Modification History
     Oct 09, 2026 - KJWH: get_prod_files is now using the output period to add the data_type(STATS/CLIM) to the output file name
                          Bug fix: Added a second get_prod_files search when the input period is D and map_subset is provided (will default back to GLOBAL if no files are found)
     Oct 14, 2026 - KJWH: Added dataset to the get_period_sets() call to ensure the climatology_range is properly clamped to the dataset's start year if the input files are out of range of the default climatology_range
-    Oct 20, 2026 - KJWH: Removed xr.open_dataset() in build_stats_map() and using the native h5netcdf to read the file attributes
+    Oct 15, 2026 - KJWH: Added calculations for skew (skewness) and kurt (kurtosis), as well as their log-transformed counterparts (gskew and gkurt), to the compute_stats() function.
+    Oct 20, 2026 - KJWH: Replaced xr.open_dataset() in build_stats_map() and with the native h5netcdf to read the file attributes
+    Oct 21, 2026 - KJWH: Forced h5netcdf engine in all .to_netcdf() calls
+                         Added a try/except block to the map builders that automatically detects unreadable/corrupted NetCDF files and deletes them
+                         Also fixed the accidentally dropped var (variance) key
+                         Moved the default product, dataset, and period routing logic to the very top of run_stats_pipeline
+                         Implemented a new tracking system that distinguishes between files that are Created, Replaced (overwritten due to new inputs), and Skipped (up-to-date), along with tallies for deleted corrupt files and missing baselines.
+                         Intercepted the logfile parameter to pass through generate_logfile_path(), allowing standardized log naming across all execution environments.
+                         Fixed Parallel Write Collisions: Identified and deleted a duplicate tasks_to_run.append line that was indiscriminately queueing "skipped" files for processing, causing multiple parallel workers to collide while trying to overwrite the exact same file.
+                         Fixed a bug where ds_version was throwing a NameError in get_source_metadata by extracting it natively from file_parser alongside the dataset name.
+                         Added .pop("_FillValue", None) to the var_attrs dictionary before assigning it to the dataset to prevent xarray from crashing when generating the .to_netcdf() encoding dictionaries.
 
     
 """
@@ -986,7 +996,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
     
 
 
-def run_stats_pipeline(prods, periods=None, **kwargs):
+def run_stats_pipeline(prods=None, periods=None, **kwargs):
     """
     Purpose:
         Runs a multi-product, multi-period stats pipeline.
@@ -1016,11 +1026,27 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         results (dict): {(prod, period): xr.Dataset} of computed statistics.
     """
 
+    dataset = kwargs.pop('dataset',None)
+    # Fallback logic for products
+    if not prods:
+        if dataset:
+            prods = [get_default_dataset_product(dataset.upper())]
+        else:
+            raise ValueError("Must provide either 'prods' or 'dataset' to infer default product.")
+
+    # Normalize prods input
+    if isinstance(prods, str): prods = [prods.upper().strip()]
+    
+    # Fallback and normalization of periods
+    if periods is None: 
+        periods = ['W', 'M', 'A']
+    elif isinstance(periods, str):
+        periods = [periods]
+
     # Handle logfile auto-generation
     logfile = kwargs.pop('logfile', None)
-    logdataset = kwargs.pop('dataset', None)
     if logfile in ["auto", True]:
-        logfile = generate_logfile_path("stats", prods=prods, dataset=logdataset, env_dict=env)    
+        logfile = generate_logfile_path("stats", prods=prods, dataset=dataset, env_dict=env)    
 
     original_stdout = sys.stdout # Save the original terminal output
 
@@ -1032,13 +1058,6 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
 
     # Use try/finally to GUARANTEE the terminal output is restored, even if the code crashes
     try:
-        # Normalize inputs
-        if isinstance(prods, str): prods = [prods.upper().strip()]
-        if periods is None: 
-            periods = ['W', 'M', 'A']
-        elif isinstance(periods, str):
-            periods = [periods]
-
         verbose = kwargs.pop('verbose', False)
         debug   = kwargs.get('debug', False) # Get it, but don't pop yet if others need it
         should_log = verbose or bool(logfile)
@@ -1056,7 +1075,6 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
         
         # Pull variables out of kwargs
         debug   = kwargs.get('debug', False) 
-        dataset = kwargs.pop('dataset',None)
         map_subset  = kwargs.get('map_subset', 'GLOBAL')
         parallel_runs = kwargs.pop('parallel_runs', 1) 
         allow_nrt = kwargs.pop('allow_nrt', False)
@@ -1073,6 +1091,15 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
 
         # Loop through prods
         for prod in prods:
+            # Dynamic Dataset Resolution Per Product
+            current_dataset = dataset
+            if not current_dataset:
+                try:
+                    current_dataset = get_default_product_dataset(prod)
+                except KeyError:
+                    if should_log: print(f"\n⚠️ No default dataset found for product '{prod}'. Skipping.")
+                    continue
+            
             # Loop through the periods
             for period in periods:
                 if should_log: print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
@@ -1218,9 +1245,13 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                 print(f"  • {f}")
 
         if all_corrupt_inputs:
-            print(f"\n🚨 CORRUPT INPUT FILES IDENTIFIED ({len(all_corrupt_inputs)}):")
-            for err in sorted(all_corrupt_inputs):
-                print(f"  • {os.path.basename(err)}")
+            print(f"\n🚨 CORRUPT FILES ({len(all_corrupt_inputs)}):")
+            for err_str in sorted(all_corrupt_inputs):
+                if " (" in err_str:
+                    file_path, error_msg = err_str.rsplit(" (", 1)
+                    print(f"  • {os.path.basename(file_path)} ({error_msg}")
+                else:
+                    print(f"  • {os.path.basename(err_str)}")
         print("="*60)
     finally:
         # Close the Log File and restore the terminal
