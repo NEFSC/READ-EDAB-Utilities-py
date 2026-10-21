@@ -202,9 +202,9 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
             ds = ds.expand_dims('time').assign_coords(time=[parsed_date])
             
         # Subset to predefined region
-        if subset_map and subset_map != "GLOB":
-            if debug: print(f"      🗺️ Subsetting to region: {subset_map}...")
-            ds = subset_dataset(ds, subset_map)
+        if map_subset and map_subset != "GLOB":
+            if debug: print(f"      🗺️ Subsetting to region: {map_subset}...")
+            ds = subset_dataset(ds, map_subset)
             
         # 3. Add Global metadata
         if debug: print(f"      🏷️ Updating metadata attributes...")
@@ -236,7 +236,7 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
             if debug: print(f"      ⚠️ Product metadata warning: {e}")
 
         # Modification History
-        new_history = f"{get_current_utc_timestamp()} Added time coordinate and subset to {subset_map} from global file {os.path.basename(in_path)}."
+        new_history = f"{get_current_utc_timestamp()} Added time coordinate and subset to {map_subset} from global file {os.path.basename(in_path)}."
         attrs["history"] = f"{ds.attrs.get('history', '')}\n{new_history}".strip()
         
         # Source Metadata
