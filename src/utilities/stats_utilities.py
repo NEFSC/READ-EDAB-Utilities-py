@@ -1118,8 +1118,6 @@ def run_stats_pipeline(prods, periods=None, **kwargs):
                             if should_log: print(f"  🆕 Queued for Creation: {file_name}")
                         tasks_to_run.append((out_period, task))
                     
-                    tasks_to_run.append((out_period, task))
-
                 # If everything was up to date, skip to the next product/period
                 if not tasks_to_run:
                     continue
