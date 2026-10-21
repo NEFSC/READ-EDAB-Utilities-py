@@ -383,7 +383,7 @@ def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verb
                         if should_log: print(f"  ⚡ Launching {len(tasks_to_run)} parallel tasks across {parallel_runs} workers...")
                         with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
                             future_to_file = {
-                                executor.submit(preprocess_globcolour, task, dataset_info, map_subset, verbose, debug): filename
+                                executor.submit(preprocess_globcolour, task=task, map_subset=map_subset, dataset_info=dataset_info, verbose=verbose, debug=debug): filename
                                 for filename, task in tasks_to_run.items()
                             }
                             
