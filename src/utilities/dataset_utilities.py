@@ -10,7 +10,7 @@ Purpose:
 Main Functions:
     - dataset_defaults: Returns the default/primary datatype location and product for each "source" dataset
     - get_default_dataset_product: Returns the default product (e.g., SST, CHL) for a given dataset.
-    - get_datasets_source: Checks for the first valid input data directory from a given dictionary.
+    - get_datasets_path: Checks for the first valid input data directory from a given dictionary.
     - get_dataset_products: Searches for products within the given SOURCE and PRODUCTS paths for a dataset
     - parse_dataset_info: Extracts structured metadata from a full dataset path.
     - resolve_dataset_grid: Resolves the appropriate dataset_grid folder for a given product within a dataset structure.
@@ -37,6 +37,7 @@ Modification History
     Oct 14, 2026 - KJWH: Add the dataset start year to the dataset_defaults() to allow for proper clamping of the climatology_range
     Oct 15, 2026 - KJWH: Added a processing_level to the dataset_grid to distinguish between near-real-time (NRT) and reanalysis (RAN) files
                          Updated resolve_dataset_grid and parse_dataset_info to handle the processing_level
+    Oct 19, 2026 - KJWH: Change get_datasets_source to get_datasets_path to avoid confusion with the SOURCE directories
                          
 
 """
@@ -95,7 +96,7 @@ def get_default_dataset_product(dataset_name):
         )
     return entry[2]
 
-def get_datasets_source(preferred=None,verbose=False):
+def get_datasets_path(preferred=None,verbose=False):
     """
     Checks for the first valid input data directory from a given dictionary.
     
@@ -136,7 +137,7 @@ def get_dataset_dirs(dataset=None,verbose=True):
               If dataset is provided, returns only its matching subfolders.
 
     """
-    root_dir = get_datasets_source(verbose=verbose)
+    root_dir = get_datasets_path(verbose=verbose)
     
     if verbose:
         print(f"🔍 SCANNING ROOT DIRECTORY: {root_dir}")
@@ -145,7 +146,7 @@ def get_dataset_dirs(dataset=None,verbose=True):
     results = {}
     for dirpath, dirnames, _ in os.walk(root_dir): 
         for dirname in dirnames:
-            if dirname.startswith("SOURCE") or dirname.endswith("PRODUCTS"):
+            if dirname.startswith("SOURCE") or dirname.endswith("PRODUCTS") or dirname.__contains__("EXTRACT"):
                 full_path = os.path.join(dirpath, dirname)
                
                 # Get top-level dataset name
@@ -417,7 +418,7 @@ def parse_dataset_info(pathlist, base=None, verbose=False):
     
     Parameters:
         path: str, full path to a dataset directory or file
-        base: str, optional base path to strip (e.g. from get_datasets_source())
+        base: str, optional base path to strip (e.g. from get_datasets_path())
         verbose: bool, if True, prints debugging information about path splitting
 
     Returns:
@@ -428,7 +429,7 @@ def parse_dataset_info(pathlist, base=None, verbose=False):
     dataset_info = dataset_defaults()
 
     if base is None:
-        base = get_datasets_source(verbose=False)
+        base = get_datasets_path(verbose=False)
     
     base = os.path.abspath(base)
     
