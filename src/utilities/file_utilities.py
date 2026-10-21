@@ -87,10 +87,10 @@ def file_parser(files):
 
     # 3. Extract period specific information if available
     perinfo = extract_period_code(files)
-    percode = [info['code'] for info in perinfo]
-    fullperiod = [info['full_period'] for info in perinfo]
-    years_list = [info['years'] for info in perinfo]
-    clim_ranges = [info['climatology_range'] for info in perinfo]
+    percode = [info.get('code') for info in perinfo]
+    fullperiod = [info.get('full_period') for info in perinfo]
+    years_list = [info.get('years') for info in perinfo]
+    clim_ranges = [info.get('climatology_range') for info in perinfo]
         
     # 4. Loop through files to add information
     results = []

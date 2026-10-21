@@ -423,7 +423,13 @@ def extract_period_code(filenames):
     base = name.split("-", 1)[0]
     
     # Template for a failed/empty extraction
-    empty_result = {"code": None, "full_period": None, "segments": None,"years": None}
+    empty_result = {
+        "code": None, 
+        "full_period": None, 
+        "segments": None, 
+        "years": None, 
+        "climatology_range": None  # 🎯 Ensure this is present
+    }
 
     for code, info in get_period_info().items():
         pattern = info["regex"]
