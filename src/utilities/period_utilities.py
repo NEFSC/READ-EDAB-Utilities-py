@@ -1414,7 +1414,7 @@ def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range
                 .replace("YYYY",  f"{y1:04d}"))
         return [out] 
 
-    raise NotImplementedError(f"Unknown span type '{span_type}'.")
+    raise NotImplementedError(f"Unknown period code '{period_code}'.")
 
 def map_inputs_to_period(period_code, output_period, spans, vspans, range_by_year):
     """
