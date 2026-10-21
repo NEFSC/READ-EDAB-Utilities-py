@@ -54,6 +54,7 @@ Modification History
     Sep 11, 2025 - KJWH: Converted to a full pipeline modeled after calc_primprod.py
                          Updated documentation
     Oct 15, 2026 - KJWH: Added DualLogger and updated logfile output
+    Oct 21, 2026 - KJWH: Forced h5netcdf engine in all .to_netcdf() calls
 
 """
 
