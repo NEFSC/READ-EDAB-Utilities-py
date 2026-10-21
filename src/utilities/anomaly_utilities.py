@@ -600,9 +600,17 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
                     # Sequential execution by Climatology Group
                     for clim_file, task_list in tasks_by_clim.items():
                         successes, fails, corrupt_files = process_anomaly_group(clim_file, task_list, prod, period, verbose, **kwargs)
-                        successful_tasks.extend(successes)
-                        failed_tasks.extend(fails)
+                        
                         if corrupt_files: all_corrupt_inputs.update(corrupt_files)
+                        
+                        # Route the successes into the correct trackers
+                        for p in successes:
+                            if anomaly_map[p]['file_exists']: 
+                                replaced_tasks.append(p)
+                            else: 
+                                created_tasks.append(p)
+                        for f in fails:
+                            failed_tasks.append(f"{f} (Processing failed)")
                 else:
                     # Parallel execution by Climatology Group
                     if verbose: print(f"\n  ⚡ Launching {len(tasks_by_clim)} climatology groups across {parallel_runs} parallel workers...")
@@ -616,9 +624,17 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
                         for future in concurrent.futures.as_completed(future_to_clim):
                             try:
                                 successes, fails, corrupt_files = future.result()
-                                successful_tasks.extend(successes)
-                                failed_tasks.extend(fails)
+                                
                                 if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
+                                
+                                # Route the successes into the correct trackers
+                                for p in successes:
+                                    if anomaly_map[p]['file_exists']: 
+                                        replaced_tasks.append(p)
+                                    else: 
+                                        created_tasks.append(p)
+                                for f in fails:
+                                    failed_tasks.append(f"{f} (Processing failed)")
                             except Exception as e:
                                 print(f"\n❌ [Parallel] Error processing group:\n  ⚠️  {e}")
 
