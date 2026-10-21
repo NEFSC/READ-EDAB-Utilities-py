@@ -79,26 +79,21 @@ class DualLogger:
 
 def build_globcolour_map(input_files, output_dir, overwrite=False, verbose=False):
     """
-    Compares a list of input files against the target output directory to determine 
-    which files are missing or out-of-date. It builds a processing task map and extracts
-    dataset metadata needed for standardized file naming.
+    Purpose:
+        Compares a list of input files against the target output directory to determine 
+        which files are missing or out-of-date. It builds a processing task map and extracts
+        dataset metadata needed for standardized file naming.
     
-    Parameters
-    ----------
-    input_files : list
-        List of absolute file paths to the raw source NetCDF files.
-    output_dir : str
-        Path to the directory where processed files should be saved.
-    overwrite : bool, optional
-        If True, forces all files to be marked for processing regardless of modification time.
-    verbose : bool, optional
-        If True, prints progress and summary statistics.
+    Input Parameters:
+        input_files (list): List of absolute file paths to the raw source NetCDF files.
+        output_dir (str): Path to the directory where processed files should be saved.
+        overwrite (bool, optional): If True, forces all files to be marked for processing regardless of modification time.
+        verbose (bool, optional): If True, prints progress and summary statistics.
         
-    Returns
-    -------
-    tuple
-        - processing_map (dict): A dictionary mapping original filenames to their task parameters.
-        - dataset_info (dict): Parsed metadata components (dataset, version, grid, product) for the directory.
+    Returns:
+        tuple
+            - processing_map (dict): A dictionary mapping original filenames to their task parameters.
+            - dataset_info (dict): Parsed metadata components (dataset, version, grid, product) for the directory.
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -304,13 +299,14 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
 
 
 
-def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verbose=True, debug=False, parallel_runs=1, dry_run=False, delete_corrupt=False):
+def run_globcolour_dataset(prods=None, map_subset="NWA", overwrite=False, logfile=None, verbose=True, debug=False, parallel_runs=1, dry_run=False, delete_corrupt=False):
     """
     Purpose:
         High-level orchestrator that discovers all GlobColour products, fetches their global 
         daily files, evaluates processing needs, and executes the preprocessing loop for each product.
     
     Input Parameters
+        prods (str or list of str, optional): Specific product(s) to process. If None, runs all available.
         map_subset (str, optional): The regional string identifier (default is 'NWA') to subset the dataset.
         overwrite (bool, optional): If True, forces the regeneration of all files.
         verbose (bool, optional): If True, prints detailed pipeline progress.
@@ -321,6 +317,13 @@ def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verb
 
     """
 
+    # Normalize prods input
+    if prods is not None:
+        if isinstance(prods, str):
+            prods = [prods.upper().strip()]
+        else:
+            prods = [p.upper().strip() for p in prods]
+    
     original_stdout = sys.stdout
 
     if logfile in ["auto", True]:
@@ -360,9 +363,12 @@ def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verb
                 if 'GLOBAL' not in res_key or 'DAILY' not in res_key:
                     continue
                 for prod_name, input_dir in res_level.items():
-                    
-                    if should_log: print(f"🧪 Processing product: {prod_name} ({source_key} -> {res_key})")
-                        
+
+                    # Filter: Skip this product if it wasn't requested
+                    if prods and prod_name.upper() not in prods:
+                        continue
+
+                    if should_log: print(f"🧪 Processing product: {prod_name} ({source_key} -> {res_key})")   
 
                     # 1. Fetch input files using get_prod_files looking for GLOBAL files
                     input_files = get_prod_files(prod_name, dataset='GLOBCOLOUR', map_subset='GLOBAL', verbose=debug)
