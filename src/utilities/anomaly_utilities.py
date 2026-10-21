@@ -478,7 +478,7 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                 anom_ds = sanitize_for_netcdf(anom_ds)
                 
                 # Save Output
-                anom_ds.to_netcdf(out_path, format='NETCDF4', encoding=encoding)
+                anom_ds.to_netcdf(out_path, format='NETCDF4', encoding=encoding, engine='h5netcdf')
                 if verbose: print(f"    ✅ Saved: {os.path.basename(out_path)}")
                 
                 successful_periods.append(out_period)

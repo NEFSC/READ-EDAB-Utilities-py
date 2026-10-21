@@ -169,18 +169,24 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
     # NetCDF sanitizer to strip out unhashable dictionaries
     def sanitize_for_netcdf(dataset):
         for obj in [dataset] + [dataset[var] for var in dataset.variables]:
+            # 1. Clean Attributes
             for k, val in list(obj.attrs.items()):
                 if isinstance(val, dict):
-                    # Convert unhashable dicts safely to strings
                     obj.attrs[k] = val.get('default', str(val))
-                elif isinstance(val, list):
-                    # Catch lists of dictionaries or complex objects
+                elif val is None:
+                    obj.attrs[k] = "None"
+                elif isinstance(val, (list, tuple)):
+                    # Check if the list contains unhashable items (like dicts)
                     try:
                         set(val)
                     except TypeError:
                         obj.attrs[k] = str(val)
-                elif val is None:
-                    obj.attrs[k] = "None"
+            
+            # 2. Clean Encodings (xarray hides chunking dicts here that crash to_netcdf)
+            for k, val in list(obj.encoding.items()):
+                if isinstance(val, dict) or val is None:
+                    del obj.encoding[k]
+                    
         return dataset
     
     in_path = task['input']
@@ -254,12 +260,12 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
             if var in ds.data_vars:
                 ds[var].attrs = v_attrs
 
-        # 🎯 ADDED: Sanitize dataset immediately before saving
+        # Sanitize dataset immediately before saving
         ds = sanitize_for_netcdf(ds)
 
         # 4. Save output
         if verbose: print(f"      💾 Saving {os.path.basename(out_path)}...")
-        ds.to_netcdf(out_path, format='NETCDF4')
+        ds.to_netcdf(out_path, format='NETCDF4', engine='h5netcdf')
         
         return True
 
