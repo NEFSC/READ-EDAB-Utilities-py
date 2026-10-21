@@ -57,6 +57,7 @@ Modification History
                          Updated documentation
                          Added validate_inputs function to check input data types and shapes
     Oct 15, 2026 - KJWH: Added DualLogger and updated logfile output
+    Oct 21, 2026 - KJWH: Forced h5netcdf engine in all .to_netcdf() calls
 """
 
 class DualLogger:

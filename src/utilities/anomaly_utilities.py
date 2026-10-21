@@ -16,7 +16,7 @@ import dask
 # Local utilities (Adapted from stats_utilities)
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import get_default_climatology_range, extract_period_code, get_clim_period 
-from utilities import get_prod_files, get_filepath, file_parser, corrupt_file_detector
+from utilities import get_prod_files, get_filepath, file_parser,get_default_product_dataset, get_default_dataset_product, corrupt_file_detector
 from utilities import generate_logfile_path
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
 from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value, get_source_metadata
@@ -54,8 +54,21 @@ Author:
     This program was written on October 13, 2026 by Kimberly J. W. Hyde, Northeast Fisheries Science Center | NOAA Fisheries | U.S. Department of Commerce, 28 Tarzwell Dr, Narragansett, RI 02882
   
 Modification History
-    Oct 13, 2026 - KJWH: Initial code written (based off of stats_utilities)
+    Oct 13, 2026 - KJWH: Initial code written usingn the stats_utilities structural framework
+    Oct 16, 2026 - KJWH: RAM-Optimized Group Processing: Replaced process_single_anomaly with process_anomaly_group. Instead of opening climatology files for every single statistical task, the pipeline groups tasks by their target baseline, loads the climatology file into memory exactly once, and loops through all corresponding statistical files efficiently.
+                         Log-Normal Ratio Anomalies: Added is_log_anomaly() to detect log-normally distributed products (like Chlorophyll) and compute their anomalies as a ratio (stat / clim) instead of a standard difference (stat - clim). Injected metadata attributes (units, comment, anomaly_method) to explicitly document this.
+                         Targeted Statistics: Added the ability to manually target specific statistical variables for the anomaly calculation via stat_var (e.g., median or max), dynamically defaulting to median for log-products and mean for everything else.
+                         Dynamic Baseline Matching: Integrated batch_anomaly_match to dynamically pair statistical files with clamped baseline files. Handled running means (like D3 or D8) by calculating the exact center-date of the time series and targeting the corresponding DOY climatology file.
+                         Fixed Coordinate Alignment Crash: Fixed a Time coordinate is empty crash by explicitly squeezing and dropping the time dimension from the climatology file upon loading, preventing xarray from failing to align mismatched historical dates.
+Missing Baseline Graceful Fails: Ensured that missing climatology files safely return "NA" rather than crashing the pipeline, allowing them to be specifically logged in the final summary.
     Oct 20, 2026 - KJWH: Removed xr.open_dataset() in build_stats_map() and using the native h5netcdf to read the file attributes
+    Oct 21, 2026 - KJWH: Forced h5netcdf engine in all .to_netcdf() calls
+                         Added a try/except block to the map builders that automatically detects unreadable/corrupted NetCDF files and deletes them
+                         Also fixed the accidentally dropped var (variance) key
+                         Moved the default product, dataset, and period routing logic to the very top of run_stats_pipeline
+                         Implemented a new tracking system that distinguishes between files that are Created, Replaced (overwritten due to new inputs), and Skipped (up-to-date), along with tallies for deleted corrupt files and missing baselines.
+                         Intercepted the logfile parameter to pass through generate_logfile_path(), allowing standardized log naming across all execution environments.
+                         Updated documentation
     
 """
 
@@ -78,6 +91,10 @@ class DualLogger:
 
 
 def boost_file_limits():
+    """
+    Purpose:
+        Raises the system limit for open file handles (Linux/Mac only).
+    """
     if platform.system() != 'Windows':
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -89,6 +106,12 @@ def is_log_anomaly(prod):
     Purpose:
         Identifies whether a product is log-normally distributed and requires 
         a ratio-based anomaly calculation instead of a standard difference.
+
+    Input Parameters:
+        prod (str): The logical product name (e.g., 'CHL', 'SST').
+
+    Returns:
+        bool: True if the product requires log-anomaly (ratio) processing, False otherwise.
     """
     # Add any other log-normally distributed products to this list
     log_products = ['CHL', 'CHLA', 'KD490', 'POC'] 
@@ -97,9 +120,23 @@ def is_log_anomaly(prod):
 
 def batch_anomaly_match(input_files, clim_files, climatology_range=None):
     """
-    Takes a list of input files and matches them to climatology files.
-    Applies baseline clamping logic to enforce specific year ranges.
-    Returns a dictionary: {input_file: matched_clim_file}
+    Purpose:
+        Takes a list of input statistical files and matches them to their corresponding 
+        climatology baseline files. Applies baseline clamping logic to enforce specific year ranges.
+
+    Input Parameters:
+        input_files (list): List of absolute paths to the statistical input NetCDF files.
+        clim_files (list): List of absolute paths to the climatology baseline NetCDF files.
+        climatology_range (tuple, optional): A two-element tuple (start_year, end_year) specifying the 
+                                             climatology baseline. If None, it defaults to the dataset's standard.
+
+    Helper Functions:
+        - get_default_climatology_range: Fetches default dataset-specific baseline years.
+        - file_parser: Extracts date, dataset, and grouping metadata from filenames.
+
+    Returns:
+        dict: A dictionary mapping each input file to its matched climatology file path. 
+              Returns "NA" for the value if no match is found.
     """
    
     matched_pairs = {}
@@ -164,8 +201,34 @@ def build_anomaly_map(prod, period, output_dir=None,
                       data_type="ANOM", verbose=False, debug=False):
     """
     Purpose:
-        Orchestrates the preparation phase of the anomaly pipeline by pairing 
-        statistical files with their corresponding climatology files and evaluating freshness (mtimes).
+        Orchestrates the preparation phase of the anomaly pipeline by resolving output directories,
+        pairing statistical files with their corresponding climatology files, and evaluating freshness (mtimes)
+        to determine if processing is needed.
+
+    Input Parameters:
+        prod (str): The logical product name to process (e.g., 'SST', 'CHL').
+        period (str): The time period code for the target anomalies (e.g., 'M', 'D8').
+        output_dir (str, optional): The destination directory for the output files. Automatically resolved if None.
+        dataset (str, optional): Override for the dataset name (e.g., 'OCCCI'). Defaults to the product's default.
+        daterange (list or tuple, optional): Date boundaries for filtering input files.
+        climatology_range (tuple, optional): Year boundaries (start, end) for the baseline.
+        dataset_version (str, optional): Override for the dataset version.
+        dataset_map (str, optional): Specific map folder structure to override default routing.
+        map_subset (str, optional): The spatial region abbreviation to subset the data to (e.g., 'NES').
+        overwrite (bool, optional): If True, flags all tasks for reprocessing regardless of existing file modification times.
+        data_type (str, optional): The data type suffix appended to the output file names. Default is "ANOM".
+        verbose (bool, optional): If True, prints progress updates and routing information.
+        debug (bool, optional): If True, prints extensive troubleshooting information.
+
+    Helper Functions:
+        - batch_anomaly_match: Pairs stat files with their corresponding climatology files.
+        - extract_period_code: Pulls exact full period codes from strings for naming.
+
+    Returns:
+        tuple:
+            - dict: A dictionary mapping each target output period to its specific processing task definition.
+            - list: A list of previously corrupted file paths that were successfully deleted.
+            - list: A list of corrupted file paths that were locked by the OS and require manual deletion.
     """
     
     # 1. Resolve Output Directory
@@ -302,7 +365,19 @@ def compute_anomaly(stat_da, clim_da, prod):
     """
     Purpose:
         Calculates the anomaly between a statistical DataArray and a climatological baseline DataArray.
-        Verifies that spatial dimensions match before calculating.
+        Verifies that spatial dimensions match before calculating. Uses ratio for log-normal products 
+        and simple difference for standard products.
+
+    Input Parameters:
+        stat_da (xr.DataArray): The statistical data array.
+        clim_da (xr.DataArray): The climatological baseline data array.
+        prod (str): The product name, used to determine the math method (ratio vs difference).
+
+    Helper Functions:
+        - is_log_anomaly: Determines if the product requires a ratio-based calculation.
+
+    Returns:
+        xr.DataArray: The computed anomaly array.
     """
     # Verify the core spatial dimensions match to prevent broadcasting errors
     if stat_da.sizes.get('lat') != clim_da.sizes.get('lat') or stat_da.sizes.get('lon') != clim_da.sizes.get('lon'):
@@ -326,7 +401,25 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
     Purpose:
         Processes a group of anomaly tasks that share a common climatology file.
         Opens and loads the climatology baseline into memory exactly once, 
-        then iterates through all corresponding statistical files.
+        then iterates through all corresponding statistical files to calculate and save anomalies.
+
+    Input Parameters:
+        clim_file (str): The absolute path to the climatology NetCDF file.
+        task_list (list): A list of tuples containing (out_period, task_dictionary) to be processed against the clim_file.
+        prod (str): The product being processed (e.g., 'SST').
+        per (str): The period code (e.g., 'M').
+        verbose (bool): If True, prints progress updates.
+        **kwargs: Additional arguments such as 'debug' and 'stat_var'.
+
+    Helper Functions:
+        - compute_anomaly: Performs the core mathematical anomaly calculation.
+        - sanitize_for_netcdf: Cleans attributes and encodings before saving to disk.
+
+    Returns:
+        tuple: 
+            - list: Periods successfully processed.
+            - list: Periods that failed processing.
+            - list: Corrupted files identified during processing.
     """
     boost_file_limits()
     
@@ -520,8 +613,50 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
 def run_anomaly_pipeline(prods, periods=None, **kwargs):
     """
     Purpose:
-        Executes a multi-product, multi-period anomaly calculation pipeline.
+        Executes a multi-product, multi-period anomaly calculation pipeline. Resolves default datasets,
+        orchestrates file mapping, groups tasks by climatology baselines to optimize memory utilization, and runs 
+        the processing sequentially or in parallel.
+
+    Input Parameters:
+        prods (str or list of str, optional): Product name(s) to process. Infers default if None.
+        periods (str or list of str, optional): Period code(s) to compute (e.g., 'M', 'A'). Defaults to ['M', 'A', 'SEASON'].
+        **kwargs: Additional configuration parameters including:
+            - dataset (str): Dataset name to use.
+            - map_subset (str): Map region to process.
+            - parallel_runs (int): Number of parallel workers to use.
+            - stat_var (str): The specific statistic to use for the anomaly (e.g., 'mean', 'median').
+            - logfile (str): Path to write logs, or "auto" to generate automatically.
+            - verbose (bool): Enable standard logging outputs.
+            - debug (bool): Enable detailed tracebacks and xarray warnings.
+
+    Helper Functions:
+        - build_anomaly_map: Creates the processing task list.
+        - process_anomaly_group: Core processing function for grouped tasks.
+        - generate_logfile_path: Creates standard logging path if requested.
+
+    Returns:
+        None
     """
+
+    # Extract global dataset early to establish defaults
+    dataset = kwargs.pop('dataset', None)
+    
+    # Fallback logic for products
+    if not prods:
+        if dataset:
+            from dataset_utilities import get_default_dataset_product
+            prods = [get_default_dataset_product(dataset.upper())]
+        else:
+            raise ValueError("Must provide either 'prods' or 'dataset' to infer defaults.")
+
+    # Normalize prods input
+    if isinstance(prods, str): prods = [prods.upper().strip()]
+
+    # Fallback and normalization for periods
+    if not periods: 
+        periods = ['W', 'M', 'A']
+    elif isinstance(periods, str):
+        periods = [periods]
     
     # Handle logfile auto-generation
     logfile = kwargs.pop('logfile', None)
@@ -567,6 +702,15 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
         all_manual_delete = []   
                 
         for prod in prods:
+            current_dataset = dataset
+            if not current_dataset:
+                from product_utilities import get_default_product_dataset
+                try:
+                    current_dataset = get_default_product_dataset(prod)
+                except KeyError:
+                    if should_log: print(f"\n⚠️ No default dataset found for product '{prod}'. Skipping.")
+                    continue
+            
             for period in periods:
                 if verbose: print(f"\n🚀 Starting anomaly pipeline for {prod} | Period: {period}")
                 
@@ -660,7 +804,13 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
             print("\n".join([f"  • {task}" for task in missing_climatologies]))
             
         if all_corrupt_inputs:
-            print(f"\n🚨 CORRUPT FILES ({len(all_corrupt_inputs)}):\n" + "\n".join([f"  • {os.path.basename(err)}" for err in sorted(all_corrupt_inputs)]))
+            print(f"\n🚨 CORRUPT FILES ({len(all_corrupt_inputs)}):")
+            for err_str in sorted(all_corrupt_inputs):
+                if " (" in err_str:
+                    file_path, error_msg = err_str.rsplit(" (", 1)
+                    print(f"  • {os.path.basename(file_path)} ({error_msg}")
+                else:
+                    print(f"  • {os.path.basename(err_str)}")
         
         # Output the manual deletion list
         if all_manual_delete:
