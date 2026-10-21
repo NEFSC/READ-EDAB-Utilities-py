@@ -15,7 +15,7 @@ from utilities import (
     get_dataset_products, parse_dataset_info, get_prod_files, get_source_file_dates,
     get_default_metadata, get_lut_metadata, get_geospatial_metadata, get_temporal_metadata, build_product_attributes, 
     get_summary_metadata, get_reference_metadata, get_source_metadata, get_current_utc_timestamp,
-    generate_logfile_path
+    generate_logfile_path, corrupt_file_detector
 )
 
 """
@@ -45,7 +45,14 @@ Author:
   
 Modification History
     Aug 19, 2026 - KJWH: Initial code written for GlobColour preprocessing and subsetting workflow.
-    Oct 20, 2026 - KJHW: Added parallel processing functionality
+    Oct 20, 2026 - KJHW: Added parallel processing functionality by integrating concurrent.futures.ProcessPoolExecutor into run_globcolour_dataset.
+                         Intercepted the logfile parameter in run_globcolour_dataset to automatically route through your generate_logfile_path() function, cleanly formatting the filename with timestamps
+                         Replaced the custom LoggerWriter with the universal DualLogger class to safely mirror outputs to the terminal and log files
+                         Implemented the should_log = verbose or bool(logfile) logic to ensure that top-level pipeline progress is tracked in the logfile
+    Oct 21, 2026 - KJWH: Renamed subset_map to map_subset across all functions to perfectly match the naming conventions used in your other utility scripts
+                         Corrected a bug where map_subset and dataset_info were flipped in the executor.submit positional arguments, which was previously passing a dictionary to the subsetter and causing a crash.
+                         Fixed the unhashable type: 'dict' crash triggered by xarray.to_netcdf(). Added a sanitize_for_netcdf() function that scrubs not only .attrs, but also the hidden .encoding dictionaries that xarray uses for chunking, safely converting any nested JSON-like dictionaries or lists into strings.
+                         Forced h5netcdf engine in all .to_netcdf() calls
 """
 
 # 🎯 Add the DualLogger Class
@@ -143,23 +150,19 @@ def build_globcolour_map(input_files, output_dir, overwrite=False, verbose=False
     return processing_map, dataset_info
 
 
-def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=False):
+def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=False, delete_corrupt=False):
     """
-    Processes a single GlobColour file by extracting the date to create a time dimension,
-    spatially subsetting to the target region, and injecting CF-compliant global metadata.
+    Purpose:
+        Processes a single GlobColour file by extracting the date to create a time dimension,
+        spatially subsetting to the target region, and injecting CF-compliant global metadata.
     
-    Parameters
-    ----------
-    task : dict
-        A dictionary containing 'input', 'output', and 'date_str' for the file to process.
-    dataset_info : dict
-        Dictionary containing parsed dataset attributes (dataset, version, product, etc.).
-    map_subset : str
-        The regional string identifier (e.g., 'NWA') to subset the data.
-    verbose : bool, optional
-        If True, prints step-by-step progress.
-    debug : bool, optional
-        If True, prints detailed traceback information upon failure.
+    Input Parameters:
+        task (dict): A dictionary containing 'input', 'output', and 'date_str' for the file to process.
+        dataset_info (dict): Dictionary containing parsed dataset attributes (dataset, version, product, etc.).
+        map_subset (str): The regional string identifier (e.g., 'NWA') to subset the data.
+        verbose (bool, optional): If True, prints step-by-step progress.
+        debug (bool, optional): If True, prints detailed traceback information upon failure.
+        delete_corrupt (bool, optional): If True, delete any corrupt files
         
     Returns
     -------
@@ -193,6 +196,7 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
     out_path = task['output']
     date_str = task['date_str']
     ds = None
+    corrupt_files = []
     
     try:
         if debug: print(f"    📖 Opening {os.path.basename(in_path)}...")
@@ -267,12 +271,31 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
         if verbose: print(f"      💾 Saving {os.path.basename(out_path)}...")
         ds.to_netcdf(out_path, format='NETCDF4', engine='h5netcdf')
         
-        return True
+        return True, corrupt_files
 
     except Exception as e:
         print(f"❌ Error processing {in_path}: {e}")
         if debug: traceback.print_exc()
-        return False
+
+        # Detect if the input file is physically corrupt
+        bad_files_info = corrupt_file_detector([in_path])
+
+        # FALLBACK: If the detector misses it but the error explicitly indicates chunk corruption
+        error_str = str(e).lower()
+        if not bad_files_info and ("synchronously read data" in error_str or "filter returned failure" in error_str or "hdf" in error_str):
+            bad_files_info = [(in_path, "HDF5 Data Chunk/Filter Read Failure")]
+        
+        if bad_files_info:
+            for p, err in bad_files_info:
+                corrupt_files.append(f"{p} ({err})")
+                if delete_corrupt:
+                    try:
+                        os.remove(p)
+                        if verbose: print(f"  🗑️ Deleted corrupt SOURCE file: {os.path.basename(p)}")
+                    except Exception as del_e:
+                        if verbose: print(f"  🚨 Failed to delete corrupt file {os.path.basename(p)}: {del_e}")
+                        
+        return False, corrupt_files # Return tuple on failure
         
     finally:
         if ds is not None: ds.close()
@@ -281,20 +304,21 @@ def preprocess_globcolour(task, map_subset, dataset_info, verbose=False, debug=F
 
 
 
-def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verbose=True, debug=False, parallel_runs=1, dry_run=False):
+def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verbose=True, debug=False, parallel_runs=1, dry_run=False, delete_corrupt=False):
     """
-    High-level orchestrator that discovers all GlobColour products, fetches their global 
-    daily files, evaluates processing needs, and executes the preprocessing loop for each product.
+    Purpose:
+        High-level orchestrator that discovers all GlobColour products, fetches their global 
+        daily files, evaluates processing needs, and executes the preprocessing loop for each product.
     
-    Parameters
-    ----------
-    map_subset (str, optional): The regional string identifier (default is 'NWA') to subset the dataset.
-    overwrite (bool, optional): If True, forces the regeneration of all files.
-    verbose (bool, optional): If True, prints detailed pipeline progress.
-    debug (bool, optional): If True, prints tracebacks for any failed processing tasks.
-    parallel_runs (int, optional): Number of files to process in parallel
-    dry_run (bool, optional): If True, simulates the processing step, printing the intended input and output 
-                              paths without reading the data or writing to disk.
+    Input Parameters
+        map_subset (str, optional): The regional string identifier (default is 'NWA') to subset the dataset.
+        overwrite (bool, optional): If True, forces the regeneration of all files.
+        verbose (bool, optional): If True, prints detailed pipeline progress.
+        debug (bool, optional): If True, prints tracebacks for any failed processing tasks.
+        parallel_runs (int, optional): Number of files to process in parallel
+        dry_run (bool, optional): If True, simulates the processing step, printing the intended input and output paths without reading the data or writing to disk.
+        delete_corrupt (bool, optional): If True, delete any corrupt files
+
     """
 
     original_stdout = sys.stdout
@@ -319,6 +343,11 @@ def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verb
         
         # Fetch the dictionary of products and paths
         prod_dict = get_dataset_products('GLOBCOLOUR')
+
+        # Initialize global summary trackers
+        global_successful = 0
+        global_failed = 0
+        all_corrupt_inputs = set()
         
         # Parse the nested dictionary structure
         # e.g., {'SOURCE': {'GLOBAL_4KM_DAILY': {'CHL': '/path/...', 'PAR': '/path/...'}}}
@@ -366,13 +395,15 @@ def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verb
                     # Sequential Execution
                     if parallel_runs == 1:
                         for filename, task in tasks_to_run.items():
-                            success = preprocess_globcolour(
+                            success, corrupt_files = preprocess_globcolour(
                                 task=task, 
                                 dataset_info=dataset_info, 
                                 map_subset=map_subset, 
                                 verbose=verbose, 
-                                debug=debug
+                                debug=debug,
+                                delete_corrupt=delete_corrupt
                             )
+                            if corrupt_files: all_corrupt_inputs.update(corrupt_files)
                             if success:
                                 successful += 1
                             else:
@@ -383,14 +414,16 @@ def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verb
                         if should_log: print(f"  ⚡ Launching {len(tasks_to_run)} parallel tasks across {parallel_runs} workers...")
                         with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
                             future_to_file = {
-                                executor.submit(preprocess_globcolour, task=task, map_subset=map_subset, dataset_info=dataset_info, verbose=verbose, debug=debug): filename
+                                executor.submit(preprocess_globcolour, task=task, map_subset=map_subset, dataset_info=dataset_info, verbose=verbose, debug=debug, delete_corrupt=delete_corrupt): filename
                                 for filename, task in tasks_to_run.items()
                             }
                             
                             for future in concurrent.futures.as_completed(future_to_file):
                                 filename = future_to_file[future]
                                 try:
-                                    success = future.result()
+                                    success, corrupt_files = future.result()
+                                    if corrupt_files: all_corrupt_inputs.update(corrupt_files)
+
                                     if success:
                                         successful += 1
                                         if should_log: print(f"      ✅ [Parallel] Saved: {os.path.basename(proc_map[filename]['output'])}")
@@ -402,6 +435,27 @@ def run_globcolour_dataset(map_subset="NWA", overwrite=False, logfile=None, verb
                                     if should_log: print(f"      ❌ [Parallel] Exception on {filename}: {e}")
                             
                     if should_log: print(f"🏁 {prod_name} COMPLETE: {successful} processed, {failed} failed.")
+                    global_successful += successful
+                    global_failed += failed
+
+        # --- FINAL SUMMARY REPORT ---
+        print("\n" + "="*60)
+        print("🏁 GLOBCOLOUR PREPROCESSING FINISHED SUMMARY")
+        print("="*60)
+        print(f"✅ Successfully Processed: {global_successful}")
+        print(f"❌ Failed:                 {global_failed}")
+
+        if all_corrupt_inputs:
+            action = "DELETED" if delete_corrupt else "IDENTIFIED (Run with delete_corrupt=True to remove)"
+            print(f"\n🚨 CORRUPT SOURCE FILES {action} ({len(all_corrupt_inputs)}):")
+            for err_str in sorted(all_corrupt_inputs):
+                # 🎯 Safely split the path from the error message
+                if " (" in err_str:
+                    file_path, error_msg = err_str.rsplit(" (", 1)
+                    print(f"  • {os.path.basename(file_path)} ({error_msg}")
+                else:
+                    print(f"  • {os.path.basename(err_str)}")
+        print("="*60)
 
     except Exception as e:
         print("\n" + "="*80)
