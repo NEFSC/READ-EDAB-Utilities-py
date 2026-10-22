@@ -76,6 +76,7 @@ Modification History
                          Fixed Parallel Write Collisions: Identified and deleted a duplicate tasks_to_run.append line that was indiscriminately queueing "skipped" files for processing, causing multiple parallel workers to collide while trying to overwrite the exact same file.
                          Fixed a bug where ds_version was throwing a NameError in get_source_metadata by extracting it natively from file_parser alongside the dataset name.
                          Added .pop("_FillValue", None) to the var_attrs dictionary before assigning it to the dataset to prevent xarray from crashing when generating the .to_netcdf() encoding dictionaries.
+    Oct 22, 2026 - KJWH: Added D7 period and weighted functionality for the 7-day running period
 
     
 """
@@ -808,6 +809,17 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                                 if verbose and var_name == target_vars[0]:
                                     print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 3. Falling back to unweighted mean.")
                         
+                       # Apply Symmetric Tent Weights to the 7-Day Running Mean
+                        elif per == 'D7':
+                            if da.sizes['time'] == 7:
+                                weights = xr.DataArray([1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0], dims=['time'], coords={'time': da.time})
+                                weights.name = "weights"
+                                if verbose and var_name == target_vars[0]:
+                                    print(f"      ⚖️ Applying [1, 2, 3, 4, 3, 2, 1] central weights for {per} period...")
+                            else:
+                                if verbose and var_name == target_vars[0]:
+                                    print(f"      ⚠️ {per} has {da.sizes['time']} inputs instead of 7. Falling back to unweighted mean.")
+                       
                         # Apply Symmetric Tent Weights to the 8-Day Running Mean
                         elif per == 'D8':
                             if da.sizes['time'] == 8:
