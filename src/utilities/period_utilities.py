@@ -1513,7 +1513,7 @@ def map_inputs_to_period(period_code, output_period, spans, vspans, range_by_yea
     # ------------------------------------------------------------
     # 2. RUNNING WINDOW AND RANGE PERIODS (DD, D3, DD3, D8, DD8)
     # ------------------------------------------------------------
-    if period_code in {"DD", "D3", "DD3","DD7", "D8", "DD8"}:
+    if period_code in {"DD", "D3", "DD3","D7","DD7", "D8", "DD8"}:
         start_day, end_day = output_period
         s = start_day.toordinal()
         e = end_day.toordinal()
