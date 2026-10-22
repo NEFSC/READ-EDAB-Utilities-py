@@ -68,6 +68,7 @@ Modification History
     Oct 14, 2026 - KJWH: extract_period_code now returns a climatology range if applicable
                          Added get_default_climatology_range() to return the default climatology range (1991-2020) and updated get_period_sets to use this default if not provided 
                          Using the new start years added to the dataset_defaults() to clamp the start year of the climatology_range if the input files are out of range of the default climatology_range
+    Oct 22, 2026 - KJWH: Added D7 and DD7 for a running 7-day period
 
 """
 
@@ -667,8 +668,8 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
             continue
 
         # Daily running windows: D3, DD3, D8, DD8
-        if matched_code in ("D3", "DD3", "D8", "DD8"):
-            expected_span = 3 if matched_code.endswith("3") else 8
+        if matched_code in ("D3", "DD3","D7","DD7", "D8", "DD8"):
+            expected_span = int(matched_code[-1])  # Dynamically grabs 3, 7, or 8
             try:
                 s = seg_value_for("YYYYMMDD", 1)
                 e = seg_value_for("YYYYMMDD", 2)
@@ -685,7 +686,7 @@ def get_period_dates(files,format="%Y%m%d",placeholder="NA", diagnostics=False):
                 if fail(f"{matched_code} start must be <= end"):
                     continue
             # Enforce fixed-span only for D3 and D8 
-            if matched_code in ("D3", "D8"):
+            if matched_code in ("D3","D7", "D8"):
                 span_days = (de - ds).days + 1
                 if span_days != expected_span:
                     if fail(f"{matched_code} must span exactly {expected_span} days"):
@@ -1107,9 +1108,9 @@ def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range
         • Annual blocks:
             A, Y, ANNUAL, YEAR
         • Running windows:
-            D3, D8, M3
+            D3, D7, D8, M3
         • Range periods:
-            DD, DD3, DD8, WW, MM, MM3
+            DD, DD3, DD7, DD8, WW, MM, MM3
 
     start_dt, end_dt : str (YYYYMMDD)
         The inclusive date range over which periods should be generated.
@@ -1119,7 +1120,7 @@ def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range
         If None, climatology periods are not generated.
 
     range_by_year : bool, default False
-        If True, range-type periods (DD, DD3, DD8, WW, MM, MM3) are split
+        If True, range-type periods (DD, DD3, DD7, DD8, WW, MM, MM3) are split
         into one token per calendar year. If False, a single full-range
         token is produced.
 
@@ -1132,7 +1133,7 @@ def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range
         split_range_by_year → Split a continuous date range into one (start, end) pair per calendar year.
             
     Notes:
-    • Running windows (D3, D8, M3) extend beyond the input end date by
+    • Running windows (D3, D7, D8, M3) extend beyond the input end date by
       the window length (2 days, 7 days, or 2 months respectively).
 
     • Climatology periods ignore the input date range and instead iterate
@@ -1150,7 +1151,7 @@ def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range
         """
         Split a continuous date range into one (start, end) pair per calendar year.
 
-        This helper is used by range-type period codes (DD, DD3, DD8, WW, MM, MM3)
+        This helper is used by range-type period codes (DD, DD3, DD7, DD8, WW, MM, MM3)
         when range_by_year=True. It preserves the original start and end dates
         within each year boundary.
 
@@ -1252,8 +1253,8 @@ def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range
         return out
 
     # --- Running periods (D3, D8, M3) ---
-    if period_code in {"D3","D8"}:
-        window = 3 if period_code == "D3" else 8
+    if period_code in {"D3","D7","D8"}:
+        window = int(period_code[-1])  # Dynamically grabs 3, 7, or 8
         days = get_dates([start_dt, end_dt], output="days", day_format="datetime")
         out = []
         for s in days:
@@ -1282,7 +1283,7 @@ def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range
         return out
 
     # --- Range periods (DD, DD3, DD8, WW, MM, MM3) ---
-    if period_code in {"DD", "DD3", "DD8", "WW", "MM", "MM3"}:
+    if period_code in {"DD", "DD3", "DD7", "DD8", "WW", "MM", "MM3"}:
         
         # Determine ranges (full or split by year)
         if range_by_year:
@@ -1293,9 +1294,11 @@ def generate_periods(period_code, start_dt, end_dt, climatology_range=None,range
         out = []
         for (s_dt, e_dt) in ranges:
 
-            # --- Extend end date for DD3/DD8 ---
+            # --- Extend end date for DD3/DD7/DD8 ---
             if period_code == "DD3":
                 e_dt = e_dt + relativedelta(days=+2)
+            elif period_code == "DD7":
+                e_dt = e_dt + relativedelta(days=+6)
             elif period_code == "DD8":
                 e_dt = e_dt + relativedelta(days=+7)
 
@@ -1510,7 +1513,7 @@ def map_inputs_to_period(period_code, output_period, spans, vspans, range_by_yea
     # ------------------------------------------------------------
     # 2. RUNNING WINDOW AND RANGE PERIODS (DD, D3, DD3, D8, DD8)
     # ------------------------------------------------------------
-    if period_code in {"DD", "D3", "DD3", "D8", "DD8"}:
+    if period_code in {"DD", "D3", "DD3","DD7", "D8", "DD8"}:
         start_day, end_day = output_period
         s = start_day.toordinal()
         e = end_day.toordinal()
@@ -1518,7 +1521,7 @@ def map_inputs_to_period(period_code, output_period, spans, vspans, range_by_yea
         mask = (vspans["starts"] <= e) & (vspans["ends"] >= s)
 
         # Year clamp applies ONLY to DD3 and DD8
-        if period_code in {"DD3", "DD8"} and range_by_year:
+        if period_code in {"DD3","DD7", "DD8"} and range_by_year:
             target_year = start_day.year
             mask &= (vspans["years"] == target_year)
 
@@ -1715,7 +1718,7 @@ def get_period_sets(
         - dates (list[str|datetime], optional): list of dates to infer range from.
         - period_tokens (list[str], optional): list of existing period tokens (e.g., ['M_200001', ...]).
         - date_format (str): format used for input date strings and for token construction.
-        - range_by_year (bool): to create range periods (DD, DD3, DD8, WW, MM, MM3) in yearly chunks.
+        - range_by_year (bool): to create range periods (DD, DD3, DD7, DD8, WW, MM, MM3) in yearly chunks.
         - climatology_range (tuple): default climatology years (start_year, end_year).
         - diagnostics (bool): if True, return (outputs, diagnostics_list).
 
@@ -1759,7 +1762,7 @@ def get_period_sets(
         if period_code == "D":
             return start_dt.date()
         
-        if period_code in { "DD", "DD3", "DD8", "D3", "D8","M3"}:
+        if period_code in { "DD", "DD3", "DD7", "DD8", "D3", "D7","D8","M3"}:
             return (start_dt, end_dt)
         
         if period_code == "DOY":
