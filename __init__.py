@@ -16,6 +16,8 @@ from .src.utilities.calc_daylength import *
 from .src.utilities.calc_phytosizeclass import *
 from .src.utilities.calc_primprod import *
 from .src.utilities.globcolour_utilities import *
+from .src.utilities.shapefile_utilities import *
+from .src.utilities.dataextraction_utilities import *
 
 
 
