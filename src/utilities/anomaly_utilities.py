@@ -160,10 +160,10 @@ def batch_anomaly_match(input_files, clim_files, climatology_range=None):
         end_date_str = parsed_data.get('end_date') or start_date_str
         
         if groupby == 'month':
-            month = start_date[4:6] 
+            month = start_date_str[4:6] 
             target_period = f"MONTH_{month}{expected_suffix}"
         elif groupby == 'week':
-            week = start_date[4:6]
+            week = start_date_str[4:6]
             target_period = f"WEEK_{week}{expected_suffix}" 
         elif groupby in ['annual']:
             target_period = f"ANNUAL{expected_suffix}"
