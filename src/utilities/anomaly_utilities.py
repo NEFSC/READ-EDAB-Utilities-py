@@ -20,7 +20,6 @@ from utilities import get_prod_files, get_filepath, file_parser,get_default_prod
 from utilities import generate_logfile_path
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
 from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value, get_source_metadata
-
 env = bootstrap_environment(verbose=False)
 
 xr.set_options(file_cache_maxsize=1) 
@@ -644,7 +643,6 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
     # Fallback logic for products
     if not prods:
         if dataset:
-            from dataset_utilities import get_default_dataset_product
             prods = [get_default_dataset_product(dataset.upper())]
         else:
             raise ValueError("Must provide either 'prods' or 'dataset' to infer defaults.")
@@ -706,7 +704,6 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
         for prod in prods:
             current_dataset = dataset
             if not current_dataset:
-                from product_utilities import get_default_product_dataset
                 try:
                     current_dataset = get_default_product_dataset(prod)
                 except KeyError:
