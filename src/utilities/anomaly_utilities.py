@@ -671,6 +671,8 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
         print(f"🟢 ANOMALY PIPELINE RUN STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*80)
 
+    verbose = kwargs.pop('verbose', False)
+    debug   = kwargs.get('debug', False) 
     should_log = verbose or bool(logfile)
 
     try:
