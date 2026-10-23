@@ -198,7 +198,7 @@ def build_anomaly_map(prod, period, output_dir=None,
                       dataset=None, daterange=None, climatology_range=None,
                       dataset_version=None, dataset_map=None,
                       map_subset=None, overwrite=False, 
-                      data_type="ANOM", verbose=False, debug=False):
+                      data_type="ANOM", verbose=False, debug=False, **kwargs):
     """
     Purpose:
         Orchestrates the preparation phase of the anomaly pipeline by resolving output directories,
