@@ -1111,11 +1111,17 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
                 except KeyError:
                     if should_log: print(f"\n⚠️ No default dataset found for product '{prod}'. Skipping.")
                     continue
+
+            check_corrupt = kwargs.get('check_corrupt', True)
+            max_retries = kwargs.get('max_retries', 3)
             
             # Loop through the periods
             for period in periods:
-                if should_log: print(f"\n🚀 Starting pipeline for {prod} | Period: {period}")
-                
+                for attempt in range(1, max_retries + 1):
+                    if should_log:
+                        prefix = f"\n🚀 Starting stats pipeline" if attempt == 1 else f"\n🔄 Retry Attempt {attempt}/{max_retries}"
+                        print(f"{prefix} for {prod} | Period: {period}")
+                                
                 # Create stats period map
                 stats_map, deleted_files, manual_delete_files = build_stats_map(prod, period, dataset=dataset, verbose=verbose, allow_nrt=allow_nrt, **kwargs)
 
@@ -1128,7 +1134,7 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
                     print(f"❌ ERROR: No processing tasks generated for {prod} ({period}).")
                     print(f"   Check: Does {dataset} have {prod} data for the requested daterange?")
                     print(f"   Check: Is the 'map_subset' ({map_subset}) correct for this dataset?")
-                    continue # Move to the next period/product
+                    break # Move to the next period/product
                 
                 # Gather all tasks that actually need to be run
                 tasks_to_run = []
@@ -1159,7 +1165,7 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
                     
                 # If everything was up to date, skip to the next product/period
                 if not tasks_to_run:
-                    continue
+                    break
 
                 if parallel_runs == 1:
                     # --- SEQUENTIAL EXECUTION ---
@@ -1233,6 +1239,31 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
                             except Exception as e:
                                 failed_tasks.append(f"{out_period}: {str(e)}")
                                 if should_log: print(f"  ❌ [Parallel] Error creating: {file_name} - {str(e)}")
+                 # --- CORRUPT FILE CHECK & RETRY LOGIC ---
+                    corrupt_this_run = False
+                    if check_corrupt:
+                        if should_log: print(f"  🔍 Verifying generated STATS files for corruption...")
+                        
+                        # Collect all expected output files from this specific run
+                        out_files = [t['output'] for t in stats_map.values() if t['output'] != "Unknown" and os.path.exists(t['output'])]
+                        
+                        if out_files:
+                            bad_stats = corrupt_file_detector(out_files)
+                            if bad_stats:
+                                corrupt_this_run = True
+                                if should_log: print(f"    🚨 Found {len(bad_stats)} corrupt STATS files.")
+                                for bad_file, err in bad_stats:
+                                    if should_log: print(f"      🗑️ Deleting: {os.path.basename(bad_file)}")
+                                    try:
+                                        os.remove(bad_file)
+                                        all_deleted_corrupt.append(os.path.basename(bad_file))
+                                    except OSError:
+                                        all_manual_delete.append(os.path.basename(bad_file))
+                    
+                    if not corrupt_this_run:
+                        break # Break the retry loop! Everything is clean.
+                    elif attempt == max_retries:
+                        if should_log: print(f"  ❌ Reached max retries ({max_retries})
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
