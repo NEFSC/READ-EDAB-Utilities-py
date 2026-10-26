@@ -1263,7 +1263,7 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
                     if not corrupt_this_run:
                         break # Break the retry loop! Everything is clean.
                     elif attempt == max_retries:
-                        if should_log: print(f"  ❌ Reached max retries ({max_retries})
+                        if should_log: print(f"  ❌ Reached max retries ({max_retries})"
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
