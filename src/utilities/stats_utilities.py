@@ -327,14 +327,12 @@ def build_stats_map(prod, period, output_dir=None,
                         stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
                         current_basenames = set(os.path.basename(f) for f in input_files)
                         
-                        # If the sets match perfectly, verify the file isn't corrupt
-                        if (stored_basenames == current_basenames):
-                            try:
-                                # Do a fast read of the variables to ensure the HDF5 structure is intact
-                                _ = list(existing_ds.variables.keys())
-                                is_up_to_date = True
-                            except Exception:
-                                is_up_to_date = False
+                        if stored_basenames == current_basenames:
+                            # The file claims to be up-to-date. Deep-scan it for HDF corruption!
+                            is_corrupt = corrupt_file_detector([out_path])
+                            if is_corrupt:
+                                raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
+                            is_up_to_date = True
                         else:
                             is_up_to_date = False
                     else:
