@@ -1123,147 +1123,147 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
                         print(f"{prefix} for {prod} | Period: {period}")
                                 
                 # Create stats period map
-                stats_map, deleted_files, manual_delete_files = build_stats_map(prod, period, dataset=dataset, verbose=verbose, allow_nrt=allow_nrt, **kwargs)
+                    stats_map, deleted_files, manual_delete_files = build_stats_map(prod, period, dataset=dataset, verbose=verbose, allow_nrt=allow_nrt, **kwargs)
 
-                # Aggregate the corrupt file lists
-                all_deleted_corrupt.extend(deleted_files)
-                all_manual_delete.extend(manual_delete_files)
-                
-                # --- Error Handling for Empty Maps ---
-                if not stats_map:
-                    print(f"❌ ERROR: No processing tasks generated for {prod} ({period}).")
-                    print(f"   Check: Does {dataset} have {prod} data for the requested daterange?")
-                    print(f"   Check: Is the 'map_subset' ({map_subset}) correct for this dataset?")
-                    break # Move to the next period/product
-                
-                # Gather all tasks that actually need to be run
-                tasks_to_run = []
-                for out_period, task in stats_map.items():
-                    total_input_files += len(task['inputs'])
-                    file_name = os.path.basename(task['output'])
+                    # Aggregate the corrupt file lists
+                    all_deleted_corrupt.extend(deleted_files)
+                    all_manual_delete.extend(manual_delete_files)
+                    
+                    # --- Error Handling for Empty Maps ---
+                    if not stats_map:
+                        print(f"❌ ERROR: No processing tasks generated for {prod} ({period}).")
+                        print(f"   Check: Does {dataset} have {prod} data for the requested daterange?")
+                        print(f"   Check: Is the 'map_subset' ({map_subset}) correct for this dataset?")
+                        break # Move to the next period/product
+                    
+                    # Gather all tasks that actually need to be run
+                    tasks_to_run = []
+                    for out_period, task in stats_map.items():
+                        total_input_files += len(task['inputs'])
+                        file_name = os.path.basename(task['output'])
 
-                    # 1. Existing file skipped
-                    if task['is_up_to_date']:
-                        if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
-                        # Delete obsolete NRT file if the pure RAN file is already up-to-date
-                        obsolete = task.get('obsolete_nrt_file')
-                        if obsolete and os.path.exists(obsolete):
-                            os.remove(obsolete)
-                            if should_log: print(f"  🗑️ Deleted obsolete NRT file: {os.path.basename(obsolete)}")
-                        skipped_tasks.append(out_period)
+                        # 1. Existing file skipped
+                        if task['is_up_to_date']:
+                            if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
+                            # Delete obsolete NRT file if the pure RAN file is already up-to-date
+                            obsolete = task.get('obsolete_nrt_file')
+                            if obsolete and os.path.exists(obsolete):
+                                os.remove(obsolete)
+                                if should_log: print(f"  🗑️ Deleted obsolete NRT file: {os.path.basename(obsolete)}")
+                            skipped_tasks.append(out_period)
 
-                    # 2 & 3. Queued for creation or replacement
-                    elif not task['inputs']:
-                        if should_log: print(f"  ⚠️  Failed: {file_name} (No source files found)")
-                        failed_tasks.append(f"{out_period} (No inputs)")
-                    else:
-                        if task['file_exists']:
-                            if should_log: print(f"  🔄 Queued for Replacement: {file_name} (New inputs detected)")
+                        # 2 & 3. Queued for creation or replacement
+                        elif not task['inputs']:
+                            if should_log: print(f"  ⚠️  Failed: {file_name} (No source files found)")
+                            failed_tasks.append(f"{out_period} (No inputs)")
                         else:
-                            if should_log: print(f"  🆕 Queued for Creation: {file_name}")
-                        tasks_to_run.append((out_period, task))
-                    
-                # If everything was up to date, skip to the next product/period
-                if not tasks_to_run:
-                    break
-
-                if parallel_runs == 1:
-                    # --- SEQUENTIAL EXECUTION ---
-                    for out_period, task in tasks_to_run:
-                        try:
-                            success, corrupt_files = process_single_stat(task, prod, period, verbose, **kwargs)
-                            
-                            if corrupt_files: all_corrupt_inputs.update(corrupt_files)
-
-                            if success: 
-                                # Delete obsolete NRT file if applicable
-                                obsolete = task.get('obsolete_nrt_file')
-                                if obsolete and os.path.exists(obsolete):
-                                    os.remove(obsolete)
-                                    if should_log: print(f"  🗑️ Deleted obsolete NRT file: {os.path.basename(obsolete)}")
-
-                                if task['file_exists']:
-                                    replaced_tasks.append(out_period)
-                                    if should_log: print(f"  ✅ Replaced: {file_name}")
-                                else:
-                                    created_tasks.append(out_period)
-                                    if should_log: print(f"  ✅ Created: {file_name}")
-                            else: 
-                                failed_tasks.append(f"{out_period} (Processing failed)")
-                                if should_log: print(f"  ❌ Error creating: {file_name}")
-                        except Exception as e:
-                            failed_tasks.append(f"{out_period}: {str(e)}")
-                            if should_log: print(f"\n❌ Error on {out_period}:")
-                            if debug:
-                                traceback.print_exc() 
+                            if task['file_exists']:
+                                if should_log: print(f"  🔄 Queued for Replacement: {file_name} (New inputs detected)")
                             else:
-                                if should_log: print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
+                                if should_log: print(f"  🆕 Queued for Creation: {file_name}")
+                            tasks_to_run.append((out_period, task))
                         
-                        if verbose: print(f"  🛠 Finished attempt for {out_period}")
-                
-                else:
-                    # --- PARALLEL EXECUTION ⚡ ---
-                    if verbose: print(f"\n  ⚡ Launching {len(tasks_to_run)} tasks across {parallel_runs} parallel workers...")
-                    
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
-                        # Submit all tasks to the pool
-                        future_to_period = {
-                            executor.submit(process_single_stat, task, prod, period, verbose, **kwargs): out_period
-                            for out_period, task in tasks_to_run
-                        }
-                        
-                        # Collect results as they finish (not necessarily in order!)
-                        for future in concurrent.futures.as_completed(future_to_period):
-                            out_period = future_to_period[future]
-                            task = stats_map[out_period]
-                            file_name = os.path.basename(task['output'])
+                    # If everything was up to date, skip to the next product/period
+                    if not tasks_to_run:
+                        break
+
+                    if parallel_runs == 1:
+                        # --- SEQUENTIAL EXECUTION ---
+                        for out_period, task in tasks_to_run:
                             try:
-                                success, corrupt_files = future.result()
-                                if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
-                                if success:
+                                success, corrupt_files = process_single_stat(task, prod, period, verbose, **kwargs)
+                                
+                                if corrupt_files: all_corrupt_inputs.update(corrupt_files)
+
+                                if success: 
                                     # Delete obsolete NRT file if applicable
                                     obsolete = task.get('obsolete_nrt_file')
                                     if obsolete and os.path.exists(obsolete):
                                         os.remove(obsolete)
-                                        if should_log: print(f"  🗑️ [Parallel] Deleted obsolete NRT file: {os.path.basename(obsolete)}")
+                                        if should_log: print(f"  🗑️ Deleted obsolete NRT file: {os.path.basename(obsolete)}")
 
                                     if task['file_exists']:
                                         replaced_tasks.append(out_period)
-                                        if should_log: print(f"  ✅ [Parallel] Replaced: {file_name}")
+                                        if should_log: print(f"  ✅ Replaced: {file_name}")
                                     else:
                                         created_tasks.append(out_period)
-                                        if should_log: print(f"  ✅ [Parallel] Created: {file_name}")
-                                else:
+                                        if should_log: print(f"  ✅ Created: {file_name}")
+                                else: 
                                     failed_tasks.append(f"{out_period} (Processing failed)")
-                                    if should_log: print(f"  ❌ [Parallel] Error creating: {file_name}")
+                                    if should_log: print(f"  ❌ Error creating: {file_name}")
                             except Exception as e:
                                 failed_tasks.append(f"{out_period}: {str(e)}")
-                                if should_log: print(f"  ❌ [Parallel] Error creating: {file_name} - {str(e)}")
-                 # --- CORRUPT FILE CHECK & RETRY LOGIC ---
-                    corrupt_this_run = False
-                    if check_corrupt:
-                        if should_log: print(f"  🔍 Verifying generated STATS files for corruption...")
-                        
-                        # Collect all expected output files from this specific run
-                        out_files = [t['output'] for t in stats_map.values() if t['output'] != "Unknown" and os.path.exists(t['output'])]
-                        
-                        if out_files:
-                            bad_stats = corrupt_file_detector(out_files)
-                            if bad_stats:
-                                corrupt_this_run = True
-                                if should_log: print(f"    🚨 Found {len(bad_stats)} corrupt STATS files.")
-                                for bad_file, err in bad_stats:
-                                    if should_log: print(f"      🗑️ Deleting: {os.path.basename(bad_file)}")
-                                    try:
-                                        os.remove(bad_file)
-                                        all_deleted_corrupt.append(os.path.basename(bad_file))
-                                    except OSError:
-                                        all_manual_delete.append(os.path.basename(bad_file))
+                                if should_log: print(f"\n❌ Error on {out_period}:")
+                                if debug:
+                                    traceback.print_exc() 
+                                else:
+                                    if should_log: print(f"  ⚠️  {e}\n  ⏩ Skipping {out_period}.")
+                            
+                            if verbose: print(f"  🛠 Finished attempt for {out_period}")
                     
-                    if not corrupt_this_run:
-                        break # Break the retry loop! Everything is clean.
-                    elif attempt == max_retries:
-                        if should_log: print(f"  ❌ Reached max retries ({max_retries})")
+                    else:
+                        # --- PARALLEL EXECUTION ⚡ ---
+                        if verbose: print(f"\n  ⚡ Launching {len(tasks_to_run)} tasks across {parallel_runs} parallel workers...")
+                        
+                        with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                            # Submit all tasks to the pool
+                            future_to_period = {
+                                executor.submit(process_single_stat, task, prod, period, verbose, **kwargs): out_period
+                                for out_period, task in tasks_to_run
+                            }
+                            
+                            # Collect results as they finish (not necessarily in order!)
+                            for future in concurrent.futures.as_completed(future_to_period):
+                                out_period = future_to_period[future]
+                                task = stats_map[out_period]
+                                file_name = os.path.basename(task['output'])
+                                try:
+                                    success, corrupt_files = future.result()
+                                    if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
+                                    if success:
+                                        # Delete obsolete NRT file if applicable
+                                        obsolete = task.get('obsolete_nrt_file')
+                                        if obsolete and os.path.exists(obsolete):
+                                            os.remove(obsolete)
+                                            if should_log: print(f"  🗑️ [Parallel] Deleted obsolete NRT file: {os.path.basename(obsolete)}")
+
+                                        if task['file_exists']:
+                                            replaced_tasks.append(out_period)
+                                            if should_log: print(f"  ✅ [Parallel] Replaced: {file_name}")
+                                        else:
+                                            created_tasks.append(out_period)
+                                            if should_log: print(f"  ✅ [Parallel] Created: {file_name}")
+                                    else:
+                                        failed_tasks.append(f"{out_period} (Processing failed)")
+                                        if should_log: print(f"  ❌ [Parallel] Error creating: {file_name}")
+                                except Exception as e:
+                                    failed_tasks.append(f"{out_period}: {str(e)}")
+                                    if should_log: print(f"  ❌ [Parallel] Error creating: {file_name} - {str(e)}")
+                    # --- CORRUPT FILE CHECK & RETRY LOGIC ---
+                        corrupt_this_run = False
+                        if check_corrupt:
+                            if should_log: print(f"  🔍 Verifying generated STATS files for corruption...")
+                            
+                            # Collect all expected output files from this specific run
+                            out_files = [t['output'] for t in stats_map.values() if t['output'] != "Unknown" and os.path.exists(t['output'])]
+                            
+                            if out_files:
+                                bad_stats = corrupt_file_detector(out_files)
+                                if bad_stats:
+                                    corrupt_this_run = True
+                                    if should_log: print(f"    🚨 Found {len(bad_stats)} corrupt STATS files.")
+                                    for bad_file, err in bad_stats:
+                                        if should_log: print(f"      🗑️ Deleting: {os.path.basename(bad_file)}")
+                                        try:
+                                            os.remove(bad_file)
+                                            all_deleted_corrupt.append(os.path.basename(bad_file))
+                                        except OSError:
+                                            all_manual_delete.append(os.path.basename(bad_file))
+                        
+                        if not corrupt_this_run:
+                            break # Break the retry loop! Everything is clean.
+                        elif attempt == max_retries:
+                            if should_log: print(f"  ❌ Reached max retries ({max_retries})")
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
