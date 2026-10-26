@@ -323,6 +323,19 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
     filtered_structure = {dataset_type: dataset_products[dataset_type]} if dataset_type in dataset_products else dataset_products
     debug_trace(f"filtered_structure keys: {list(filtered_structure.keys())}")
 
+    if data_type == "EXTRACT":
+        reference_file = kwargs.get('reference_file')
+        region_name = kwargs.get('region_name')
+        
+        if reference_file and region_name:
+            version_root = Path(reference_file).parents[3]
+            out_dir = version_root / "EXTRACTED_DATA" / region_name
+            if make_dir:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            return str(out_dir)
+        else:
+            raise ValueError("Both 'reference_file' and 'region_name' must be provided in kwargs for EXTRACT data_type.")
+    
     # --- 2. Try to find the product in the dictionary ---
     debug_trace(f"Calling resolve_dataset_grid with actual_prod={actual_prod}, default_grid={dataset_grid or default_grid}, data_type={data_type}")
     
