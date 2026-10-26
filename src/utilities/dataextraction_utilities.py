@@ -12,15 +12,18 @@ import pandas as pd
 import xarray as xr
 import geopandas as gpd
 import rioxarray
+from scipy.stats import skew, kurtosis
 
 from utilities.bootstrap.environment import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 from utilities import (
     get_filepath, get_prod_files, file_parser, corrupt_file_detector,
+    get_period_info,
     generate_logfile_path, get_current_utc_timestamp, get_default_metadata,
     get_lut_metadata, get_source_metadata, get_reference_metadata,
-    get_shapefile
+    get_shapefile, get_subarea_geometries,
+    get_default_product_dataset
 )
 
 """
@@ -29,9 +32,7 @@ Purpose:
 
 Main Functions:
     - build_data_extraction_map: Builds a processing map evaluating file freshness, missing timestamps, and NRT replacement rules.
-    - clip_data: Clips the data to a specified region
-    - calculate_region_statistics: Computes the requested statistics on the valid pixels of the clipped data array
-    - extract_gridded_statistics: 
+    
     
 
 Helper Functions:
@@ -50,7 +51,16 @@ Modification History
     Oct 19, 2026 - KJWH: Initial code written
                          Added clip_data
                          Added calculate_region_statistics
-    Oct 21, 2026 - KJWH: 
+    Oct 21, 2026 - KJWH: Updates after testing
+                         Added corrupt_file_detection
+                         Now using shapefile functions 
+                         Added stat_type parameter
+                         Upated output file name and directory
+                         Changed timestamp to date
+                         Added geometric stats
+                         Added ability to work with subareas within a shapefile
+                         Updated metadata
+                         Now saving the file as a csv (nccsv) with metadata
 
 """
 
@@ -85,7 +95,8 @@ class DualLogger:
     def close(self):
         self.log.close()
 
-def build_data_extraction_map(prod, period, region_name, dataset=None, dataset_version=None, output_dir=None, overwrite=False, verbose=False, **kwargs):
+def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_type=None, dataset=None, dataset_version=None, 
+                              output_dir=None, overwrite=False, verbose=False, **kwargs):
     """
     Purpose:
         Resolves the output directory, finds input files using get_prod_files, and builds a processing map evaluating file freshness and NRT replacement rules.
@@ -94,59 +105,67 @@ def build_data_extraction_map(prod, period, region_name, dataset=None, dataset_v
 
     Returns:
         tuple: (extraction_map, output_file_path, existing_dataframe)
-    """
-
-    """
     
-    STEPS
-    1) find the files
-    2) get the dataset
-    3) establish the output dir (make if needed)
-    4) create the output file name
-    5) search for file
-    6) open if available
-    7) compare input and output file names
-    8) create summaries
-    9) sort by date
     """
 
-    # 1. Resolve Output Directory
-    if output_dir is None:
-        # Assuming EXTRACT outputs live alongside STATS/ANOMALY in the PRODUCTS tree
-        output_dir = get_filepath(
-            prod, dataset=dataset, dataset_version=dataset_version,
-            map_subset=region_name, period=period, data_type="EXTRACT",
-            getfilepath=True, make_dir=True, verbose=verbose
-        )
-        if isinstance(output_dir, list): output_dir = output_dir[0]
-
-    if not output_dir:
-        raise ValueError(f"🛑 CRITICAL: Could not resolve output directory for {prod} ({period}).")
-
-    # Define the compiled time-series output file
-    out_name = f"{period}-{region_name}-{dataset}-{prod}-EXTRACT.nc"
-    output_file = os.path.join(output_dir, out_name)
-
-
-    # 2. Find Input Files
-    if verbose: print(f"🔍 Searching for {period} files for {dataset}:{prod}")
+    # 1. Find Input Files
+    if verbose: print(f"🔍 Searching for {period} files for {dataset}:{prod} (Grid: {map_subset})")
     input_files = get_prod_files(prod, dataset=dataset, dataset_version=dataset_version, period=period, map_subset=map_subset, verbose=verbose)
     
     if not input_files:
-        return {}, output_file, pd.DataFrame()
+        return {}, None, pd.DataFrame()
 
-    # 3. Read Existing Data (to evaluate freshness/NRT replacement)
+    # Auto-detect stat_type if not explicitly provided
+    if not stat_type:
+        first_file_upper = os.path.basename(input_files[0]).upper()
+        if "STATS" in first_file_upper:
+            stat_type = 'mean'
+        else:
+            stat_type = "" # Leave blank for daily/anomaly grids
+
+    # Set target variable and filename safely
+    target_var = f"{prod}_{stat_type}" if stat_type else prod
+
+    # 2. Parse inputs to extract the exact dataset and version from the physical files
+    parsed_inputs = file_parser(input_files)
+    first_meta = parsed_inputs[0]
+    
+    actual_dataset = first_meta.get('dataset', dataset or "UNKNOWN").upper()
+
+    if output_dir is None:
+        output_dir = get_filepath(
+            prod, 
+            data_type="EXTRACT",
+            reference_file=input_files[0], 
+            region_name=shapefile,
+            make_dir=True
+        )
+
+    # 4. Define Output File Name
+    out_name = f"{period}-{actual_dataset}-{prod}-{shapefile}-EXTRACT.csv"
+    output_file = os.path.join(output_dir, out_name)
+    if verbose: print(f"Creating/updating {output_file}")
+
+    # 5. Read Existing Data (Ignoring '#' metadata lines)
     existing_df = pd.DataFrame()
     if os.path.exists(output_file) and not overwrite:
         try:
-            with xr.open_dataset(output_file, engine='h5netcdf') as existing_ds:
-                existing_df = existing_ds.to_dataframe().reset_index()
+            with open(output_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            # Find where the actual data columns begin
+            header_idx = 0
+            for i, line in enumerate(lines):
+                if line.startswith('Date,') or line.startswith('timestamp,'):
+                    header_idx = i
+                    break
+                    
+            existing_df = pd.read_csv(output_file, skiprows=header_idx)
         except Exception as e:
             if verbose: print(f"  ⚠️ Could not read existing extraction file '{out_name}': {e}. Forcing full rebuild.")
 
-    # 4. Build Extraction Map
+    # 6. Build Extraction Map
     extraction_map = {}
-    parsed_inputs = file_parser(input_files)
     up_to_date_count = 0
     nrt_replace_count = 0
 
@@ -170,8 +189,8 @@ def build_data_extraction_map(prod, period, region_name, dataset=None, dataset_v
                     needs_processing = False
             else:
                 # If it's a new RAN file, check if it replaces an old NRT file for the same timestamp
-                if not is_nrt and 'timestamp' in existing_df.columns:
-                    nrt_match = existing_df[(existing_df['timestamp'] == timestamp) & (existing_df['is_nrt'] == True)]
+                if not is_nrt and 'Date' in existing_df.columns:
+                    nrt_match = existing_df[(existing_df['Date'] == timestamp) & (existing_df['is_nrt'] == True)]
                     if not nrt_match.empty:
                         nrt_replace_count += 1
 
@@ -190,22 +209,28 @@ def build_data_extraction_map(prod, period, region_name, dataset=None, dataset_v
     needs_update_count = len(input_files) - up_to_date_count
     
     print("-" * 60)
-    print(f"📊 EXTRACTION SUMMARY: {prod} | {period} | {region_name}")
+    print(f"📊 EXTRACTION SUMMARY: {prod} | {period} | {shapefile}")
+    print(f" Output directory: {output_dir}")
+    print(f"📄 Target File: {os.path.basename(output_file)}") 
     print(f"✅ Up-to-date:  {up_to_date_count}/{len(input_files)}")
     print(f"⏳ To process:  {needs_update_count} files")
     if nrt_replace_count > 0: print(f"🔄 NRT replaces: {nrt_replace_count}")
     print("-" * 60)
 
-    return extraction_map, output_file, existing_df
+    return extraction_map, output_file, existing_df, target_var, stat_type
 
-
-def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=False):
+def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=False, **kwargs):
     """
     Purpose:
         Opens a single gridded file, clips it to the specified region/coordinates, 
         calculates statistics on the valid pixels, and returns a dictionary record.
     """
     ds = None
+
+    subareas = kwargs.get('subareas', None)
+    subarea_column = kwargs.get('subarea_column', None)
+    merge_all = kwargs.get('merge_all', False) 
+    
     try:
         if debug: print(f"    📖 Extracting from {os.path.basename(file_path)}...")
         
@@ -229,12 +254,28 @@ def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=
             n_valid = valid_pixels.size
             
             if n_valid == 0:
-                stats = {"N": 0, "Percent_Valid": 0.0, "Min": np.nan, "Max": np.nan, 
-                         "Mean": np.nan, "Median": np.nan, "Stdev": np.nan, "CV": np.nan}
+                stats = {
+                    "subarea": subarea_name, # 🎯 Moved to the front!
+                    "N": 0, "Percent_Valid": 0.0, "Min": np.nan, "Max": np.nan, 
+                    "Mean": np.nan, "Median": np.nan, "Stdev": np.nan, "CV": np.nan,
+                    "Geom_Mean": np.nan, "Geom_Stdev": np.nan, 
+                    "Skewness": np.nan, "Kurtosis": np.nan
+                }
             else:
                 mean_val = np.mean(valid_pixels)
                 stdev_val = np.std(valid_pixels)
+                # 🎯 Safely calculate Geometric Stats (requires strictly positive numbers)
+                pos_pixels = valid_pixels[valid_pixels > 0]
+                if pos_pixels.size > 0:
+                    log_pos = np.log(pos_pixels)
+                    geom_mean = np.exp(np.mean(log_pos))
+                    geom_stdev = np.exp(np.std(log_pos))
+                else:
+                    geom_mean = np.nan
+                    geom_stdev = np.nan
+                    
                 stats = {
+                    "subarea": subarea_name, # 🎯 Moved to the front!
                     "N": n_valid,
                     "Percent_Valid": (n_valid / flat_data.size) * 100,
                     "Min": np.min(valid_pixels),
@@ -242,34 +283,29 @@ def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=
                     "Mean": mean_val,
                     "Median": np.median(valid_pixels),
                     "Stdev": stdev_val,
-                    "CV": (stdev_val / mean_val) * 100 if mean_val != 0 else np.nan
+                    "CV": (stdev_val / mean_val) * 100 if mean_val != 0 else np.nan,
+                    "Geom_Mean": geom_mean,
+                    "Geom_Stdev": geom_stdev,
+                    "Skewness": float(skew(valid_pixels)),
+                    "Kurtosis": float(kurtosis(valid_pixels))
                 }
-            stats['subarea'] = subarea_name
             records.append(stats)
 
-        # 🎯 Clip Data based on provided input
+        # Clip Data based on provided input
         if bbox is not None:
             minx, miny, maxx, maxy = bbox
             clipped = da.rio.clip_box(minx=minx, miny=miny, maxx=maxx, maxy=maxy, crs="EPSG:4326")
             append_stats(clipped, "BBOX")
             
         elif shapefile is not None:
-            gdf = gpd.read_file(shapefile)
-            if gdf.crs != da.rio.crs:
-                gdf = gdf.to_crs(da.rio.crs)
-                
-            # Iterate through Subareas
-            if subarea_column and subarea_column in gdf.columns:
-                target_subareas = subareas if subareas else gdf[subarea_column].unique()
-                for sa in target_subareas:
-                    sa_gdf = gdf[gdf[subarea_column] == sa]
-                    if sa_gdf.empty: continue
-                    clipped = da.rio.clip(sa_gdf.geometry, da.rio.crs, drop=True)
-                    append_stats(clipped, str(sa))
-            else:
-                # Extract the entire shapefile as one polygon
-                clipped = da.rio.clip(gdf.geometry, da.rio.crs, drop=True)
-                append_stats(clipped, "ALL")
+            # Fetch pre-filtered geometries from shapefile_utilities
+            subarea_geoms = get_subarea_geometries(shapefile, subarea_column=subarea_column, subareas=subareas, target_crs=da.rio.crs, merge_all=merge_all)
+            
+            # Iterate through the returned dictionary
+            for sa_name, geom in subarea_geoms.items():
+                clipped = da.rio.clip([geom], da.rio.crs, drop=True) 
+                append_stats(clipped, sa_name)
+
         else:
             # Fallback: Use the entire map_subset domain
             append_stats(da, "ALL")
@@ -277,6 +313,7 @@ def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=
         return records, []
 
     except Exception as e:
+        if debug: print(f"❌ ERROR extracting {os.path.basename(file_path)}: {e}") 
         corrupt_files = []
         error_str = str(e).lower()
         if "synchronously read data" in error_str or "filter returned failure" in error_str or "hdf" in error_str:
@@ -293,7 +330,7 @@ def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=
         if ds is not None: ds.close()
         gc.collect()
 
-def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None, subareas=None, **kwargs):
+def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None, stat_type=None, **kwargs):
     """
     Purpose:
         Main orchestrator for extracting time-series regional statistics. 
@@ -301,7 +338,8 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
     """
     # 1. Extract global dataset early to establish defaults
     dataset = kwargs.pop('dataset', None)
-    
+    map_subset = kwargs.pop('map_subset', 'NWA')
+        
     # 2. Fallback logic for products
     if not prods:
         if dataset:
@@ -311,19 +349,16 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
             raise ValueError("Must provide either 'prods' or 'dataset' to infer defaults.")
 
     if isinstance(prods, str): prods = [prods.upper().strip()]
-
+    
     # Fallback and normalization for periods
     if not periods: 
         periods = ['W', 'M']
     elif isinstance(periods, str):
         periods = [periods]
 
-    # Resolve map_subset for finding input files
-    map_subset = kwargs.get('map_subset', 'NWA')
-
     # Resolve Region Name and Dynamic Shapefile Path
     if shapefile:
-        resolved_shapefile = get_shapefile(shapefile, env, verbose=kwargs.get('verbose', False))
+        resolved_shapefile = get_shapefile(shapefile, verbose=kwargs.get('verbose', False))
         if not resolved_shapefile:
             raise FileNotFoundError(f"❌ Could not resolve shapefile: {shapefile}")
         shapefile = resolved_shapefile
@@ -369,12 +404,13 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
         global_successful = 0
         global_failed = 0
         all_corrupt_inputs = set()
+        updated_output_files = set()
 
         for prod in prods:
-            # 🎯 4. Dynamic Dataset Resolution Per Product
+            # 4. Dynamic Dataset Resolution Per Product
+            target_var = f"{prod}_{stat_type}"
             current_dataset = dataset
             if not current_dataset:
-                from product_utilities import get_default_product_dataset
                 try:
                     current_dataset = get_default_product_dataset(prod)
                 except KeyError:
@@ -383,9 +419,18 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
 
             for period in periods:
                 if should_log: print(f"\n🚀 Starting extraction for {prod} (Dataset: {current_dataset}) | Period: {period}")
+
+                try:
+                    p_info = get_period_info(period)
+                    p_code = period
+                    p_desc = p_info.get('description', f"{period} period")
+                except:
+                    p_code = period
+                    p_desc = f"{period} period"
                 
-                extraction_map, output_file, existing_df = build_data_extraction_map(
-                    prod, period, region_name, dataset=current_dataset, map_subset=map_subset, verbose=verbose, **kwargs
+                # Catch target_var and resolved_stat_type from the map builder
+                extraction_map, output_file, existing_df, target_var, resolved_stat_type = build_data_extraction_map(
+                    prod, period, region_name, dataset=current_dataset, map_subset=map_subset, verbose=verbose, stat_type=stat_type, **kwargs
                 )
                 
                 tasks_to_run = {k: v for k, v in extraction_map.items() if v['needs_processing']}
@@ -401,7 +446,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                     with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
                         future_to_file = {
                             # Pass explicit shapefile and bbox args
-                            executor.submit(process_single_extraction, file_path, prod, shapefile, bbox, debug): file_path
+                            executor.submit(process_single_extraction, file_path, target_var, shapefile, bbox,**kwargs): file_path
                             for file_path in tasks_to_run.keys()
                         }
                         
@@ -413,14 +458,17 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                                 if corrupt_files: all_corrupt_inputs.update(corrupt_files)
                                 
                                 if stats:
-                                    record = {
-                                        "timestamp": info['timestamp'],
-                                        "source_file": info['source_file'],
-                                        "input_mtime": info['input_mtime'],
-                                        "is_nrt": info['is_nrt'],
-                                        **stats
-                                    }
-                                    new_records.append(record)
+                                    for single_stats in stats:
+                                        record = {
+                                            "Date": info['timestamp'],
+                                            "period_code": p_code,
+                                            "period_descrption": p_desc,
+                                            "source_file": info['source_file'],
+                                            "input_mtime": info['input_mtime'],
+                                            "is_nrt": info['is_nrt'],
+                                            **stats
+                                        }
+                                        new_records.append(record)
                                     successful += 1
                                 else:
                                     failed += 1
@@ -432,18 +480,21 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                 else:
                     for file_path, info in tasks_to_run.items():
                         # Pass explicit shapefile and bbox args
-                        stats, corrupt_files = process_single_extraction(file_path, prod, shapefile, bbox, debug)
+                        stats, corrupt_files = process_single_extraction(file_path, target_var, shapefile, bbox, **kwargs)
                         if corrupt_files: all_corrupt_inputs.update(corrupt_files)
                         
                         if stats:
-                            record = {
-                                "timestamp": info['timestamp'],
-                                "source_file": info['source_file'],
-                                "input_mtime": info['input_mtime'],
-                                "is_nrt": info['is_nrt'],
-                                **stats
-                            }
-                            new_records.append(record)
+                            for single_stats in stats:
+                                record = {
+                                    "Date": info['timestamp'],
+                                    "period_code": p_code,
+                                    "period_descrption": p_desc,
+                                    "source_file": info['source_file'],
+                                    "input_mtime": info['input_mtime'],
+                                    "is_nrt": info['is_nrt'],
+                                    **single_stats
+                                }
+                                new_records.append(record)
                             successful += 1
                         else:
                             failed += 1
@@ -451,7 +502,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                 global_successful += successful
                 global_failed += failed
                 
-                # --- 🎯 SEQUENTIAL WRITE / MERGE ---
+                # --- SEQUENTIAL WRITE / MERGE ---
                 if new_records:
                     if should_log: print(f"  💾 Merging {len(new_records)} new records into master dataset...")
                     new_df = pd.DataFrame(new_records)
@@ -459,46 +510,78 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                     if not existing_df.empty:
                         # Drop obsolete files (updated RANs replacing NRTs, or replaced source files)
                         updated_files = set(new_df['source_file'])
-                        updated_timestamps = set(new_df['timestamp'].dropna())
+                        updated_timestamps = set(new_df['Date'].dropna())
 
                         existing_df = existing_df[
                             ~existing_df['source_file'].isin(updated_files) &
-                            ~((existing_df['is_nrt'] == True) & (existing_df['timestamp'].isin(updated_timestamps)))
+                            ~((existing_df['is_nrt'] == True) & (existing_df['Date'].isin(updated_timestamps)))
                         ]
                         combined_df = pd.concat([existing_df, new_df], ignore_index=True)
                     else:
                         combined_df = new_df
 
-                    # Sort chronologically
-                    if 'timestamp' in combined_df.columns:
-                        combined_df['timestamp'] = pd.to_datetime(combined_df['timestamp'], errors='coerce')
-                        combined_df = combined_df.sort_values(by='timestamp').reset_index(drop=True)
+                    # Sort chronologically (and by subarea if present)
+                    if 'Date' in combined_df.columns:
+                        combined_df['Date'] = pd.to_datetime(combined_df['Date'], errors='coerce')
+                        sort_cols = ['Date', 'subarea'] if 'subarea' in combined_df.columns else ['Date']
+                        combined_df = combined_df.sort_values(by=sort_cols).reset_index(drop=True)
 
-                    # Convert to xarray dataset
-                    final_ds = combined_df.set_index('timestamp').to_xarray() if 'timestamp' in combined_df.columns else combined_df.to_xarray()
-                    
-                    # Apply global metadata
+                        # Format Date explicitly for ERDDAP
+                        combined_df['Date'] = combined_df['Date'].dt.strftime('%Y-%m-%d')
+
+                    # Assemble global metadata
                     attrs = get_default_metadata(sheet="General") | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
-                    attrs['title'] = f"Regional Statistics for {prod} - {region_name}"
+                    stat_label = f" ({resolved_stat_type})" if resolved_stat_type else ""
+                    attrs['title'] = f"Extracted data for {prod} {stat_label} - {region_name}"
                     attrs['product'] = prod
+                    if resolved_stat_type:attrs['statistic_type'] = resolved_stat_type
                     attrs['region'] = region_name
-                    attrs['history'] = f"{get_current_utc_timestamp()} Extracted regional time-series using {extraction_type}."                    
+                    attrs['Conventions'] = "COARDS, CF-1.6, ACDD-1.3, NCCSV-1.2"
+                    attrs['history'] = f"{get_current_utc_timestamp()} Extracted regional time-series using {extraction_type}."
+
+                    # Dynamic Temporal Details
+                    if 'Date' in combined_df.columns:
+                        dates = pd.to_datetime(combined_df['Date'])
+                        attrs['time_coverage_start'] = dates.min().strftime('%Y-%m-%dT%H:%M:%SZ')
+                        attrs['time_coverage_end'] = dates.max().strftime('%Y-%m-%dT%H:%M:%SZ')
+                    
+                    # Shapefile and Subarea details
+                    if shapefile:
+                        attrs['shapefile_source'] = str(os.path.basename(shapefile))
+                    if 'subarea' in combined_df.columns:
+                        attrs['subareas_included'] = ", ".join(combined_df['subarea'].dropna().unique().astype(str))
                     
                     try:
                         attrs = attrs | get_source_metadata(current_dataset, source_prefix="source")
                         attrs['references'] = get_reference_metadata(prod, refs_only=True)
                     except: pass
-                    
-                    final_ds.attrs = attrs
 
-                    # Scrub for NetCDF compliance and write to disk
-                    for var in final_ds.variables:
-                        for k, val in list(final_ds[var].attrs.items()):
-                            if isinstance(val, dict): final_ds[var].attrs[k] = str(val)
-                            elif val is None: final_ds[var].attrs[k] = "None"
-                            
-                    final_ds.to_netcdf(output_file, format='NETCDF4', engine='h5netcdf')
-                    if should_log: print(f"  ✅ Updated: {os.path.basename(output_file)}")
+                    # Write ERDDAP NCCSV format
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        # 1. Write *GLOBAL* attributes
+                        for k, v in attrs.items():
+                            clean_v = str(v).replace('"', '""').replace('\n', ' | ')
+                            f.write(f'*GLOBAL*,{k},"{clean_v}"\n')
+                        
+                        # 2. Write Variable attributes
+                        f.write('Date,*DATA_TYPE*,String\n')
+                        f.write('Date,standard_name,time\n')
+                        f.write('period_code,*DATA_TYPE*,String\n')
+                        f.write('period_desc,*DATA_TYPE*,String\n')
+                        
+                        if 'subarea' in combined_df.columns:
+                            f.write('subarea,*DATA_TYPE*,String\n')
+                        
+                        # Declare stats variables as floats
+                        for col in ['N', 'Percent_Valid', 'Min', 'Max', 'Mean', 'Median', 'Stdev', 'CV', 'Geom_Mean', 'Geom_Stdev', 'Skewness', 'Kurtosis']:
+                            if col in combined_df.columns:
+                                f.write(f'{col},*DATA_TYPE*,Float\n')
+                    
+                    # Append the dataframe below the header
+                    combined_df.to_csv(output_file, mode='a', index=False)
+                    
+                    if should_log: print(f"  ✅ Saved/Updated: {os.path.basename(output_file)}")
+                    updated_output_files.add(os.path.basename(output_file)) 
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
@@ -506,6 +589,12 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
         print("="*60)
         print(f"✅ Extracted Records: {global_successful}")
         print(f"❌ Failed Files:      {global_failed}")
+
+        # 🎯 Print the list of updated files
+        if updated_output_files:
+            print(f"\n💾 FILES SAVED/UPDATED ({len(updated_output_files)}):")
+            for f in sorted(updated_output_files):
+                print(f"  • {f}")
 
         if all_corrupt_inputs:
             print(f"\n🚨 CORRUPT SOURCE FILES ({len(all_corrupt_inputs)}):")
@@ -537,190 +626,3 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
             sys.stdout.close()
             sys.stdout = original_stdout       
 
-def load_and_clip_data(file_path, region_input, input_type="coords", crs="EPSG:4326"):
-    """
-    Loads gridded data and clips it to a specified region.
-    """
-    # Load the dataset and ensure it has a spatial dimension
-    da = rioxarray.open_rasterio(file_path, masked=True)
-    
-    # Handle Coordinate Bounding Box (minx, miny, maxx, maxy)
-    if input_type == "coords":
-        minx, miny, maxx, maxy = region_input
-        clipped = da.rio.clip_box(minx=minx, miny=miny, maxx=maxx, maxy=maxy, crs=crs)
-        
-    # Handle Shapefile / GeoJSON
-    elif input_type == "shapefile":
-        gdf = gpd.read_file(region_input)
-        # Reproject shapefile to match raster CRS if necessary
-        if gdf.crs != da.rio.crs:
-            gdf = gdf.to_crs(da.rio.crs)
-        clipped = da.rio.clip(gdf.geometry, da.rio.crs, drop=True)
-        
-    else:
-        raise ValueError("input_type must be 'coords' or 'shapefile'")
-        
-    return clipped
-
-def calculate_region_statistics(clipped_da):
-    """
-    Computes the requested statistics on the valid pixels of the clipped data array.
-    """
-    # Flatten the array and remove NaNs/missing values for clean numpy calculations
-    flat_data = clipped_da.values.flatten()
-    valid_pixels = flat_data[~np.isnan(flat_data)]
-    
-    total_pixels = flat_data.size
-    n_valid = valid_pixels.size
-    
-    if n_valid == 0:
-        return {"N": 0, "Percent Valid": 0.0, "Min": np.nan, "Max": np.nan, 
-                "Mean": np.nan, "Median": np.nan, "Stdev": np.nan, "CV": np.nan}
-
-    mean_val = np.mean(valid_pixels)
-    stdev_val = np.std(valid_pixels)
-    
-    stats = {
-        "N": n_valid,
-        "Percent Valid": (n_valid / total_pixels) * 100,
-        "Min": np.min(valid_pixels),
-        "Max": np.max(valid_pixels),
-        "Mean": mean_val,
-        "Median": np.median(valid_pixels),
-        "Stdev": stdev_val,
-        "CV": (stdev_val / mean_val) * 100 if mean_val != 0 else np.nan
-    }
-    
-    return stats
-
-def extract_gridded_statistics(file_path, region_input, env, input_type="coords", verbose=False):
-    """
-    Main pipeline updated to utilize the dynamic shapefile locator.
-    """
-    try:
-        # Pre-process the shapefile path if necessary
-        if input_type == "shapefile":
-            resolved_shapefile = get_shapefile(region_input, env, verbose=verbose)
-            if not resolved_shapefile:
-                raise FileNotFoundError(f"Could not resolve shapefile for input: {region_input}")
-            
-            # Reassign region_input to the verified, absolute path
-            region_input = resolved_shapefile
-            
-        # 1. Extract and Clip 
-        # (Assuming load_and_clip_data and calculate_region_statistics from the previous step)
-        clipped_data = load_and_clip_data(file_path, region_input, input_type)
-        
-        # 2. Compute Statistics
-        stats = calculate_region_statistics(clipped_data)
-        
-        # 3. Compile Metadata
-        metadata = {
-            "Source File": os.path.basename(file_path),
-            "Full Path": os.path.abspath(file_path),
-            "Region Input": region_input if input_type == "coords" else os.path.basename(region_input),
-            "Input Type": input_type,
-            "Resolution": clipped_data.rio.resolution(),
-            "Raster CRS": str(clipped_data.rio.crs)
-        }
-        
-        return {**metadata, **stats}
-        
-    except Exception as e:
-        print(f"Error processing {file_path}: {e}")
-        return None
-
-def run_regional_extraction_pipeline(prod, region_input, env, period='D', input_type="shapefile", 
-                                     dataset=None, dataset_version=None, output_dir=None, 
-                                     overwrite=False, verbose=False, **kwargs):
-    """
-    Main workflow pipeline integrating dynamic file mapping and statistical extraction.
-    """
-    region_name = Path(region_input).stem
-    
-    # 1. Build Data Extraction Map and Resolve Output Path
-    extraction_map, output_file = build_data_extraction_map(
-        prod=prod,
-        region_name=region_name,
-        env=env,
-        period=period,
-        dataset=dataset,
-        dataset_version=dataset_version,
-        output_dir=output_dir,
-        overwrite=overwrite,
-        verbose=verbose,
-        **kwargs
-    )
-
-    if not extraction_map:
-        return None
-
-    # 2. Filter tasks
-    tasks_to_process = [path for path, info in extraction_map.items() if info['needs_processing']]
-
-    if not tasks_to_process:
-        print(f"✅ All records up to date in output: {os.path.basename(output_file)}")
-        return output_file
-
-    print(f"🚀 Processing {len(tasks_to_process)} file(s) for {prod} | Region: {region_name}")
-
-    # 3. Extract Statistics
-    new_records = []
-    for file_path in tasks_to_process:
-        info = extraction_map[file_path]
-        try:
-            clipped_da = load_and_clip_data(file_path, region_input, input_type=input_type, env=env, verbose=verbose)
-            stats = calculate_region_statistics(clipped_da)
-
-            record = {
-                "source_file": info['source_file'],
-                "full_path": info['full_path'],
-                "input_mtime": info['input_mtime'],
-                "is_nrt": info['is_nrt'],
-                "timestamp": info['timestamp'],
-                "product": prod,
-                "region": region_name,
-                **stats
-            }
-            new_records.append(record)
-        except Exception as e:
-            print(f"❌ Error processing {info['source_file']}: {e}")
-
-    if not new_records:
-        print("⚠️ No new records calculated.")
-        return output_file
-
-    new_df = pd.DataFrame(new_records)
-
-    # 4. Incremental Output Update (Replace NRT / Append / Merge)
-    if os.path.exists(output_file) and not overwrite:
-        existing_ds = xr.open_dataset(output_file)
-        existing_df = existing_ds.to_dataframe().reset_index()
-        existing_ds.close()
-
-        updated_files = set(new_df['source_file'])
-        updated_timestamps = set(new_df['timestamp'].dropna())
-
-        existing_df = existing_df[
-            ~existing_df['source_file'].isin(updated_files) &
-            ~((existing_df['is_nrt'] == True) & (existing_df['timestamp'].isin(updated_timestamps)))
-        ]
-
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-    else:
-        combined_df = new_df
-
-    if 'timestamp' in combined_df.columns:
-        combined_df = combined_df.sort_values(by='timestamp').reset_index(drop=True)
-
-    # 5. Export to NetCDF
-    final_ds = combined_df.set_index('timestamp').to_xarray() if 'timestamp' in combined_df.columns else combined_df.to_xarray()
-    final_ds.attrs['title'] = f"Regional Statistics for {prod} - {region_name}"
-    final_ds.attrs['product'] = prod
-    final_ds.attrs['region'] = region_name
-    final_ds.attrs['last_updated'] = get_current_utc_timestamp()
-
-    final_ds.to_netcdf(output_file, format='NETCDF4')
-    print(f"✅ Saved updated output to: {output_file}")
-
-    return output_file
