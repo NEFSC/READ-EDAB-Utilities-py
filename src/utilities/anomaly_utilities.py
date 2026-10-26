@@ -323,7 +323,16 @@ def build_anomaly_map(prod, period, output_dir=None,
                         if stored_files_str:
                             stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
                             current_basenames = set(os.path.basename(f) for f in all_inputs)
-                            is_up_to_date = (stored_basenames == current_basenames)
+                            # If the sets match perfectly, verify the file isn't corrupt!
+                            if (stored_basenames == current_basenames):
+                                try:
+                                    # Do a fast read of the variables to ensure the HDF5 structure is intact
+                                    _ = list(existing_ds.variables.keys())
+                                    is_up_to_date = True
+                                except Exception:
+                                    is_up_to_date = False
+                            else:
+                                is_up_to_date = False
                         else:
                             is_up_to_date = False
                     except Exception:
