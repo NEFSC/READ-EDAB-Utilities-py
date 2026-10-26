@@ -347,7 +347,8 @@ def build_anomaly_map(prod, period, output_dir=None,
             "stat_input": stat_input,
             "clim_input": target_clim_file,
             "output": out_path,
-            "is_up_to_date": is_up_to_date
+            "is_up_to_date": is_up_to_date,
+            "file_exists": os.path.exists(out_path)
         }
 
     needs_update_count = len(anomaly_map) - up_to_date_count
@@ -710,76 +711,110 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
                     if should_log: print(f"\n⚠️ No default dataset found for product '{prod}'. Skipping.")
                     continue
             
+            check_corrupt = kwargs.get('check_corrupt', True)
+            max_retries = kwargs.get('max_retries', 3)
+            
             for period in periods:
-                if verbose: print(f"\n🚀 Starting anomaly pipeline for {prod} | Period: {period}")
+                for attempt in range(1, max_retries + 1):
+                    if should_log:
+                        prefix = f"\n🚀 Starting anomaly pipeline" if attempt == 1 else f"\n🔄 Retry Attempt {attempt}/{max_retries}"
+                        print(f"{prefix} for {prod} | Period: {period}")
                 
-                anomaly_map, deleted_files, manual_delete_files = build_anomaly_map(prod, period, verbose=verbose, **kwargs)
+                    anomaly_map, deleted_files, manual_delete_files = build_anomaly_map(prod, period, verbose=verbose, **kwargs)
                 
-                # Aggregate the corrupt file lists
-                all_deleted_corrupt.extend(deleted_files)
-                all_manual_delete.extend(manual_delete_files)
+                    # Aggregate the corrupt file lists
+                    all_deleted_corrupt.extend(deleted_files)
+                    all_manual_delete.extend(manual_delete_files)
 
-                if not anomaly_map: continue
+                    if not anomaly_map: 
+                        break # No tasks, break retry loop and go to next period
+                        
+                    # Group tasks by their climatology file
+                    tasks_by_clim = {}
                 
-                # 🎯 Group tasks by their climatology file
-                tasks_by_clim = {}
-                
-                for out_period, task in anomaly_map.items():
-                    if task['is_up_to_date']:
-                        skipped_tasks.append(out_period)
-                    elif task['clim_input'] == "NA":
-                        missing_climatologies.append(out_period)
-                        failed_tasks.append(f"{out_period} (Missing Climatology Baseline)")
-                        if verbose: print(f"  ⚠️ Skipping {out_period}: No matching climatology file found.")
+                    for out_period, task in anomaly_map.items():
+                        if task['is_up_to_date']:
+                            skipped_tasks.append(out_period)
+                        elif task['clim_input'] == "NA":
+                            missing_climatologies.append(out_period)
+                            failed_tasks.append(f"{out_period} (Missing Climatology Baseline)")
+                            if should_log: print(f"  ⚠️ Skipping {out_period}: No matching climatology file found.")
+                        else:
+                            clim_file = task['clim_input']
+                            if clim_file not in tasks_by_clim:
+                                tasks_by_clim[clim_file] = []
+                            tasks_by_clim[clim_file].append((out_period, task))
+
+                    if not tasks_by_clim: 
+                        break
+
+                    if parallel_runs == 1:
+                        # Sequential execution by Climatology Group
+                        for clim_file, task_list in tasks_by_clim.items():
+                            successes, fails, corrupt_files = process_anomaly_group(clim_file, task_list, prod, period, verbose, **kwargs)
+                            
+                            if corrupt_files: all_corrupt_inputs.update(corrupt_files)
+                            
+                            # Route the successes into the correct trackers
+                            for p in successes:
+                                if anomaly_map[p]['file_exists']: 
+                                    replaced_tasks.append(p)
+                                else: 
+                                    created_tasks.append(p)
+                            for f in fails:
+                                failed_tasks.append(f"{f} (Processing failed)")
                     else:
-                        clim_file = task['clim_input']
-                        if clim_file not in tasks_by_clim:
-                            tasks_by_clim[clim_file] = []
-                        tasks_by_clim[clim_file].append((out_period, task))
+                        # Parallel execution by Climatology Group
+                        if should_log: print(f"\n  ⚡ Launching {len(tasks_by_clim)} climatology groups across {parallel_runs} parallel workers...")
+                        with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                            
+                            future_to_clim = {
+                                executor.submit(process_anomaly_group, clim_file, task_list, prod, period, verbose, **kwargs): clim_file
+                                for clim_file, task_list in tasks_by_clim.items()
+                            }
+                            
+                            for future in concurrent.futures.as_completed(future_to_clim):
+                                try:
+                                    successes, fails, corrupt_files = future.result()
+                                    
+                                    if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
+                                    
+                                    # Route the successes into the correct trackers
+                                    for p in successes:
+                                        if anomaly_map[p]['file_exists']: 
+                                            replaced_tasks.append(p)
+                                        else: 
+                                            created_tasks.append(p)
+                                    for f in fails:
+                                        failed_tasks.append(f"{f} (Processing failed)")
+                                except Exception as e:
+                                    print(f"\n❌ [Parallel] Error processing group:\n  ⚠️  {e}")
 
-                if not tasks_by_clim: continue
-
-                if parallel_runs == 1:
-                    # Sequential execution by Climatology Group
-                    for clim_file, task_list in tasks_by_clim.items():
-                        successes, fails, corrupt_files = process_anomaly_group(clim_file, task_list, prod, period, verbose, **kwargs)
+                    # --- CORRUPT FILE CHECK & RETRY LOGIC ---
+                    corrupt_this_run = False
+                    if check_corrupt:
+                        if should_log: print(f"  🔍 Verifying generated ANOMALY files for corruption...")
                         
-                        if corrupt_files: all_corrupt_inputs.update(corrupt_files)
+                        # Collect all expected output files from this specific run
+                        out_files = [t['output'] for t in anomaly_map.values() if t['output'] != "Unknown" and os.path.exists(t['output'])]
                         
-                        # Route the successes into the correct trackers
-                        for p in successes:
-                            if anomaly_map[p]['file_exists']: 
-                                replaced_tasks.append(p)
-                            else: 
-                                created_tasks.append(p)
-                        for f in fails:
-                            failed_tasks.append(f"{f} (Processing failed)")
-                else:
-                    # Parallel execution by Climatology Group
-                    if verbose: print(f"\n  ⚡ Launching {len(tasks_by_clim)} climatology groups across {parallel_runs} parallel workers...")
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
-                        
-                        future_to_clim = {
-                            executor.submit(process_anomaly_group, clim_file, task_list, prod, period, verbose, **kwargs): clim_file
-                            for clim_file, task_list in tasks_by_clim.items()
-                        }
-                        
-                        for future in concurrent.futures.as_completed(future_to_clim):
-                            try:
-                                successes, fails, corrupt_files = future.result()
-                                
-                                if corrupt_files: all_corrupt_inputs.update(corrupt_files)                                
-                                
-                                # Route the successes into the correct trackers
-                                for p in successes:
-                                    if anomaly_map[p]['file_exists']: 
-                                        replaced_tasks.append(p)
-                                    else: 
-                                        created_tasks.append(p)
-                                for f in fails:
-                                    failed_tasks.append(f"{f} (Processing failed)")
-                            except Exception as e:
-                                print(f"\n❌ [Parallel] Error processing group:\n  ⚠️  {e}")
+                        if out_files:
+                            bad_anoms = corrupt_file_detector(out_files)
+                            if bad_anoms:
+                                corrupt_this_run = True
+                                if should_log: print(f"    🚨 Found {len(bad_anoms)} corrupt ANOMALY files.")
+                                for bad_file, err in bad_anoms:
+                                    if should_log: print(f"      🗑️ Deleting: {os.path.basename(bad_file)}")
+                                    try:
+                                        os.remove(bad_file)
+                                        all_deleted_corrupt.append(os.path.basename(bad_file))
+                                    except OSError:
+                                        all_manual_delete.append(os.path.basename(bad_file))
+                    
+                    if not corrupt_this_run:
+                        break # Break the retry loop! Everything is clean.
+                    elif attempt == max_retries:
+                        if should_log: print(f"  ❌ Reached max retries ({max_retries})
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
