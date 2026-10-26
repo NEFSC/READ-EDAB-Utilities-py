@@ -16,6 +16,7 @@ Purpose:
 Main Functions:
     - get_shapefile: Finds the shapefile path
     - get_shapefile_subareas: Loads a shapefile and returns a list of subarea names from a specified column
+    - get_subarea_geometries: Loads a shapefile, optionally projects it to a target CRS, and returns a dictionary of {subarea_name: geometry}.
     
 
 Helper Functions:
@@ -34,10 +35,14 @@ Modification History
     Oct 19, 2026 - KJWH: Initial code written
                          Added get_shapefile
     Oct 21, 2026 - KJWH: Added get_shapefile_subareas
+    Oct 22, 2026 - KJWH: Updated get_shapefile_subareas functionality (now looking for string variables)
+                         Added get_subarea_geometries()
+
+
 
 """
 
-def get_shapefile(shapefile_input, env, verbose=False):
+def get_shapefile(shapefile_input, verbose=False):
     """
     Locates the correct .shp file within the env['shapefile_path'] directory structure.
     Handles case-insensitive matching for both directories and files.
@@ -91,33 +96,69 @@ def get_shapefile(shapefile_input, env, verbose=False):
     # Return the resolved full path as a string (or you can return the Path object)
     return str(matched_shp)
 
-def get_shapefile_subareas(shapefile_input, env, subarea_column=None, verbose=False):
+def get_shapefile_subareas(shapefile_input, subarea_column=None, verbose=False):
     """
     Purpose:
         Loads a shapefile and returns a list of subarea names from a specified column.
         If no column is provided, it attempts to auto-detect a common name column.
     """
-    shapefile_path = get_shapefile(shapefile_input, env, verbose=verbose)
+    shapefile_path = get_shapefile(shapefile_input, verbose=verbose)
     if not shapefile_path:
         return None
-        
+
     gdf = gpd.read_file(shapefile_path)
-    
-    if subarea_column:
+
+    if not subarea_column:
+        # IDL Replicator: Find the first string/object column
+        string_cols = gdf.select_dtypes(include=['object', 'string']).columns
+        if len(string_cols) > 0:
+            subarea_column = string_cols[0]
+            if verbose: print(f"ℹ️ Auto-detected string column: '{subarea_column}'")
+        else:
+            raise ValueError("No string columns found in this shapefile to use as subarea names.")
+    else:
+        # Validation: Ensure the provided column actually exists
         if subarea_column not in gdf.columns:
-            raise ValueError(f"Column '{subarea_column}' not found in shapefile.")
-        return gdf[subarea_column].unique().tolist()
-        
-    # Auto-detect common name columns
-    common_names = ['name', 'region', 'stratum', 'id', 'subarea', 'zone']
-    for col in gdf.columns:
-        if col.lower() in common_names:
-            if verbose: print(f"  🔍 Auto-detected subarea column: '{col}'")
-            return gdf[col].unique().tolist()
+            raise ValueError(f"Provided subarea_column '{subarea_column}' does not exist. Available columns: {list(gdf.columns)}")
             
-    # Fallback: just return indices as strings if multiple features exist
-    if len(gdf) > 1:
-        if verbose: print("  ⚠️ No standard name column found. Using index values.")
-        return gdf.index.astype(str).tolist()
+    # Return the unique names (e.g., ['MAB', 'GOM', 'SS', 'GB'])
+    return gdf[subarea_column].unique().tolist()
+
+def get_subarea_geometries(shapefile, subarea_column=None, subareas=None, target_crs=None, merge_all=False):
+    """
+    Loads a shapefile and returns a dictionary of geometries.
+    - merge_all=True: Merges the entire shapefile into a single "ALL" geometry.
+    - merge_all=False: Returns every subarea individually (Default).
+      If subarea_column is not provided, auto-detects the first string column.
+    """
+    gdf = gpd.read_file(shapefile)
+    
+    if target_crs and gdf.crs != target_crs:
+        gdf = gdf.to_crs(target_crs)
+
+    geometries = {}
+    
+    if merge_all:
+        geometries["ALL"] = gdf.geometry.union_all()
+        return geometries
         
-    return [] # Single feature, no subareas needed
+    # Auto-detect the first text column (Mimicking IDL's "FIRST STRING ATTRIBUTE")
+    if not subarea_column:
+        string_cols = [col for col in gdf.columns if gdf[col].dtype in ['object', 'string'] and col != 'geometry']
+        if string_cols:
+            subarea_column = string_cols[0]
+            print(f"  ℹ️ Auto-detected subarea column: '{subarea_column}'")
+
+    # Group and extract by the subarea column
+    if subarea_column and subarea_column in gdf.columns:
+        target_subareas = subareas if subareas else gdf[subarea_column].unique()
+        for sa in target_subareas:
+            sa_gdf = gdf[gdf[subarea_column] == sa]
+            if not sa_gdf.empty:
+                geometries[str(sa)] = sa_gdf.geometry.union_all()
+    else:
+        # Fallback: Extract every row independently by index if no string columns exist at all
+        for idx, row in gdf.iterrows():
+            geometries[f"Feature_{idx}"] = row.geometry
+            
+    return geometries
