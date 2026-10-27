@@ -31,6 +31,8 @@ Modification History
     Sep 18, 2025 - KJWH: Moved product specific functions from file_utilities to dataset_utitlities
                          Overhauled get_prod_files to by more dynamic and find STATS files based on the period code
     Oct 21, 2026 - KJHW: Added get_default_product_dataset function to quickly get the default dataset for a given product
+    Oct 27, 2026 - KJWH: Added get_base_product function to identify the main product family from a subproduct name
+                         Updated get_default_product_dataset to route through get_base_product, allowing subproducts to successfully inherit their parent family's default dataset.
 
 """
 def product_defaults():
@@ -93,13 +95,14 @@ def get_default_product_dataset(product_name):
         ValueError - If the product entry does not contain a dataset field.
     """
     info = product_defaults()
-    prod_key = product_name.upper().strip()
+    # Route the requested product to its base family
+    base_prod = get_base_product(product_name)
     
-    if prod_key not in info:
-        raise KeyError(f"Unknown product '{prod_key}'. "
+    if base_prod not in info:
+        raise KeyError(f"Unknown product '{base_prod}'. "
                        f"Available products: {list(info.keys())}")
     
-    entry = info[prod_key]
+    entry = info[base_prod]
     if len(entry) < 2:
         raise ValueError(
             f"Product '{prod_key}' does not contain a dataset entry. "
@@ -107,6 +110,45 @@ def get_default_product_dataset(product_name):
         )
         
     return entry[1]
+
+def get_base_product(subproduct_name):
+    """
+    Identifies the main product family from a subproduct name.
+    e.g., 'PSC_micro' -> 'PSC', 'PPD_VGPM' -> 'PPD', 'RRS_412' -> 'RRS'.
+    """
+    if not subproduct_name: return None
+    
+    subproduct_name = subproduct_name.upper().strip()
+    
+    # 1. Primary Mapping Logic (Catch the known underscore prefixes)
+    if subproduct_name.startswith('PSC_'):
+        return 'PSC'
+    elif subproduct_name.startswith('PPD_') or subproduct_name.startswith('PP_'):
+        return 'PPD'
+    elif subproduct_name.startswith('RRS_'):
+        return 'RRS'
+    elif subproduct_name.startswith('APH_'):
+        return 'APH'
+    elif subproduct_name.startswith('ADG_'):
+        return 'ADG'
+    elif subproduct_name.startswith('BBB_'):
+        return 'BBB'
+        
+    # 2. Fallback: Does it perfectly match a base product?
+    defaults = product_defaults()
+    if subproduct_name in defaults:
+        return subproduct_name
+        
+    # 3. Last Resort: Can we guess by splitting off standard statistical suffixes?
+    stat_suffixes = ['_MEAN', '_MEDIAN', '_MAX', '_MIN', '_STD', '_SUM', '_VAR', '_COUNT', '_ANOM']
+    for suffix in stat_suffixes:
+        if subproduct_name.endswith(suffix):
+            base_attempt = subproduct_name.replace(suffix, '')
+            if base_attempt in defaults:
+                return base_attempt
+            
+    # Default to returning itself if no logic matches
+    return subproduct_name
 
 def netcdf_product_defaults():
     """

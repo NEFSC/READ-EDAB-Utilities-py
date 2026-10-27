@@ -61,6 +61,12 @@ Modification History
                          Added ability to work with subareas within a shapefile
                          Updated metadata
                          Now saving the file as a csv (nccsv) with metadata
+    Oct 27, 2026 - KJWH: Added functionality to work with fils that have multiple products (e.g. PSC and PP)
+                         Completely overhauled variable resolution in process_single_extraction to dynamically loop through variable families, implementing case-insensitive exact matching and smart prefix-stripping for fallbacks.
+                         Added logic to automatically strip input statistical suffixes (e.g., _mean, _median) from variable names before appending them to CSV column headers for cleaner formatting.
+                         Fixed xarray and rioxarray object referencing errors by correctly applying CRS and spatial dimensions to the Dataset (ds) rather than a DataArray (da) prior to shapefile clipping.
+                         Added a standard deviation check (> 1e-6) prior to calculating skewness and kurtosis to permanently suppress SciPy catastrophic cancellation precision warnings when clipping homogenous subareas.
+                         Updated comprehensive docstrings outlining purpose, inputs, and returns for build_data_extraction_map, process_single_extraction, and run_extraction_pipeline.
 
 """
 
@@ -99,13 +105,23 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_typ
                               output_dir=None, overwrite=False, verbose=False, **kwargs):
     """
     Purpose:
-        Resolves the output directory, finds input files using get_prod_files, and builds a processing map evaluating file freshness and NRT replacement rules.
+        Resolves the output directory, finds input files using get_prod_files, and builds a processing map evaluating file freshness, missing timestamps, and NRT replacement rules.
     
     Input Parameters:
+        prod (str) - The logical product name to process (e.g., 'SST', 'PSC').
+        period (str) - The time period code for the target statistics (e.g., 'W', 'M').
+        shapefile (str) - The name or path of the shapefile used for the extraction region.
+        map_subset (str, optional) - The spatial region abbreviation (e.g., 'NES'). Defaults to auto-resolving based on product.
+        stat_type (str, optional) - The specific statistical suffix (e.g., 'mean'). Auto-detected if not provided.
+        dataset (str, optional) - Override for the dataset name.
+        dataset_version (str, optional) - Override for the dataset version.
+        output_dir (str, optional) - The destination directory for output files. Auto-resolved if None.
+        overwrite (bool, optional) - If True, flags all files for reprocessing regardless of existing modification times. Default is False.
+        verbose (bool, optional) - If True, prints detailed progress and routing updates. Default is False.
+        **kwargs - Additional keyword arguments passed to file discovery functions.
 
     Returns:
-        tuple: (extraction_map, output_file_path, existing_dataframe)
-    
+        tuple - (extraction_map, output_file, existing_df, target_var, stat_type) containing the processing dictionary, resolved output CSV path, existing pandas DataFrame, target variable string, and resolved statistic type.
     """
 
     # Auto-resolve product-specific default map_subset
@@ -223,11 +239,21 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_typ
 
     return extraction_map, output_file, existing_df, target_var, stat_type
 
-def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=False, **kwargs):
+def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, debug=False, **kwargs):
     """
     Purpose:
-        Opens a single gridded file, clips it to the specified region/coordinates, 
-        calculates statistics on the valid pixels, and returns a dictionary record.
+        Opens a single gridded NetCDF file, resolves target variables (including wildcard matching for families like PSC), clips the data to a specified shapefile or bounding box, calculates comprehensive regional statistics on valid pixels, and returns dictionary records for each subarea.
+    
+    Input Parameters:
+        file_path (str) - The full physical path to the NetCDF file to be processed.
+        target_var (str or list) - The specific variable(s) or variable base name(s) to extract.
+        shapefile (str, optional) - The path to the shapefile to clip the data against.
+        bbox (tuple, optional) - A bounding box (minx, miny, maxx, maxy) to clip the data against.
+        debug (bool, optional) - If True, prints extensive troubleshooting and traceback information. Default is False.
+        **kwargs - Additional keyword arguments including 'subareas' (list to filter), 'subarea_column' (str), and 'merge_all' (bool).
+
+    Returns:
+        tuple - (records, corrupt_files) where records is a list of dictionaries containing calculated statistics per subarea/variable, and corrupt_files is a list of any files that failed to read due to HDF5 corruption.
     """
     ds = None
 
@@ -241,78 +267,132 @@ def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=
         # 1. Open with xarray
         ds = xr.open_dataset(file_path, engine='h5netcdf')
         
-        # Determine variable to extract
-        target_var = prod if prod in ds.data_vars else [v for v in ds.data_vars if prod in v.upper()][0]
-        da = ds[target_var]
+        # Resolve variables to extract
+        target_vars = [target_var] if isinstance(target_var, str) else target_var
 
-        # Ensure spatial dimensions are set for rioxarray
-        if not da.rio.crs: da = da.rio.write_crs("EPSG:4326")
-        if 'lon' in da.coords and 'lat' in da.coords: da = da.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+        actual_vars_to_extract = []
+        for tv in target_vars:
+            # 1. Case-insensitive exact match check!
+            exact_match = [v for v in ds.data_vars if str(v).upper() == tv.upper()]
+            if exact_match:
+                actual_vars_to_extract.extend(exact_match)
+            else:
+                # 2. Identify what statistical suffix was requested (e.g. '_mean')
+                expected_suffix = ""
+                stat_suffixes = ['_mean', '_median', '_max', '_min', '_std', '_sum', '_var', '_count', '_skew', '_kurt', '_anom']
+                for suff in stat_suffixes:
+                    if tv.endswith(suff):
+                        expected_suffix = suff
+                        break
+                        
+                # 3. Smart Base Search (strip 'PSC_' prefix if present to avoid breaking on fractions)
+                base_search = tv.replace(expected_suffix, '').upper() if expected_suffix else tv.upper()
+                if base_search.startswith('PSC_'):
+                    base_search = base_search.replace('PSC_', '')
+                
+                # 4. Match variables in the family that share the SAME statistical suffix
+                for v in ds.data_vars:
+                    v_str = str(v)
+                    if base_search in v_str.upper():
+                        if expected_suffix:
+                            if v_str.endswith(expected_suffix):
+                                actual_vars_to_extract.append(v_str)
+                        else:
+                            # For daily files (no stat suffix)
+                            actual_vars_to_extract.append(v_str)
+                
+        # Fallback to everything if resolution fails
+        if not actual_vars_to_extract:
+            actual_vars_to_extract = list(ds.data_vars)
 
         records = []
 
         # Helper to calculate stats and append
-        def append_stats(clipped_da, subarea_name):
-            flat_data = clipped_da.values.flatten()
-            valid_pixels = flat_data[~np.isnan(flat_data)]
-            n_valid = valid_pixels.size
+        # Helper to calculate stats and append
+        def append_stats(clipped_ds, subarea_name):
+            # Base record for this spatial zone
+            stats = {"subarea": subarea_name}
             
-            if n_valid == 0:
-                stats = {
-                    "subarea": subarea_name, # 🎯 Moved to the front!
-                    "N": 0, "Percent_Valid": 0.0, "Min": np.nan, "Max": np.nan, 
-                    "Mean": np.nan, "Median": np.nan, "Stdev": np.nan, "CV": np.nan,
-                    "Geom_Mean": np.nan, "Geom_Stdev": np.nan, 
-                    "Skewness": np.nan, "Kurtosis": np.nan
-                }
-            else:
-                mean_val = np.mean(valid_pixels)
-                stdev_val = np.std(valid_pixels)
-                # 🎯 Safely calculate Geometric Stats (requires strictly positive numbers)
-                pos_pixels = valid_pixels[valid_pixels > 0]
-                if pos_pixels.size > 0:
-                    log_pos = np.log(pos_pixels)
-                    geom_mean = np.exp(np.mean(log_pos))
-                    geom_stdev = np.exp(np.std(log_pos))
+            # Loop through all requested variables in the file
+            for var_name in actual_vars_to_extract:
+                flat_data = clipped_ds[var_name].values.flatten()
+                valid_pixels = flat_data[~np.isnan(flat_data)]
+                n_valid = valid_pixels.size
+                
+                # 3. Clean the variable name by removing input stat suffixes for a cleaner CSV header
+                clean_var = str(var_name)
+                stat_suffixes = ['_mean', '_median', '_max', '_min', '_std', '_sum', '_var', '_count', '_skew', '_kurt', '_anom']
+                for stat_suffix in stat_suffixes:
+                    if clean_var.endswith(stat_suffix):
+                        clean_var = clean_var.replace(stat_suffix, '')
+                        break
+                
+                prefix = f"{clean_var}_"
+                
+                if n_valid == 0:
+                    stats.update({
+                        f"{prefix}N": 0, f"{prefix}Percent_Valid": 0.0, f"{prefix}Min": np.nan, 
+                        f"{prefix}Max": np.nan, f"{prefix}Mean": np.nan, f"{prefix}Median": np.nan, 
+                        f"{prefix}Stdev": np.nan, f"{prefix}CV": np.nan, f"{prefix}Geom_Mean": np.nan, 
+                        f"{prefix}Geom_Stdev": np.nan, f"{prefix}Skewness": np.nan, f"{prefix}Kurtosis": np.nan
+                    })
                 else:
-                    geom_mean = np.nan
-                    geom_stdev = np.nan
+                    mean_val = np.mean(valid_pixels)
+                    stdev_val = np.std(valid_pixels)
                     
-                stats = {
-                    "subarea": subarea_name, # 🎯 Moved to the front!
-                    "N": n_valid,
-                    "Percent_Valid": (n_valid / flat_data.size) * 100,
-                    "Min": np.min(valid_pixels),
-                    "Max": np.max(valid_pixels),
-                    "Mean": mean_val,
-                    "Median": np.median(valid_pixels),
-                    "Stdev": stdev_val,
-                    "CV": (stdev_val / mean_val) * 100 if mean_val != 0 else np.nan,
-                    "Geom_Mean": geom_mean,
-                    "Geom_Stdev": geom_stdev,
-                    "Skewness": float(skew(valid_pixels)),
-                    "Kurtosis": float(kurtosis(valid_pixels))
-                }
+                    # Safely calculate Geometric Stats (requires strictly positive numbers)
+                    pos_pixels = valid_pixels[valid_pixels > 0]
+                    if pos_pixels.size > 0:
+                        log_pos = np.log(pos_pixels)
+                        geom_mean = np.exp(np.mean(log_pos))
+                        geom_stdev = np.exp(np.std(log_pos))
+                    else:
+                        geom_mean = np.nan
+                        geom_stdev = np.nan
+                        
+                    # Use update() previous loop variables aren't erased
+                    stats.update({
+                        f"{prefix}N": n_valid,
+                        f"{prefix}Percent_Valid": (n_valid / flat_data.size) * 100,
+                        f"{prefix}Min": np.min(valid_pixels),
+                        f"{prefix}Max": np.max(valid_pixels),
+                        f"{prefix}Mean": mean_val,
+                        f"{prefix}Median": np.median(valid_pixels),
+                        f"{prefix}Stdev": stdev_val,
+                        f"{prefix}CV": (stdev_val / mean_val) * 100 if mean_val != 0 else np.nan,
+                        f"{prefix}Geom_Mean": geom_mean,
+                        f"{prefix}Geom_Stdev": geom_stdev,
+                        f"{prefix}Skewness": float(skew(valid_pixels)) if stdev_val > 1e-6 else np.nan,
+                        f"{prefix}Kurtosis": float(kurtosis(valid_pixels)) if stdev_val > 1e-6 else np.nan
+                    })
+                    
+            # Append the dictionary after the loop finishes all variables
             records.append(stats)
 
+        # Ensure spatial dimensions are set for rioxarray on the entire Dataset
+        if not ds.rio.crs: 
+            ds = ds.rio.write_crs("EPSG:4326")
+        if 'lon' in ds.coords and 'lat' in ds.coords: 
+            ds = ds.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+        
         # Clip Data based on provided input
         if bbox is not None:
             minx, miny, maxx, maxy = bbox
-            clipped = da.rio.clip_box(minx=minx, miny=miny, maxx=maxx, maxy=maxy, crs="EPSG:4326")
+            clipped = ds.rio.clip_box(minx=minx, miny=miny, maxx=maxx, maxy=maxy, crs="EPSG:4326")
             append_stats(clipped, "BBOX")
             
         elif shapefile is not None:
-            # Fetch pre-filtered geometries from shapefile_utilities
-            subarea_geoms = get_subarea_geometries(shapefile, subarea_column=subarea_column, subareas=subareas, target_crs=da.rio.crs, merge_all=merge_all)
+            # Fetch pre-filtered geometries from shapefile_utilities using ds.rio.crs
+            subarea_geoms = get_subarea_geometries(shapefile, subarea_column=subarea_column, subareas=subareas, target_crs=ds.rio.crs, merge_all=merge_all)
             
             # Iterate through the returned dictionary
             for sa_name, geom in subarea_geoms.items():
-                clipped = da.rio.clip([geom], da.rio.crs, drop=True) 
+                clipped = ds.rio.clip([geom], ds.rio.crs, drop=True) 
                 append_stats(clipped, sa_name)
 
         else:
             # Fallback: Use the entire map_subset domain
-            append_stats(da, "ALL")
+            append_stats(ds, "ALL")
 
         return records, []
 
@@ -337,8 +417,18 @@ def process_single_extraction(file_path, prod, shapefile=None, bbox=None, debug=
 def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None, stat_type=None, **kwargs):
     """
     Purpose:
-        Main orchestrator for extracting time-series regional statistics. 
-        It supports dynamic defaults, parallel extraction, and robust HDF5 integration.
+        Main orchestrator for extracting time-series regional statistics from gridded files to CSVs. It supports dynamic defaults, hierarchical file fallbacks, parallel execution, and metadata-rich ERDDAP NCCSV formatting.
+    
+    Input Parameters:
+        prods (str or list, optional) - Single product name or list of product names (e.g., 'SST', ['CHL', 'PSC']). Inferred from dataset if None.
+        periods (str or list, optional) - Period codes to process (e.g., 'W', ['W', 'M']). Defaults to ['W', 'M'].
+        shapefile (str, optional) - The region name or path to a shapefile used for clipping.
+        bbox (tuple, optional) - A bounding box (minx, miny, maxx, maxy) for rectangular extraction.
+        stat_type (str, optional) - Specific statistical suffix to target (e.g., 'mean', 'median').
+        **kwargs - Additional arguments including 'dataset', 'map_subset', 'logfile', 'verbose', 'debug', 'delete_corrupt', and 'parallel_runs'.
+
+    Returns:
+        None - Extracted outputs are written directly to disk as aggregated CSV files.
     """
     # 1. Extract global dataset early to establish defaults
     dataset = kwargs.pop('dataset', None)

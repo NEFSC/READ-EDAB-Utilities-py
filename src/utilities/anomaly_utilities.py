@@ -68,6 +68,7 @@ Missing Baseline Graceful Fails: Ensured that missing climatology files safely r
                          Implemented a new tracking system that distinguishes between files that are Created, Replaced (overwritten due to new inputs), and Skipped (up-to-date), along with tallies for deleted corrupt files and missing baselines.
                          Intercepted the logfile parameter to pass through generate_logfile_path(), allowing standardized log naming across all execution environments.
                          Updated documentation
+    Oct 27, 2026 - KJWH: Fixed a ValueError in run_anomaly_pipeline by updating the early exits in build_anomaly_map to return three empty objects ({}, [], []) to match the expected unpacking signature.
     
 """
 
@@ -287,7 +288,7 @@ def build_anomaly_map(prod, period, output_dir=None,
 
     if not stat_files or not clim_files:
         if verbose: print(f"⚠️ Missing requisite STATS or CLIM files for {prod} ({period}). Returning empty map.")
-        return {}
+        return {}, [], []
 
     fp = file_parser(stat_files[0])
     ds_name = fp[0].get('dataset', dataset or 'UNKNOWN') 
