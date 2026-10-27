@@ -20,7 +20,7 @@ import dask
 # Local utilities
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import get_period_info, get_period_sets
-from utilities import get_prod_files, get_filepath, get_default_product_dataset, get_default_dataset_product
+from utilities import get_prod_files, get_filepath, get_default_product_dataset, get_default_dataset_product, get_base_product
 from utilities import generate_logfile_path
 from utilities import get_nc_prod, subset_dataset, file_parser, corrupt_file_detector
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
@@ -77,6 +77,11 @@ Modification History
                          Fixed a bug where ds_version was throwing a NameError in get_source_metadata by extracting it natively from file_parser alongside the dataset name.
                          Added .pop("_FillValue", None) to the var_attrs dictionary before assigning it to the dataset to prevent xarray from crashing when generating the .to_netcdf() encoding dictionaries.
     Oct 22, 2026 - KJWH: Added D7 period and weighted functionality for the 7-day running period
+    Oct 27, 2026 - KJWH: Integrated get_base_product into preprocess_dataset to natively support direct subproduct targeting (e.g., PSC_micro)
+                         Updated PSC family logic to preprocess_dataset to automatically rename raw Turner fractions (adding f prefix) and compute absolute concentrations on-the-fly using chlor_a.
+                         Implemented a target_subprods filter at the end of preprocess_dataset to aggressively drop unrequested variables from memory before returning the dataset.
+
+
 
     
 """
@@ -162,6 +167,10 @@ def build_stats_map(prod, period, output_dir=None,
         }
       
     """
+
+    # Auto-resolve product-specific default map_subset
+    if not map_subset:
+        map_subset = 'NES' if 'PSC' in prod.upper() else 'NWA'
     
     # ---------------------------------------------------------
     # 1. Resolve Output Directory (if not provided)
@@ -297,7 +306,7 @@ def build_stats_map(prod, period, output_dir=None,
 
         # Build output filename
         out_suffix = f"{data_type}-NRT" if has_nrt else data_type
-        out_name = f"{out_period}-{map_subset or 'GLOBAL'}-{ds_name}-{prod}-{out_suffix}.nc"
+        out_name = f"{out_period}-{map_subset}-{ds_name}-{prod}-{out_suffix}.nc"
 
         if verbose: print(f"Checking {out_period}: {len(input_files)} input files -> {out_name}")
         out_path = os.path.join(output_dir, out_name)
@@ -312,6 +321,8 @@ def build_stats_map(prod, period, output_dir=None,
             if mtime_ok:
                 # Check 2: Does the internal list of files perfectly match our current list?
                 try:
+                    check_corruption = False # Initialize flag
+
                     # Use native h5netcdf to read the file attributes
                     with h5netcdf.File(out_path, 'r') as existing_ds:
                         stored_files_str = existing_ds.attrs.get('source_files', '')
@@ -328,15 +339,18 @@ def build_stats_map(prod, period, output_dir=None,
                         current_basenames = set(os.path.basename(f) for f in input_files)
                         
                         if stored_basenames == current_basenames:
-                            # The file claims to be up-to-date. Deep-scan it for HDF corruption!
-                            is_corrupt = corrupt_file_detector([out_path])
-                            if is_corrupt:
-                                raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
-                            is_up_to_date = True
+                            check_corruption = True
                         else:
                             is_up_to_date = False
                     else:
                         is_up_to_date = False
+
+                    if check_corruption:   
+                        # The file claims to be up-to-date. Deep-scan it for HDF corruption!
+                        is_corrupt = corrupt_file_detector([out_path])
+                        if is_corrupt:
+                            raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
+                        is_up_to_date = True
                         
                 except Exception as e:
                     if verbose: print(f"  ⚠️ Could not read attributes of {out_name}: {e}. Forcing update.")
@@ -356,8 +370,9 @@ def build_stats_map(prod, period, output_dir=None,
         # Look for obsolete NRT files
         obsolete_nrt_file = None
         if not has_nrt:
-            nrt_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{data_type}-NRT.nc"
+            nrt_name = f"{out_period}-{map_subset}-{ds_name}-{prod}-{data_type}-NRT.nc"            
             nrt_path = os.path.join(output_dir, nrt_name)
+
             if os.path.exists(nrt_path):
                 nrt_replaced_count += 1
                 # Flag the file for deletion by the execution pipeline
@@ -382,7 +397,7 @@ def build_stats_map(prod, period, output_dir=None,
     completion_pct = (up_to_date_count / total_tasks * 100) if total_tasks > 0 else 0
 
     print("-" * 60)
-    print(f"📊 STATS SUMMARY: {prod} | {period} | {map_subset or 'GLOBAL'}")
+    print(f"📊 STATS SUMMARY: {prod} | {period} | {map_subset}")
     print(f"📁 Output Dir: {output_dir}")
     print(f"✅ Up-to-date:  {up_to_date_count}/{total_tasks} ({completion_pct:.1f}%)")
     print(f"⏳ To process:  {needs_update_count} files")
@@ -391,7 +406,7 @@ def build_stats_map(prod, period, output_dir=None,
     
     return stats_map, deleted_corrupt_files, manual_delete_files
 
-def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
+def preprocess_dataset(ds, prod, ds_name=None, verbose=False, **kwargs):
     """
     Purpose:
         Intercepts an xarray Dataset to perform product-specific mathematical transformations,
@@ -408,33 +423,82 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
     Returns:
         ds (xarray.Dataset): The fully preprocessed dataset containing the calculated or standardized variables and the required 'pipeline_target_vars' attribute.
     """
-    target_vars = []
     
-    if prod == 'PSC':
-        if verbose: print("  🧪 Pre-computing absolute PSC concentrations...")
-        
-        # 1. Check if we are looking at raw data or derived data
-        # If 'PSC_fmicro_mean' exists, skip because the math is already done
-        if 'PSC_fmicro_mean' in ds.data_vars:
-            target_vars = [v for v in ds.data_vars if v.endswith('_mean')]
-            
-        # Otherwise, this is a raw daily file. Do the math!
-        elif all(v in ds.data_vars for v in ['PSC_fmicro', 'PSC_fnano', 'PSC_fpico', 'CHL']):
-            # Calculate absolute fractions
-            ds['PSC_micro'] = ds['PSC_fmicro'] * ds['CHL']
-            ds['PSC_nano']  = ds['PSC_fnano']  * ds['CHL']
-            ds['PSC_pico']  = ds['PSC_fpico']  * ds['CHL']
-            
-            # Explicitly define which variables to run stats on
-            target_vars = [
-                'PSC_fmicro', 'PSC_fnano', 'PSC_fpico', 
-                'PSC_micro', 'PSC_nano', 'PSC_pico', 'CHL'
-            ]
-        else:
-            if verbose: print("  ⚠️ Missing required base variables for PSC math.")
+    # Auto-detect base product
+    base_prod = get_base_product(prod)
 
-    # --- 🎯 MULTI-WAVELENGTH PRODUCt LOGIC ---
-    elif prod in ['RRS', 'APH', 'ADG', 'BBB']:
+    # 🎯 2. If a subproduct (like PSC_micro) was passed directly, auto-configure the filter!
+    target_subprods = kwargs.get('target_subprods', [])
+    if base_prod != prod and not target_subprods:
+        target_subprods = [prod]
+        kwargs['target_subprods'] = target_subprods
+
+    target_vars = []
+
+    if base_prod == 'PSC':
+        if verbose: print("  🦠 Detected Phytoplankton Size Class (PSC) product family...")
+
+        # Check to see if processing an existing STATS file? (It will already have PSC_ prefixes)
+        derived_vars = [v for v in ds.data_vars if str(v).upper().startswith('PSC_') and str(v).endswith('_mean')]
+        if derived_vars:
+            for v in derived_vars:
+                base_name = v.replace('_mean', '')
+                ds = ds.rename({v: base_name})
+                target_vars.append(base_name)
+        else: # Process raw daily files            
+            # 1. Rename the raw fractions to standard names
+            psc_keywords = ['micro', 'nano', 'pico']
+            for v in ds.data_vars:
+                v_str = str(v)
+                v_lower = v_str.lower()
+                if any(k in v_lower for k in psc_keywords):
+                    # Strip any existing PSC prefix to avoid doubling it
+                    clean_v = v_lower.replace('psc_', '')
+                    
+                    # Ensure it has the 'f' prefix for fraction
+                    if not clean_v.startswith('f'):
+                        clean_v = f"f{clean_v}"
+                        
+                    new_name = f"PSC_{clean_v}"
+                    
+                    if v_str != new_name:
+                        if verbose: print(f"  🏷️ Renaming '{v_str}' -> '{new_name}'")
+                        ds = ds.rename({v_str: new_name})
+                        
+                    if new_name not in target_vars:
+                        target_vars.append(new_name)
+
+            # 2. Calculate the Absolute Concentrations (PSC = Fraction * CHL)
+            chl_var = None
+            if 'chlor_a' in ds.data_vars:
+                chl_var = 'chlor_a'
+            elif 'CHL' in ds.data_vars:
+                chl_var = 'CHL'
+                
+            if chl_var:
+                if verbose: print("  🧮 Calculating absolute PSC concentrations using Chlorophyll-a...")
+                
+                fractions = [v for v in target_vars if 'fmicro' in v or 'fnano' in v or 'fpico' in v]
+                
+                for frac_var in fractions:
+                    # Strip the 'f' to get the absolute name (e.g. PSC_fmicro -> PSC_micro)
+                    abs_name = frac_var.replace('PSC_f', 'PSC_')
+                    
+                    # Calculate: Fraction * Chlorophyll
+                    ds[abs_name] = ds[frac_var] * ds[chl_var]
+                    
+                    # Add metadata attributes for the new variable
+                    ds[abs_name].attrs = ds[frac_var].attrs.copy()
+                    ds[abs_name].attrs['long_name'] = ds[frac_var].attrs.get('long_name', '').replace('Fraction of ', '').replace('to total phytoplankton ', '')
+                    ds[abs_name].attrs['units'] = ds[chl_var].attrs.get('units', 'mg m-3')
+                    
+                    target_vars.append(abs_name)
+                    if verbose: print(f"    ✅ Generated {abs_name}")
+            else:
+                if verbose: print("  ⚠️ Warning: No Chlorophyll-a variable found. Cannot calculate absolute PSC concentrations.")
+
+    # --- MULTI-WAVELENGTH PRODUCT LOGIC ---
+    elif base_prod in ['RRS', 'APH', 'ADG', 'BBB']:
         if verbose: print(f"  🌈 Detected multi-wavelength product family: {prod}")
         
         # 1. Check if we are reading already-derived stats (e.g., RRS_412_mean)
@@ -466,17 +530,46 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
                     ds = ds.rename({v: clean_name})
                 target_vars.append(clean_name)
 
+    # --- PRIMARY PRODUCTIVITY (PPD) LOGIC ---
+    elif base_prod == 'PPD':
+        if verbose: print("  🌱 Detected Primary Productivity (PPD) product family...")
+        
+        # 1. Check if we are reading already-derived stats (e.g., PP_VGPM_mean)
+        derived_vars = [v for v in ds.data_vars if v.startswith('PP_') and v.endswith('_mean')]
+        
+        if derived_vars:
+            for v in derived_vars:
+                base_name = v.replace('_mean', '')
+                if verbose: print(f"  🏷️ Renaming derived stat: '{v}' -> '{base_name}'")
+                ds = ds.rename({v: base_name})
+                target_vars.append(base_name)
+                
+        # 2. Otherwise, we are reading raw daily files. Find all PP_ variables.
+        else:
+            raw_vars = [v for v in ds.data_vars if str(v).startswith('PP_')]            
+            if not raw_vars:
+                if verbose: print("  ⚠️ No 'PP_' variables found in this file.")
+            
+            target_vars.extend(raw_vars)
+    
     # --- DEFAULT BEHAVIOR (Standard products or specific individual wavelengths) ---
     else:
-        mean_var_name = f"{prod}_mean"
+        mean_var_name = f"{base_prod}_mean"
         
         if mean_var_name in ds.data_vars:
-            if verbose: print(f"  🏷️ Renaming '{mean_var_name}' -> '{prod}'")
-            ds = ds.rename({mean_var_name: prod})
-            target_vars = [prod]
+            if verbose: print(f"  🏷️ Renaming '{mean_var_name}' -> '{base_prod}'")
+            ds = ds.rename({mean_var_name: base_prod})
+            target_vars = [base_prod]
         else:            
-            raw_var = prod if prod in ds.data_vars else get_nc_prod(ds_name, prod)
-            
+            if base_prod in ds.data_vars:
+                raw_var = base_prod
+            else:
+                case_matches = [v for v in ds.data_vars if v.upper() == base_prod.upper()]
+                if case_matches:
+                    raw_var = case_matches[0]
+                else:
+                    raw_var = get_nc_prod(ds_name, base_prod)
+
             if raw_var:
                 if 'SST' in prod.upper() or 'TEMP' in prod.upper():
                     try:
@@ -497,6 +590,14 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
                     ds = ds.rename({raw_var: prod})
                     
                 target_vars = [prod]
+
+    # --- SUBPRODUCT FILTERING ---
+    if target_subprods:
+        upper_targets = [t.upper() for t in target_subprods]
+        filtered_vars = [v for v in target_vars if v.upper() in upper_targets]
+        if filtered_vars:
+            target_vars = filtered_vars
+            if verbose: print(f"  🎯 Subproduct filter applied. Keeping only: {target_vars}")
 
     ds.attrs['pipeline_target_vars'] = target_vars
     return ds
@@ -1093,7 +1194,7 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
         
         # Pull variables out of kwargs
         debug   = kwargs.get('debug', False) 
-        map_subset  = kwargs.get('map_subset', 'GLOBAL')
+        map_subset  = kwargs.get('map_subset')
         parallel_runs = kwargs.pop('parallel_runs', 1) 
         allow_nrt = kwargs.pop('allow_nrt', False)
         

@@ -4,7 +4,7 @@ from pathlib import Path
 import stat
 import xarray as xr
 from utilities.bootstrap.environment import bootstrap_environment
-from utilities import parse_dataset_info, extract_period_code, get_period_info, get_period_dates, get_source_file_dates
+from utilities import parse_dataset_info, extract_period_code, get_period_info, get_base_product, get_source_file_dates
 from utilities import product_defaults, dataset_defaults, get_dataset_products, resolve_dataset_grid, get_daterange
 env = bootstrap_environment(verbose=False)
 
@@ -47,6 +47,10 @@ Modification History
                          Implemented updates to work with the new processing_level to distinguish between near-real-time (NRT) and reanalysis (RAN) files
                          get_filepath defaults to the RAN processing_level
                          get_prod_files by default will look for both RAN and NRT files and retain the RAN files if there are duplicate dates
+    Oct 27, 2026 - KJWH: Added get_base_product() functionality to find the correct path for various "subproducts" (e.g. PSC_micro)
+                         Added get_base_product() functionality to get_prod_files so that it just finds the "subproduct" files if available and not duplicate files
+                         Overhauled the file globbing loop in get_prod_files to use hierarchical, mutually exclusive fallback logic (exact subproduct match first, falling back to base product if empty) to eliminate duplicate file ingestion.
+                         
 
     
 
@@ -287,11 +291,13 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
 
     # --- 1. Setup & Defaults ---
     prod = prod.upper().strip()
+    # Identify the base product family (e.g., PSC_micro -> PSC)
+    base_prod = get_base_product(prod)
     prod_info_map = product_defaults()
-    if prod not in prod_info_map:
+    if base_prod not in prod_info_map:
         raise ValueError(f"Product '{prod}' not found in product defaults.")
     
-    actual_prod, default_dataset, default_type = prod_info_map[prod]
+    actual_prod, default_dataset, default_type = prod_info_map[base_prod]
     dataset = dataset.upper().strip() if dataset else default_dataset
     
     debug_trace(f"Mapped Product: actual_prod={actual_prod}, default_dataset={default_dataset}, default_type={default_type}")
@@ -429,6 +435,16 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         parent_dir = path
         while parent_dir and not os.path.exists(parent_dir):
             parent_dir = os.path.dirname(parent_dir)
+
+        # Auto-detect _RAN or _NRT suffixes if the base path doesn't exist
+        if not os.path.exists(path):
+            ran_path = path.replace('DAILY', 'DAILY_RAN').replace('MONTHLY', 'MONTHLY_RAN')
+            nrt_path = path.replace('DAILY', 'DAILY_NRT').replace('MONTHLY', 'MONTHLY_NRT')
+            
+            if os.path.exists(ran_path):
+                path = ran_path
+            elif os.path.exists(nrt_path):
+                path = nrt_path
             
         error_msg = f"⚠ WARNING: Path not found: {path}"
         
@@ -468,6 +484,23 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
     """
     def debug_trace(msg):
         if debug: print(f"DEBUG [FILE - {prod}]: {msg}")
+    
+    # Identify the base product family
+    base_prod = get_base_product(prod)
+    
+    #  Dynamic map_subset default based on target directory
+    map_subset = kwargs.get('map_subset')
+    if map_subset is None:
+        # If looking for derived products (STATS/CLIM/ANOM), default to NWA
+        if 'PSC' in base_prod:
+            map_subset = 'NES'
+        elif data_type in ['STATS', 'CLIM', 'ANOM', 'EXTRACT'] or (period and period.upper() not in ['D', 'DD']):
+            map_subset = 'NWA'
+        else:
+            map_subset = 'GLOBAL'
+            
+    # Re-assign back to kwargs in case the rest of the function uses it
+    kwargs['map_subset'] = map_subset
     
     # 1. Infer data_type from the period if not explicitly provided
     if data_type is None:
@@ -509,7 +542,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
             current_kwargs['processing_level'] = lvl
             
         try:
-            path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, debug=debug, **current_kwargs)
+            path = get_filepath(base_prod, dataset=dataset, period=period, verbose=verbose, debug=debug, **current_kwargs)
         except (FileNotFoundError, ValueError) as e:
             debug_trace(f"Path resolution failed for level {lvl}: {e}")
             path = None
@@ -546,17 +579,40 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
         if "/SOURCE/" in path:
             search_pattern = "*.nc"
             debug_trace("SOURCE folder detected. Dropping period prefix for file search.")
-        else:
-            if data_type:
-                # Targets format: M_200005-ACSPO-SST-NWA-STATS.nc
-                search_pattern = f"{period}_*-{data_type.upper()}*.nc"
-                debug_trace(f"data_type specified. Restricting file search to '-{data_type.upper()}.nc'")
-            else:
-                search_pattern = f"{period}_*.nc"
-        
-        if verbose: print(f"Searching for '{search_pattern}' in: {path}")
-        found_files = glob.glob(os.path.join(path, search_pattern))
-        nc_files.extend(found_files)
+            found_files = glob.glob(os.path.join(path, search_pattern))
+            nc_files.extend(found_files)
+        else: #  Strict product matching with base product fallback
+            
+            # Construct the search suffix based on data_type presence
+            type_suffix = f"-{data_type.upper()}" if data_type else ""
+            
+            # Pattern 1: Search specifically for the requested (sub)product
+            exact_pattern = f"{period}_*-{prod.upper()}{type_suffix}*.nc"
+            found_files = glob.glob(os.path.join(path, exact_pattern))
+            
+            # Pattern 2: If nothing found, and we asked for a subproduct, check for the base product
+            if not found_files and prod.upper() != base_prod.upper():
+                debug_trace(f"No exact files for {prod}. Falling back to base product {base_prod} files...")
+                fallback_pattern = f"{period}_*-{base_prod.upper()}{type_suffix}*.nc"
+                found_files = glob.glob(os.path.join(path, fallback_pattern))
+                
+            # Pattern 3: Absolute fallback (to handle edge cases in custom file naming)
+            if not found_files:
+                generic_pattern = f"{period}_*.nc"
+                all_period_files = glob.glob(os.path.join(path, generic_pattern))
+                
+                # Filter down to prevent returning BOTH subproduct and base product duplicates
+                exact_matches = [f for f in all_period_files if f"-{prod.upper()}-" in f.upper() or f"-{prod.upper()}." in f.upper()]
+                if exact_matches:
+                    found_files = exact_matches
+                elif prod.upper() != base_prod.upper():
+                    base_matches = [f for f in all_period_files if f"-{base_prod.upper()}-" in f.upper() or f"-{base_prod.upper()}." in f.upper()]
+                    found_files = base_matches
+                else:
+                    found_files = all_period_files # Last resort
+            
+            if verbose: print(f"Searching for '{exact_pattern}' (or base fallbacks) in: {path}")
+            nc_files.extend(found_files)
 
     if not nc_files:
         if verbose: print("⚠ No .nc files found.")
