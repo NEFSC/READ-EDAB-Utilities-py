@@ -100,7 +100,7 @@ def boost_file_limits():
         new_limit = min(4096, hard)
         resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
 
-def is_log_anomaly(prod):
+def is_log_anomaly(var_name):
     """
     Purpose:
         Identifies whether a product is log-normally distributed and requires 
@@ -112,10 +112,17 @@ def is_log_anomaly(prod):
     Returns:
         bool: True if the product requires log-anomaly (ratio) processing, False otherwise.
     """
-    # Add any other log-normally distributed products to this list
-    log_products = ['CHL', 'CHLA', 'KD490', 'POC'] 
+    v_upper = str(var_name).upper()
     
-    return prod.upper() in log_products
+    # 1. Explicitly exclude fractions (Standard Difference)
+    if 'FMICRO' in v_upper or 'FNANO' in v_upper or 'FPICO' in v_upper:
+        return False
+        
+    # 2. Define known log-normal indicators (Ratio)
+    log_indicators = ['CHL', 'KD490', 'POC', 'PSC_MICRO', 'PSC_NANO', 'PSC_PICO', 'PP_']
+    
+    # Return True if any indicator is found in the variable name
+    return any(ind in v_upper for ind in log_indicators)
 
 def batch_anomaly_match(input_files, clim_files, climatology_range=None):
     """
@@ -229,6 +236,10 @@ def build_anomaly_map(prod, period, output_dir=None,
             - list: A list of previously corrupted file paths that were successfully deleted.
             - list: A list of corrupted file paths that were locked by the OS and require manual deletion.
     """
+
+    # Auto-resolve product-specific default map_subset
+    if not map_subset:
+        map_subset = 'NES' if 'PSC' in prod.upper() else 'NWA'
     
     # 1. Resolve Output Directory
     if output_dir is None:
@@ -300,7 +311,7 @@ def build_anomaly_map(prod, period, output_dir=None,
         out_period = extract_period_code(stat_file)['full_period']
         stat_input = [stat_file]  # Process single anomaly expects a list
 
-        out_name = f"{out_period}-{map_subset or 'GLOBAL'}-{ds_name}-{prod}-{data_type}.nc"
+        out_name = f"{out_period}-{map_subset}-{ds_name}-{prod}-{data_type}.nc"
         out_path = os.path.join(output_dir, out_name)
 
         is_up_to_date = False
@@ -311,6 +322,8 @@ def build_anomaly_map(prod, period, output_dir=None,
                 out_mtime = os.path.getmtime(out_path)
                 if all(out_mtime > os.path.getmtime(f) for f in all_inputs):
                     try:
+                        check_corruption = False # 🎯 Initialize flag
+                        
                         # Use native h5netcdf to read the input file attributes
                         with h5netcdf.File(out_path, 'r') as existing_ds:
                             stored_files_str = existing_ds.attrs.get('source_files', '')
@@ -319,20 +332,26 @@ def build_anomaly_map(prod, period, output_dir=None,
                                 stored_files_str = stored_files_str.decode('utf-8')
                             elif isinstance(stored_files_str, np.ndarray):
                                 stored_files_str = str(stored_files_str[0]) if stored_files_str.size > 0 else ""
+                        
+                        # 🎯 The 'with' block is over. existing_ds is safely CLOSED.
                                 
                         if stored_files_str:
                             stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
                             current_basenames = set(os.path.basename(f) for f in all_inputs)
+                            
                             if stored_basenames == current_basenames:
-                                # The file claims to be up-to-date. Deep-scan it for HDF corruption!
-                                is_corrupt = corrupt_file_detector([out_path])
-                                if is_corrupt:
-                                    raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
-                                is_up_to_date = True
+                                check_corruption = True
                             else:
                                 is_up_to_date = False
                         else:
                             is_up_to_date = False
+                            
+                        # NOW it is safe to deep-scan for HDF corruption!
+                        if check_corruption:
+                            is_corrupt = corrupt_file_detector([out_path])
+                            if is_corrupt:
+                                raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
+                            is_up_to_date = True
                     except Exception:
                         if verbose: print(f"  ⚠️ Could not read {out_name}: {e}")
                         
@@ -360,7 +379,7 @@ def build_anomaly_map(prod, period, output_dir=None,
 
     needs_update_count = len(anomaly_map) - up_to_date_count
     print("-" * 60)
-    print(f"📊 ANOMALY SUMMARY: {prod} | {period} | {map_subset or 'GLOBAL'}")
+    print(f"📊 ANOMALY SUMMARY: {prod} | {period} | {map_subset or 'NWA'}")
     print(f"✅ Up-to-date:  {up_to_date_count}/{len(anomaly_map)}")
     print(f"⏳ To process:  {needs_update_count} files")
     print("-" * 60)
@@ -368,7 +387,7 @@ def build_anomaly_map(prod, period, output_dir=None,
     return anomaly_map, deleted_corrupt_files, manual_delete_files
 
 
-def compute_anomaly(stat_da, clim_da, prod):
+def compute_anomaly(stat_da, clim_da, use_ratio):
     """
     Purpose:
         Calculates the anomaly between a statistical DataArray and a climatological baseline DataArray.
@@ -392,8 +411,6 @@ def compute_anomaly(stat_da, clim_da, prod):
             f"Dimension mismatch! Stat (lat: {stat_da.sizes.get('lat')}, lon: {stat_da.sizes.get('lon')}) "
             f"does not match Clim (lat: {clim_da.sizes.get('lat')}, lon: {clim_da.sizes.get('lon')})."
         )
-    
-    use_ratio = is_log_anomaly(prod)
     
     if use_ratio:
         anom_da = stat_da / clim_da
@@ -485,40 +502,48 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                 
                 # Load the statistical dataset
                 ds_stat = xr.open_mfdataset(stat_files, combine="by_coords", engine='h5netcdf', parallel=False)
-
                 anom_results = {}
 
-                # Loop through and process only the target statistic variables
-                for var in ds_stat.data_vars:
-                    if not str(var).endswith(f'_{target_stat}'):
-                        continue
-                        
-                    if var in ds_clim.data_vars:
-                        stat_da = ds_stat[var]
-                        clim_da = ds_clim[var]
+                # Dynamically extract the base variables (e.g. 'PSC_micro' from 'PSC_micro_mean')
+                stat_suffixes = ['_mean', '_median', '_max', '_min', '_std', '_sum', '_var', '_count']
+                base_vars = set()
+                for v in ds_stat.data_vars:
+                    for suff in stat_suffixes:
+                        if str(v).endswith(suff):
+                            base_vars.add(str(v).replace(suff, ''))
+                            break
 
-                        # Compute the anomaly for this specific variable
+                # Evaluate and process each base variable independently
+                for base_var in base_vars:
+                    use_ratio = is_log_anomaly(base_var)
+                    
+                    target_stat = kwargs.get('stat_var')
+                    if not target_stat:
+                        target_stat = 'median' if use_ratio else 'mean'
+                        
+                    target_var = f"{base_var}_{target_stat}"
+                    
+                    if target_var in ds_stat.data_vars and target_var in ds_clim.data_vars:
+                        stat_da = ds_stat[target_var]
+                        clim_da = ds_clim[target_var]
+
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore", category=RuntimeWarning)
                             with dask.config.set(scheduler='single-threaded'):
-                                anom_da = compute_anomaly(stat_da, clim_da, prod)
+                                # Pass the variable-specific math flag directly
+                                anom_da = compute_anomaly(stat_da, clim_da, use_ratio)
                                 anom_da = anom_da.load()
                         
-                        # Rename for output formatting (e.g. SST_mean -> SST_anom)
-                        base_var = str(var).replace(f'_{target_stat}', '')
                         out_var_name = f"{base_var}_anom"
-                        
                         anom_results[out_var_name] = anom_da
                     else:
-                        if debug: print(f"      ⚠️ Climatology variable matching '{var}' not found. Skipping.")
+                        if debug: print(f"      ⚠️ Climatology matching '{target_var}' not found. Skipping.")
 
                 if not anom_results:
-                    raise ValueError(f"❌ No valid '{target_stat}' variables computed for anomaly {out_path}.")
+                    raise ValueError(f"❌ No valid variables computed for anomaly {out_path}.")
                 
-                # Rebuild into a new Dataset, forcing it to inherit ALL coordinates exactly as they appear in ds_stat
                 anom_ds = xr.Dataset(anom_results, coords=ds_stat.coords)
                 
-                # Format Encoding and Attributes
                 # Format Encoding and Attributes
                 encoding = {}
                 for out_var in anom_ds.data_vars:
@@ -536,12 +561,17 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                     
                     base_var_name = out_var.replace("_anom", "")
                     var_attrs = build_stat_attributes(base_var_name, "anomaly", _FillValue=fill_value)
+
+                    # Re-evaluate use_ratio for attributes injection
+                    var_use_ratio = is_log_anomaly(base_var_name)
+                    var_target_stat = kwargs.get('stat_var') or ('median' if var_use_ratio else 'mean')
                     
                     # Override units and add a comment if using the ratio method
-                    if use_ratio:
+                    if var_use_ratio:
                         var_attrs["units"] = "unitless"
-                        var_attrs["comment"] = f"Anomaly calculated as a ratio (stat / clim) of the {target_stat}, resulting in a unitless value."
-
+                        var_attrs["comment"] = f"Anomaly calculated as a ratio (stat / clim) of the {var_target_stat}, resulting in a unitless value."
+                    else:
+                        var_attrs["comment"] = f"Anomaly calculated as a standard difference (stat - clim) of the {var_target_stat}."
                     # Remove _FillValue from attrs to prevent xarray conflict with encoding dictionary
                     var_attrs.pop("_FillValue", None)
 
