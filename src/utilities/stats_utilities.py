@@ -162,6 +162,10 @@ def build_stats_map(prod, period, output_dir=None,
         }
       
     """
+
+    # Auto-resolve product-specific default map_subset
+    if not map_subset:
+        map_subset = 'NES' if 'PSC' in prod.upper() else 'NWA'
     
     # ---------------------------------------------------------
     # 1. Resolve Output Directory (if not provided)
@@ -297,7 +301,7 @@ def build_stats_map(prod, period, output_dir=None,
 
         # Build output filename
         out_suffix = f"{data_type}-NRT" if has_nrt else data_type
-        out_name = f"{out_period}-{map_subset or 'GLOBAL'}-{ds_name}-{prod}-{out_suffix}.nc"
+        out_name = f"{out_period}-{map_subset}-{ds_name}-{prod}-{out_suffix}.nc"
 
         if verbose: print(f"Checking {out_period}: {len(input_files)} input files -> {out_name}")
         out_path = os.path.join(output_dir, out_name)
@@ -312,6 +316,8 @@ def build_stats_map(prod, period, output_dir=None,
             if mtime_ok:
                 # Check 2: Does the internal list of files perfectly match our current list?
                 try:
+                    check_corruption = False # Initialize flag
+
                     # Use native h5netcdf to read the file attributes
                     with h5netcdf.File(out_path, 'r') as existing_ds:
                         stored_files_str = existing_ds.attrs.get('source_files', '')
@@ -328,15 +334,18 @@ def build_stats_map(prod, period, output_dir=None,
                         current_basenames = set(os.path.basename(f) for f in input_files)
                         
                         if stored_basenames == current_basenames:
-                            # The file claims to be up-to-date. Deep-scan it for HDF corruption!
-                            is_corrupt = corrupt_file_detector([out_path])
-                            if is_corrupt:
-                                raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
-                            is_up_to_date = True
+                            check_corruption = True
                         else:
                             is_up_to_date = False
                     else:
                         is_up_to_date = False
+
+                    if check_corruption:   
+                        # The file claims to be up-to-date. Deep-scan it for HDF corruption!
+                        is_corrupt = corrupt_file_detector([out_path])
+                        if is_corrupt:
+                            raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
+                        is_up_to_date = True
                         
                 except Exception as e:
                     if verbose: print(f"  ⚠️ Could not read attributes of {out_name}: {e}. Forcing update.")
@@ -356,8 +365,9 @@ def build_stats_map(prod, period, output_dir=None,
         # Look for obsolete NRT files
         obsolete_nrt_file = None
         if not has_nrt:
-            nrt_name = f"{out_period}-{ds_name}-{prod}-{map_subset or 'GLOBAL'}-{data_type}-NRT.nc"
+            nrt_name = f"{out_period}-{map_subset}-{ds_name}-{prod}-{data_type}-NRT.nc"            
             nrt_path = os.path.join(output_dir, nrt_name)
+
             if os.path.exists(nrt_path):
                 nrt_replaced_count += 1
                 # Flag the file for deletion by the execution pipeline
@@ -382,7 +392,7 @@ def build_stats_map(prod, period, output_dir=None,
     completion_pct = (up_to_date_count / total_tasks * 100) if total_tasks > 0 else 0
 
     print("-" * 60)
-    print(f"📊 STATS SUMMARY: {prod} | {period} | {map_subset or 'GLOBAL'}")
+    print(f"📊 STATS SUMMARY: {prod} | {period} | {map_subset}")
     print(f"📁 Output Dir: {output_dir}")
     print(f"✅ Up-to-date:  {up_to_date_count}/{total_tasks} ({completion_pct:.1f}%)")
     print(f"⏳ To process:  {needs_update_count} files")
@@ -433,7 +443,7 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
         else:
             if verbose: print("  ⚠️ Missing required base variables for PSC math.")
 
-    # --- 🎯 MULTI-WAVELENGTH PRODUCt LOGIC ---
+    # --- MULTI-WAVELENGTH PRODUCT LOGIC ---
     elif prod in ['RRS', 'APH', 'ADG', 'BBB']:
         if verbose: print(f"  🌈 Detected multi-wavelength product family: {prod}")
         
@@ -466,6 +476,28 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False):
                     ds = ds.rename({v: clean_name})
                 target_vars.append(clean_name)
 
+    # --- PRIMARY PRODUCTIVITY (PPD) LOGIC ---
+    elif prod == 'PPD':
+        if verbose: print("  🌱 Detected Primary Productivity (PPD) product family...")
+        
+        # 1. Check if we are reading already-derived stats (e.g., PP_VGPM_mean)
+        derived_vars = [v for v in ds.data_vars if v.startswith('PP_') and v.endswith('_mean')]
+        
+        if derived_vars:
+            for v in derived_vars:
+                base_name = v.replace('_mean', '')
+                if verbose: print(f"  🏷️ Renaming derived stat: '{v}' -> '{base_name}'")
+                ds = ds.rename({v: base_name})
+                target_vars.append(base_name)
+                
+        # 2. Otherwise, we are reading raw daily files. Find all PP_ variables.
+        else:
+            raw_vars = [v for v in ds.data_vars if str(v).startswith('PP_')]            
+            if not raw_vars:
+                if verbose: print("  ⚠️ No 'PP_' variables found in this file.")
+            
+            target_vars.extend(raw_vars)
+    
     # --- DEFAULT BEHAVIOR (Standard products or specific individual wavelengths) ---
     else:
         mean_var_name = f"{prod}_mean"
@@ -1093,7 +1125,7 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
         
         # Pull variables out of kwargs
         debug   = kwargs.get('debug', False) 
-        map_subset  = kwargs.get('map_subset', 'GLOBAL')
+        map_subset  = kwargs.get('map_subset')
         parallel_runs = kwargs.pop('parallel_runs', 1) 
         allow_nrt = kwargs.pop('allow_nrt', False)
         
