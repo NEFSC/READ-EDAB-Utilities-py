@@ -429,6 +429,16 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         parent_dir = path
         while parent_dir and not os.path.exists(parent_dir):
             parent_dir = os.path.dirname(parent_dir)
+
+        # Auto-detect _RAN or _NRT suffixes if the base path doesn't exist
+        if not os.path.exists(path):
+            ran_path = path.replace('DAILY', 'DAILY_RAN').replace('MONTHLY', 'MONTHLY_RAN')
+            nrt_path = path.replace('DAILY', 'DAILY_NRT').replace('MONTHLY', 'MONTHLY_NRT')
+            
+            if os.path.exists(ran_path):
+                path = ran_path
+            elif os.path.exists(nrt_path):
+                path = nrt_path
             
         error_msg = f"⚠ WARNING: Path not found: {path}"
         
@@ -468,6 +478,22 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
     """
     def debug_trace(msg):
         if debug: print(f"DEBUG [FILE - {prod}]: {msg}")
+    
+    #  Dynamic map_subset default based on target directory
+    map_subset = kwargs.get('map_subset')
+    if map_subset is None:
+        # If we are looking for derived products (STATS/CLIM/ANOM), default to NWA
+        if 'PSC' in prod.upper():
+            map_subset = 'NES'
+        # 🎯 Check period: anything other than D or DD is derived and defaults to NWA
+        elif data_type in ['STATS', 'CLIM', 'ANOM', 'EXTRACT'] or (period and period.upper() not in ['D', 'DD']):
+            map_subset = 'NWA'
+        else:
+            # Raw source files (Level 3/4) typically remain GLOBAL natively
+            map_subset = 'GLOBAL'
+            
+    # Re-assign back to kwargs in case the rest of the function uses it
+    kwargs['map_subset'] = map_subset
     
     # 1. Infer data_type from the period if not explicitly provided
     if data_type is None:
