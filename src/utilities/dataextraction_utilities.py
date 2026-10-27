@@ -108,6 +108,10 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_typ
     
     """
 
+    # Auto-resolve product-specific default map_subset
+    if not map_subset:
+        map_subset = 'NES' if 'PSC' in prod.upper() else 'NWA'
+
     # 1. Find Input Files
     if verbose: print(f"🔍 Searching for {period} files for {dataset}:{prod} (Grid: {map_subset})")
     input_files = get_prod_files(prod, dataset=dataset, dataset_version=dataset_version, period=period, map_subset=map_subset, verbose=verbose)
