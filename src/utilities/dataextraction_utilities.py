@@ -534,6 +534,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
 
                 new_records = []
                 successful, failed = 0, 0
+                completed_tasks = 0
 
                 # --- 🎯 PARALLEL EXTRACTION ---
                 if parallel_runs > 1:
@@ -548,6 +549,8 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                         for future in concurrent.futures.as_completed(future_to_file):
                             file_path = future_to_file[future]
                             info = tasks_to_run[file_path]
+                            completed_tasks += 1
+                            if should_log: print(f"    [{completed_tasks}/{len(tasks_to_run)}] Finished: {info['source_file']}")
                             try:
                                 stats, corrupt_files = future.result()
                                 if corrupt_files: all_corrupt_inputs.update(corrupt_files)
@@ -561,7 +564,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                                             "source_file": info['source_file'],
                                             "input_mtime": info['input_mtime'],
                                             "is_nrt": info['is_nrt'],
-                                            **stats
+                                            **single_stats
                                         }
                                         new_records.append(record)
                                     successful += 1
@@ -569,11 +572,13 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                                     failed += 1
                             except Exception as e:
                                 failed += 1
-                                if debug: print(f"❌ [Parallel] Exception on {info['source_file']}: {e}")
+                                if should_log: print(f"❌ [Parallel] Exception on {info['source_file']}: {e}")
                 
                 # --- SEQUENTIAL EXTRACTION ---
                 else:
                     for file_path, info in tasks_to_run.items():
+                        completed_tasks += 1
+                        if should_log: print(f"    [{completed_tasks}/{len(tasks_to_run)}] Processing: {info['source_file']}")
                         # Pass explicit shapefile and bbox args
                         stats, corrupt_files = process_single_extraction(file_path, target_var, shapefile, bbox, verbose=verbose, **kwargs)
                         if corrupt_files: all_corrupt_inputs.update(corrupt_files)
