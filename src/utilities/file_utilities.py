@@ -494,7 +494,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
         # If looking for derived products (STATS/CLIM/ANOM), default to NWA
         if 'PSC' in base_prod:
             map_subset = 'NES'
-        elif data_type in ['STATS', 'CLIM', 'ANOM', 'EXTRACT'] or (period and period.upper() not in ['D', 'DD']):
+        elif data_type in ['STATS', 'CLIM', 'ANOM', 'EXTRACT','ANNUAL'] or (period and period.upper() not in ['D', 'DD']):
             map_subset = 'NWA'
         else:
             map_subset = 'GLOBAL'
