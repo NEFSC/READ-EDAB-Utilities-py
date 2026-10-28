@@ -16,7 +16,8 @@ import dask
 # Local utilities (Adapted from stats_utilities)
 from utilities.bootstrap.environment import bootstrap_environment
 from utilities import get_default_climatology_range, extract_period_code, get_clim_period 
-from utilities import get_prod_files, get_filepath, file_parser,get_default_product_dataset, get_default_dataset_product, corrupt_file_detector
+from utilities import get_prod_files, get_filepath, file_parser, corrupt_file_detector
+from utilities import get_default_product_dataset, get_default_dataset_product, is_log_product
 from utilities import generate_logfile_path
 from utilities import build_stat_attributes, build_product_attributes, get_default_metadata, get_lut_metadata, get_current_utc_timestamp
 from utilities import get_geospatial_metadata, get_temporal_metadata, get_summary_metadata, get_reference_metadata, get_fill_value, get_source_metadata
@@ -33,11 +34,10 @@ Purpose:
 
 Main Functions:
     - run_anomaly_pipeline: Runs a multi-product, multi-period anomaly pipeline.
-    - process_single_anomaly: Processes a single anomaly task (opens stat/clim files, computes anomaly, saves to NetCDF).
+    - process_anomaly_group: Processes a single anomaly task (opens stat/clim files, computes anomaly, saves to NetCDF).
     - build_anomaly_map: Resolves output directories, pairs stat and climatology files, and builds a processing map.
 
 Helper Functions:
-    - compute_anomalies: Subtracts climatology from statistics and standardizes variable names.
     - boost_file_limits: Raises the system limit for open file handles (Linux/Mac only).
     - DualLogger: Intercepts standard print statements and writes them to both the terminal and a persistent log file.
 
@@ -69,6 +69,10 @@ Missing Baseline Graceful Fails: Ensured that missing climatology files safely r
                          Intercepted the logfile parameter to pass through generate_logfile_path(), allowing standardized log naming across all execution environments.
                          Updated documentation
     Oct 27, 2026 - KJWH: Fixed a ValueError in run_anomaly_pipeline by updating the early exits in build_anomaly_map to return three empty objects ({}, [], []) to match the expected unpacking signature.
+    Oct 28, 2026 - KJWH: Removed is_log_anomaly() and now using is_log_product (in product_utilities)
+                         Removed compute_anomaly() and moved the anomaly calculations into process_anomaly_group()
+                         Now also returning the log_difference anomaly for log based products. This will then be used in the dataextraction_utilities
+                         Removing the time coordinates from the climatology dataset
     
 """
 
@@ -100,30 +104,6 @@ def boost_file_limits():
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         new_limit = min(4096, hard)
         resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
-
-def is_log_anomaly(var_name):
-    """
-    Purpose:
-        Identifies whether a product is log-normally distributed and requires 
-        a ratio-based anomaly calculation instead of a standard difference.
-
-    Input Parameters:
-        prod (str): The logical product name (e.g., 'CHL', 'SST').
-
-    Returns:
-        bool: True if the product requires log-anomaly (ratio) processing, False otherwise.
-    """
-    v_upper = str(var_name).upper()
-    
-    # 1. Explicitly exclude fractions (Standard Difference)
-    if 'FMICRO' in v_upper or 'FNANO' in v_upper or 'FPICO' in v_upper:
-        return False
-        
-    # 2. Define known log-normal indicators (Ratio)
-    log_indicators = ['CHL', 'KD490', 'POC', 'PSC_MICRO', 'PSC_NANO', 'PSC_PICO', 'PP_']
-    
-    # Return True if any indicator is found in the variable name
-    return any(ind in v_upper for ind in log_indicators)
 
 def batch_anomaly_match(input_files, clim_files, climatology_range=None):
     """
@@ -388,39 +368,6 @@ def build_anomaly_map(prod, period, output_dir=None,
     return anomaly_map, deleted_corrupt_files, manual_delete_files
 
 
-def compute_anomaly(stat_da, clim_da, use_ratio):
-    """
-    Purpose:
-        Calculates the anomaly between a statistical DataArray and a climatological baseline DataArray.
-        Verifies that spatial dimensions match before calculating. Uses ratio for log-normal products 
-        and simple difference for standard products.
-
-    Input Parameters:
-        stat_da (xr.DataArray): The statistical data array.
-        clim_da (xr.DataArray): The climatological baseline data array.
-        prod (str): The product name, used to determine the math method (ratio vs difference).
-
-    Helper Functions:
-        - is_log_anomaly: Determines if the product requires a ratio-based calculation.
-
-    Returns:
-        xr.DataArray: The computed anomaly array.
-    """
-    # Verify the core spatial dimensions match to prevent broadcasting errors
-    if stat_da.sizes.get('lat') != clim_da.sizes.get('lat') or stat_da.sizes.get('lon') != clim_da.sizes.get('lon'):
-        raise ValueError(
-            f"Dimension mismatch! Stat (lat: {stat_da.sizes.get('lat')}, lon: {stat_da.sizes.get('lon')}) "
-            f"does not match Clim (lat: {clim_da.sizes.get('lat')}, lon: {clim_da.sizes.get('lon')})."
-        )
-    
-    if use_ratio:
-        anom_da = stat_da / clim_da
-    else:
-        anom_da = stat_da - clim_da
-        
-    return anom_da
-
-
 def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
     """
     Purpose:
@@ -474,11 +421,16 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
         
         # Open and fully load the climatology file into memory ONCE per group
         ds_clim = xr.open_dataset(clim_file, engine='h5netcdf')
+
+        # Strip the time dimension so xarray doesn't fail coordinate alignment during math
+        if 'time' in ds_clim.coords or 'time' in ds_clim.dims:
+            ds_clim = ds_clim.squeeze('time', drop=True)
+
         with dask.config.set(scheduler='single-threaded'):
             ds_clim = ds_clim.load()
 
         # Determine anomaly method and target statistic
-        use_ratio = is_log_anomaly(prod)
+        use_ratio = is_log_product(prod)
         target_stat = kwargs.get('stat_var')
                 
         if not target_stat:
@@ -516,7 +468,7 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
 
                 # Evaluate and process each base variable independently
                 for base_var in base_vars:
-                    use_ratio = is_log_anomaly(base_var)
+                    use_ratio = is_log_product(base_var)
                     
                     target_stat = kwargs.get('stat_var')
                     if not target_stat:
@@ -531,12 +483,23 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore", category=RuntimeWarning)
                             with dask.config.set(scheduler='single-threaded'):
-                                # Pass the variable-specific math flag directly
-                                anom_da = compute_anomaly(stat_da, clim_da, use_ratio)
-                                anom_da = anom_da.load()
-                        
-                        out_var_name = f"{base_var}_anom"
-                        anom_results[out_var_name] = anom_da
+                                if use_ratio:
+                                    valid_stat = stat_da.where(stat_da > 0)
+                                    valid_clim = clim_da.where(clim_da > 0)
+                                    
+                                    anom_ratio = valid_stat / valid_clim
+                                    anom_ratio = anom_ratio.load()
+                                    out_var_name = f"{base_var}_anom_ratio"
+                                    anom_results[out_var_name] = anom_ratio
+                                    log_dif = np.log10(valid_stat) - np.log10(valid_clim)
+                                    log_dif = log_dif.load()
+                                    out_var_name = f"{base_var}_anom_logdif"
+                                    anom_results[out_var_name] = log_dif
+                                else:
+                                    anom_dif = stat_da - clim_da
+                                    anom_dif = anom_dif.load()
+                                    out_var_name = f"{base_var}_anom_dif"
+                                    anom_results[out_var_name] = anom_dif
                     else:
                         if debug: print(f"      ⚠️ Climatology matching '{target_var}' not found. Skipping.")
 
@@ -560,19 +523,32 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
 
                     anom_ds[out_var] = var_masked
                     
-                    base_var_name = out_var.replace("_anom", "")
+                    # Safely extract the base variable name
+                    units = None
+                    comment = ""
+                    if out_var.endswith("_anom_ratio"):
+                        base_var_name = out_var.replace("_anom_ratio", "")
+                        units = "unitless"
+                        comment = f"Anomaly calculated as a ratio (stat / clim) of the {base_var_name}, resulting in a unitless value."
+                    elif out_var.endswith("_anom_logdif"):
+                        base_var_name = out_var.replace("_anom_logdif", "")
+                        units = "unitless"
+                        comment = f"Anomaly calculated as a log10 difference (log10(stat) - log10(clim)) of the {base_var_name}."
+                    elif out_var.endswith("_anom_dif"):
+                        base_var_name = out_var.replace("_anom_dif", "")
+                        comment = f"Anomaly calculated as a standard difference (stat - clim) of the {base_var_name}."
+                    else:
+                        base_var_name = out_var.replace("_anom", "")
+                    
                     var_attrs = build_stat_attributes(base_var_name, "anomaly", _FillValue=fill_value)
 
                     # Re-evaluate use_ratio for attributes injection
-                    var_use_ratio = is_log_anomaly(base_var_name)
-                    var_target_stat = kwargs.get('stat_var') or ('median' if var_use_ratio else 'mean')
+                    var_target_stat = kwargs.get('stat_var') or ('median' if is_log_product(base_var_name) else 'mean')
                     
                     # Override units and add a comment if using the ratio method
-                    if var_use_ratio:
-                        var_attrs["units"] = "unitless"
-                        var_attrs["comment"] = f"Anomaly calculated as a ratio (stat / clim) of the {var_target_stat}, resulting in a unitless value."
-                    else:
-                        var_attrs["comment"] = f"Anomaly calculated as a standard difference (stat - clim) of the {var_target_stat}."
+                    if units: var_attrs["units"] = units
+                    var_attrs["comment"] = comment
+                    
                     # Remove _FillValue from attrs to prevent xarray conflict with encoding dictionary
                     var_attrs.pop("_FillValue", None)
 
@@ -591,7 +567,7 @@ def process_anomaly_group(clim_file, task_list, prod, per, verbose, **kwargs):
                     attrs["product_name"] = f"{prod} Anomaly"
 
                 # Define the anomaly method used for global attributes
-                anomaly_method = "ratio (stat / clim)" if is_log_anomaly(prod) else "difference (stat - clim)"
+                anomaly_method = "ratio (stat / clim) and log difference (log10 stat - log10 clim)" if is_log_product(prod) else "difference (stat - clim)"
                 attrs['anomaly_method'] = anomaly_method
                 attrs['climatology_baseline'] = clim_range_str
 
