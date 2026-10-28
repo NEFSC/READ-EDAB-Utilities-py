@@ -260,6 +260,7 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
     subareas = kwargs.get('subareas', None)
     subarea_column = kwargs.get('subarea_column', None)
     merge_all = kwargs.get('merge_all', False) 
+    verbose = kwargs.get('verbose',False)
     
     try:
         if debug: print(f"    📖 Extracting from {os.path.basename(file_path)}...")
@@ -383,7 +384,7 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
             
         elif shapefile is not None:
             # Fetch pre-filtered geometries from shapefile_utilities using ds.rio.crs
-            subarea_geoms = get_subarea_geometries(shapefile, subarea_column=subarea_column, subareas=subareas, target_crs=ds.rio.crs, merge_all=merge_all)
+            subarea_geoms = get_subarea_geometries(shapefile, subarea_column=subarea_column, subareas=subareas, target_crs=ds.rio.crs, merge_all=merge_all, verbose=verbose)
             
             # Iterate through the returned dictionary
             for sa_name, geom in subarea_geoms.items():
@@ -540,7 +541,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                     with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
                         future_to_file = {
                             # Pass explicit shapefile and bbox args
-                            executor.submit(process_single_extraction, file_path, target_var, shapefile, bbox,**kwargs): file_path
+                            executor.submit(process_single_extraction, file_path, target_var, shapefile, bbox,**kwargs, verbose=verbose): file_path
                             for file_path in tasks_to_run.keys()
                         }
                         
@@ -574,7 +575,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                 else:
                     for file_path, info in tasks_to_run.items():
                         # Pass explicit shapefile and bbox args
-                        stats, corrupt_files = process_single_extraction(file_path, target_var, shapefile, bbox, **kwargs)
+                        stats, corrupt_files = process_single_extraction(file_path, target_var, shapefile, bbox, verbose=verbose, **kwargs)
                         if corrupt_files: all_corrupt_inputs.update(corrupt_files)
                         
                         if stats:
