@@ -33,6 +33,7 @@ Modification History
     Oct 21, 2026 - KJHW: Added get_default_product_dataset function to quickly get the default dataset for a given product
     Oct 27, 2026 - KJWH: Added get_base_product function to identify the main product family from a subproduct name
                          Updated get_default_product_dataset to route through get_base_product, allowing subproducts to successfully inherit their parent family's default dataset.
+    Oct 28, 2026 - KJWH: Added is_log_product() to indicate which products are log-normally distributed
 
 """
 def product_defaults():
@@ -149,6 +150,30 @@ def get_base_product(subproduct_name):
             
     # Default to returning itself if no logic matches
     return subproduct_name
+
+def is_log_product(prod):
+    """
+    Purpose:
+        Identifies whether a product is log-normally distributed and requires 
+        a ratio-based anomaly calculation instead of a standard difference.
+
+    Input Parameters:
+        prod (str): The logical product name (e.g., 'CHL', 'SST').
+
+    Returns:
+        bool: True if the product requires log-anomaly (ratio) processing, False otherwise.
+    """
+    v_upper = str(prod).upper()
+    
+    # 1. Explicitly exclude fractions (Standard Difference)
+    if 'FMICRO' in v_upper or 'FNANO' in v_upper or 'FPICO' in v_upper:
+        return False
+        
+    # 2. Define known log-normal indicators (Ratio)
+    log_indicators = ['CHL', 'KD490', 'POC', 'PSC_MICRO', 'PSC_NANO', 'PSC_PICO', 'PP_']
+    
+    # Return True if any indicator is found in the variable name
+    return any(ind in v_upper for ind in log_indicators)
 
 def netcdf_product_defaults():
     """
