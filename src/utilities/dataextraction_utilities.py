@@ -23,7 +23,7 @@ from utilities import (
     generate_logfile_path, get_current_utc_timestamp, get_default_metadata,
     get_lut_metadata, get_source_metadata, get_reference_metadata,
     get_shapefile, get_subarea_geometries,
-    get_default_product_dataset
+    get_default_product_dataset, is_log_product
 )
 
 """
@@ -101,7 +101,8 @@ class DualLogger:
     def close(self):
         self.log.close()
 
-def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_type=None, dataset=None, dataset_version=None, 
+
+def build_data_extraction_map(prod, period, shapefile, map_subset=None, data_type="STATS",stat_type=None, dataset=None, dataset_version=None, 
                               output_dir=None, overwrite=False, verbose=False, **kwargs):
     """
     Purpose:
@@ -129,9 +130,9 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_typ
         map_subset = 'NES' if 'PSC' in prod.upper() else 'NWA'
 
     # 1. Find Input Files
-    if verbose: print(f"🔍 Searching for {period} files for {dataset}:{prod} (Grid: {map_subset})")
-    input_files = get_prod_files(prod, dataset=dataset, dataset_version=dataset_version, period=period, map_subset=map_subset, verbose=verbose)
-    
+    if verbose: print(f"🔍 Searching for {period} {data_type} files for {dataset}:{prod} (Grid: {map_subset})")
+    input_files = get_prod_files(prod, dataset=dataset, dataset_version=dataset_version, period=period, map_subset=map_subset, data_type=data_type, verbose=verbose)
+
     if not input_files:
         return {}, None, pd.DataFrame()
 
@@ -140,11 +141,18 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_typ
         first_file_upper = os.path.basename(input_files[0]).upper()
         if "STATS" in first_file_upper:
             stat_type = 'mean'
+        elif "ANOM" in first_file_upper or "ANOMS" in first_file_upper:
+            # Route log-normal products to their specific log anomaly variable
+            if is_log_product(prod):
+                stat_type = 'anom_logdif'
+                if verbose: print(f"  ℹ️ Log-normal product detected. Defaulting to '{stat_type}'.")
+            else:
+                stat_type = 'anom_dif'
         else:
-            stat_type = "" # Leave blank for daily/anomaly grids
-
+            stat_type = "" # Leave blank for raw daily grids
     # Set target variable and filename safely
     target_var = f"{prod}_{stat_type}" if stat_type else prod
+    if verbose: print(f"Using target_var: {target_var}")
 
     # 2. Parse inputs to extract the exact dataset and version from the physical files
     parsed_inputs = file_parser(input_files)
@@ -162,7 +170,8 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_typ
         )
 
     # 4. Define Output File Name
-    out_name = f"{period}-{actual_dataset}-{prod}-{shapefile}-EXTRACT.csv"
+    suffix = f"-{data_type}-EXTRACT" if data_type != "STATS" else "-EXTRACT"
+    out_name = f"{period}-{actual_dataset}-{prod}-{shapefile}{suffix}.csv"
     output_file = os.path.join(output_dir, out_name)
     if verbose: print(f"Creating/updating {output_file}")
 
@@ -229,7 +238,7 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, stat_typ
     needs_update_count = len(input_files) - up_to_date_count
     
     print("-" * 60)
-    print(f"📊 EXTRACTION SUMMARY: {prod} | {period} | {shapefile}")
+    print(f"📊 EXTRACTION SUMMARY: {prod} | {target_var} | {period} | {shapefile}")
     print(f" Output directory: {output_dir}")
     print(f"📄 Target File: {os.path.basename(output_file)}") 
     print(f"✅ Up-to-date:  {up_to_date_count}/{len(input_files)}")
@@ -280,7 +289,7 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
             else:
                 # 2. Identify what statistical suffix was requested (e.g. '_mean')
                 expected_suffix = ""
-                stat_suffixes = ['_mean', '_median', '_max', '_min', '_std', '_sum', '_var', '_count', '_skew', '_kurt', '_anom']
+                stat_suffixes = ['_mean', '_median', '_max', '_min', '_std', '_sum', '_var', '_count', '_skew', '_kurt', '_anom_logdif', '_anom_ratio', '_anom_dif', '_anom']
                 for suff in stat_suffixes:
                     if tv.endswith(suff):
                         expected_suffix = suff
@@ -322,7 +331,7 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
                 
                 # 3. Clean the variable name by removing input stat suffixes for a cleaner CSV header
                 clean_var = str(var_name)
-                stat_suffixes = ['_mean', '_median', '_max', '_min', '_std', '_sum', '_var', '_count', '_skew', '_kurt', '_anom']
+                stat_suffixes = ['_mean', '_median', '_max', '_min', '_std', '_sum', '_var', '_count', '_skew', '_kurt', '_anom_logdif', '_anom_ratio', '_anom_dif', '_anom']
                 for stat_suffix in stat_suffixes:
                     if clean_var.endswith(stat_suffix):
                         clean_var = clean_var.replace(stat_suffix, '')
@@ -335,7 +344,8 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
                         f"{prefix}N": 0, f"{prefix}Percent_Valid": 0.0, f"{prefix}Min": np.nan, 
                         f"{prefix}Max": np.nan, f"{prefix}Mean": np.nan, f"{prefix}Median": np.nan, 
                         f"{prefix}Stdev": np.nan, f"{prefix}CV": np.nan, f"{prefix}Geom_Mean": np.nan, 
-                        f"{prefix}Geom_Stdev": np.nan, f"{prefix}Skewness": np.nan, f"{prefix}Kurtosis": np.nan
+                        f"{prefix}Geom_Stdev": np.nan, f"{prefix}Skewness": np.nan, f"{prefix}Kurtosis": np.nan,
+                        f"{prefix}True_Ratio": np.nan, f"{prefix}Percent_Normal": np.nan
                     })
                 else:
                     mean_val = np.mean(valid_pixels)
@@ -366,6 +376,13 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
                         f"{prefix}Skewness": float(skew(valid_pixels)) if stdev_val > 1e-6 else np.nan,
                         f"{prefix}Kurtosis": float(kurtosis(valid_pixels)) if stdev_val > 1e-6 else np.nan
                     })
+                    # Calculate the physical ratio from the log-difference
+                    if str(var_name).endswith('_anom_logdif'):
+                        true_ratio = 10 ** mean_val
+                        stats.update({
+                            f"{prefix}True_Ratio": true_ratio,
+                            f"{prefix}Percent_Normal": true_ratio * 100
+                        })
                     
             # Append the dictionary after the loop finishes all variables
             records.append(stats)
@@ -434,6 +451,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
     # 1. Extract global dataset early to establish defaults
     dataset = kwargs.pop('dataset', None)
     map_subset = kwargs.pop('map_subset', 'NWA')
+    data_type = kwargs.pop('data_type', 'STATS')
         
     # 2. Fallback logic for products
     if not prods:
@@ -525,7 +543,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                 
                 # Catch target_var and resolved_stat_type from the map builder
                 extraction_map, output_file, existing_df, target_var, resolved_stat_type = build_data_extraction_map(
-                    prod, period, region_name, dataset=current_dataset, map_subset=map_subset, verbose=verbose, stat_type=stat_type, **kwargs
+                    prod, period, region_name, dataset=current_dataset, map_subset=map_subset, verbose=verbose, stat_type=stat_type, data_type=data_type, **kwargs
                 )
                 
                 tasks_to_run = {k: v for k, v in extraction_map.items() if v['needs_processing']}
@@ -673,7 +691,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                             f.write('subarea,*DATA_TYPE*,String\n')
                         
                         # Declare stats variables as floats
-                        for col in ['N', 'Percent_Valid', 'Min', 'Max', 'Mean', 'Median', 'Stdev', 'CV', 'Geom_Mean', 'Geom_Stdev', 'Skewness', 'Kurtosis']:
+                        for col in ['N', 'Percent_Valid', 'Min', 'Max', 'Mean', 'Median', 'Stdev', 'CV', 'Geom_Mean', 'Geom_Stdev', 'Skewness', 'Kurtosis', 'True_Ratio', 'Percent_Normal']:
                             if col in combined_df.columns:
                                 f.write(f'{col},*DATA_TYPE*,Float\n')
                     
