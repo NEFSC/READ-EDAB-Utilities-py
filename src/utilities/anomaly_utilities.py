@@ -73,6 +73,7 @@ Missing Baseline Graceful Fails: Ensured that missing climatology files safely r
                          Removed compute_anomaly() and moved the anomaly calculations into process_anomaly_group()
                          Now also returning the log_difference anomaly for log based products. This will then be used in the dataextraction_utilities
                          Removing the time coordinates from the climatology dataset
+    Oct 29, 2026 - KWJH: Added verify_existing option that if False will skip the steps that open existing output files and speed up the processing
     
 """
 
@@ -185,7 +186,8 @@ def build_anomaly_map(prod, period, output_dir=None,
                       dataset=None, daterange=None, climatology_range=None,
                       dataset_version=None, dataset_map=None,
                       map_subset=None, overwrite=False, 
-                      data_type="ANOM", verbose=False, debug=False, **kwargs):
+                      data_type="ANOM", verbose=False, debug=False,
+                      verify_existing=True, **kwargs):
     """
     Purpose:
         Orchestrates the preparation phase of the anomaly pipeline by resolving output directories,
@@ -206,6 +208,7 @@ def build_anomaly_map(prod, period, output_dir=None,
         data_type (str, optional): The data type suffix appended to the output file names. Default is "ANOM".
         verbose (bool, optional): If True, prints progress updates and routing information.
         debug (bool, optional): If True, prints extensive troubleshooting information.
+        verify_existing(bool, optional): If True, skips the step to verify the input files in existing output files to speed up the processing
 
     Helper Functions:
         - batch_anomaly_match: Pairs stat files with their corresponding climatology files.
@@ -297,55 +300,63 @@ def build_anomaly_map(prod, period, output_dir=None,
 
         is_up_to_date = False
         # Only check for up-to-date status if we actually have a climatology file
+        is_up_to_date = False
+        # Only check for up-to-date status if we actually have a climatology file
         if target_clim_file != "NA":
             all_inputs = stat_input + [target_clim_file]
             if os.path.exists(out_path) and not overwrite:
                 out_mtime = os.path.getmtime(out_path)
                 if all(out_mtime > os.path.getmtime(f) for f in all_inputs):
-                    try:
-                        check_corruption = False # 🎯 Initialize flag
-                        
-                        # Use native h5netcdf to read the input file attributes
-                        with h5netcdf.File(out_path, 'r') as existing_ds:
-                            stored_files_str = existing_ds.attrs.get('source_files', '')
+                    if verify_existing:
+                        try:
+                            check_corruption = False # 🎯 Initialize flag
                             
-                            if isinstance(stored_files_str, bytes):
-                                stored_files_str = stored_files_str.decode('utf-8')
-                            elif isinstance(stored_files_str, np.ndarray):
-                                stored_files_str = str(stored_files_str[0]) if stored_files_str.size > 0 else ""
-                        
-                        # 🎯 The 'with' block is over. existing_ds is safely CLOSED.
+                            # Use native h5netcdf to read the input file attributes
+                            with h5netcdf.File(out_path, 'r') as existing_ds:
+                                stored_files_str = existing_ds.attrs.get('source_files', '')
                                 
-                        if stored_files_str:
-                            stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
-                            current_basenames = set(os.path.basename(f) for f in all_inputs)
-                            
-                            if stored_basenames == current_basenames:
-                                check_corruption = True
+                                if isinstance(stored_files_str, bytes):
+                                    stored_files_str = stored_files_str.decode('utf-8')
+                                elif isinstance(stored_files_str, np.ndarray):
+                                    stored_files_str = str(stored_files_str[0]) if stored_files_str.size > 0 else ""
+                                    
+                            if stored_files_str:
+                                stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
+                                current_basenames = set(os.path.basename(f) for f in all_inputs)
+                                
+                                if stored_basenames == current_basenames:
+                                    check_corruption = True
+                                else:
+                                    is_up_to_date = False
                             else:
                                 is_up_to_date = False
-                        else:
-                            is_up_to_date = False
-                            
-                        # NOW it is safe to deep-scan for HDF corruption!
-                        if check_corruption:
-                            is_corrupt = corrupt_file_detector([out_path])
-                            if is_corrupt:
-                                raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
-                            is_up_to_date = True
-                    except Exception:
-                        if verbose: print(f"  ⚠️ Could not read {out_name}: {e}")
+                                
+                            # Check to see if the existing output file is corrupt
+                            if check_corruption:
+                                is_corrupt = corrupt_file_detector([out_path])
+                                if is_corrupt:
+                                    raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
+                                is_up_to_date = True
                         
-                        #  Attempt to delete the corrupt/locked file
-                        try:
-                            os.remove(out_path)
-                            deleted_corrupt_files.append(out_name) # 🎯 Track successful deletions
-                            if verbose: print(f"  🗑️ Deleted corrupt file: {out_name}. Forcing recreation.")
-                        except Exception as del_e:
-                            manual_delete_files.append(out_name) # 🎯 Track locked files
-                            if verbose: print(f"  🚨 Failed to delete corrupt file {out_name}: {del_e}. Manual removal may be required.")
+                        # Catch the exception variable
+                        except Exception as e:
+                            if verbose: print(f"  ⚠️ Could not read {out_name}: {e}")
+                            
+                            #  Attempt to delete the corrupt/locked file
+                            try:
+                                os.remove(out_path)
+                                deleted_corrupt_files.append(out_name) # 🎯 Track successful deletions
+                                if verbose: print(f"  🗑️ Deleted corrupt file: {out_name}. Forcing recreation.")
+                            except Exception as del_e:
+                                manual_delete_files.append(out_name) # 🎯 Track locked files
+                                if verbose: print(f"  🚨 Failed to delete corrupt file {out_name}: {del_e}. Manual removal may be required.")
 
-                        is_up_to_date = False
+                            is_up_to_date = False
+                    else:
+                        is_up_to_date = True
+
+        if is_up_to_date:
+            up_to_date_count += 1
 
         if is_up_to_date:
             up_to_date_count += 1
@@ -696,6 +707,7 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
         verbose = kwargs.pop('verbose', False)
         debug   = kwargs.get('debug', False)
         parallel_runs = kwargs.pop('parallel_runs', 1) 
+        verify_existing = kwargs.pop('verify_existing', 1) 
 
         if not debug:
             warnings.filterwarnings('ignore', category=RuntimeWarning)
@@ -734,7 +746,7 @@ def run_anomaly_pipeline(prods, periods=None, **kwargs):
                         prefix = f"\n🚀 Starting anomaly pipeline" if attempt == 1 else f"\n🔄 Retry Attempt {attempt}/{max_retries}"
                         print(f"{prefix} for {prod} | Period: {period}")
                 
-                    anomaly_map, deleted_files, manual_delete_files = build_anomaly_map(prod, period, verbose=verbose, **kwargs)
+                    anomaly_map, deleted_files, manual_delete_files = build_anomaly_map(prod, period, verbose=verbose, verify_existing=verify_existing, **kwargs)
                 
                     # Aggregate the corrupt file lists
                     all_deleted_corrupt.extend(deleted_files)
