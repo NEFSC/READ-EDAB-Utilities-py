@@ -80,6 +80,7 @@ Modification History
     Oct 27, 2026 - KJWH: Integrated get_base_product into preprocess_dataset to natively support direct subproduct targeting (e.g., PSC_micro)
                          Updated PSC family logic to preprocess_dataset to automatically rename raw Turner fractions (adding f prefix) and compute absolute concentrations on-the-fly using chlor_a.
                          Implemented a target_subprods filter at the end of preprocess_dataset to aggressively drop unrequested variables from memory before returning the dataset.
+    Oct 29, 2026 - KWJH: Added verify_existing option that if False will skip the steps that open existing output files and speed up the processing
 
 
 
@@ -366,6 +367,8 @@ def build_stats_map(prod, period, output_dir=None,
                             manual_delete_files.append(out_name) # Track locked files
                             if verbose: print(f"  🚨 Failed to delete corrupt file {out_name}: {del_e}. Manual removal may be required.")
                         is_up_to_date = False
+                else:
+                    is_up_to_date = True
 
         if is_up_to_date:
             up_to_date_count += 1
@@ -430,7 +433,7 @@ def preprocess_dataset(ds, prod, ds_name=None, verbose=False, **kwargs):
     # Auto-detect base product
     base_prod = get_base_product(prod)
 
-    # 🎯 2. If a subproduct (like PSC_micro) was passed directly, auto-configure the filter!
+    # If a subproduct (like PSC_micro) was passed directly, auto-configure the filter!
     target_subprods = kwargs.get('target_subprods', [])
     if base_prod != prod and not target_subprods:
         target_subprods = [prod]
@@ -808,7 +811,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                         ds = xr.concat(daily_datasets, dim='time', combine_attrs='override')
                         ds.attrs['pipeline_target_vars'] = target_vars
 
-                    # 🎯 Route 2: High-speed parallel loading for standard products (SST, CHL, PSC, etc.)
+                    # Route 2: High-speed parallel loading for standard products (SST, CHL, PSC, etc.)
                     else:
                         if debug: print(f"      📖 Opening standard dataset via mfdataset (Attempt {attempt+1})...")
                         ds = xr.open_mfdataset(
@@ -1234,7 +1237,7 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
                         print(f"{prefix} for {prod} | Period: {period}")
                                 
                 # Create stats period map
-                    stats_map, deleted_files, manual_delete_files = build_stats_map(prod, period, dataset=dataset, verbose=verbose, allow_nrt=allow_nrt, **kwargs)
+                    stats_map, deleted_files, manual_delete_files = build_stats_map(prod, period, dataset=dataset, verify_existing=verify_existing, verbose=verbose, allow_nrt=allow_nrt, **kwargs)
 
                     # Aggregate the corrupt file lists
                     all_deleted_corrupt.extend(deleted_files)
