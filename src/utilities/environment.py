@@ -76,7 +76,7 @@ def bootstrap_environment(start_path=None, verbose=False):
 
     # --- Resolve required source code subdirectories ---
     python_path = root_path / "python"
-    utilities_path = python_path / "utilities" / "src" / "utilities"
+    utilities_path = python_path / "utilities_py" / "src" / "utilities"
 
     # --- Validate existence of source subdirectories ---
     for p in [python_path, utilities_path]:
@@ -97,10 +97,6 @@ def bootstrap_environment(start_path=None, verbose=False):
             path.mkdir(parents=True, exist_ok=True)
             if verbose:
                 print(f"⚠ Missing operational directory auto-created: {path}")
-
-    # Add python path to sys.path
-    if str(python_path) not in sys.path:
-        sys.path.insert(0, str(python_path))
 
     if verbose:
         print(f"[BOOTSTRAP] Hostname: {hostname}")

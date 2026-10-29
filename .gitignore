@@ -1,7 +1,36 @@
+# Logs and Data
 *.nc
 *.pptx
 .DS*
 .DS_Store
+*.log
+*.shp
+*.shx
+*.dbf
+*.prj
 
 .ipynb_checkpoints/
 __pycache__/
+*.egg-info/
+*.py[cod]
+build/
+dist/
+.eggs/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Testing & Linters
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Secrets
+.env
