@@ -2,7 +2,7 @@ import os
 import xarray as xr
 import pandas as pd
 from date_utilities import get_source_file_dates
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 """

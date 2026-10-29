@@ -14,7 +14,7 @@ import geopandas as gpd
 import rioxarray
 from scipy.stats import skew, kurtosis
 
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 from utilities import (

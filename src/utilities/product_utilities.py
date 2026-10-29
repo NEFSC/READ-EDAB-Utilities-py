@@ -1,6 +1,8 @@
 from importlib.resources import path
-from utilities.bootstrap.environment import bootstrap_environment
+
+from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
+
 from utilities import dataset_defaults, get_dataset_products, parse_dataset_info, resolve_dataset_grid, get_period_info, get_source_file_dates, get_daterange
 
 """

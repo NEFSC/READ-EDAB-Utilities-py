@@ -18,7 +18,7 @@ import gc
 import dask
 
 # Local utilities
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 from utilities import get_period_info, get_period_sets
 from utilities import get_prod_files, get_filepath, get_default_product_dataset, get_default_dataset_product, get_base_product
 from utilities import generate_logfile_path

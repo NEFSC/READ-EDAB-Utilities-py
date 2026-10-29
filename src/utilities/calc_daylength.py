@@ -3,7 +3,7 @@ import xarray as xr
 import os
 from pathlib import Path
 
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 from utilities import parse_dataset_info, load_dataset
 

@@ -43,7 +43,7 @@ def init_notebook_environment(verbose=False):
 
     # 4. Import and run the main bootstrap script
     try:
-        from utilities.bootstrap.environment import bootstrap_environment
+        from utilities import bootstrap_environment
     except ModuleNotFoundError as e:
         raise ImportError(f"[INIT] Failed to import bootstrap_environment: {e}")
 

@@ -1,4 +1,4 @@
-# bootstrap/environment.py
+# src/utilities/environment.py
 import socket
 import sys
 from pathlib import Path
@@ -28,28 +28,25 @@ def derive_dataset_path(resources_path: Path) -> Path:
         raise FileNotFoundError(f"[BOOTSTRAP] Derived DATASETS path does not exist: {dataset_path}")
     return dataset_path
 
-def bootstrap_environment(verbose=False):
+def bootstrap_environment(start_path=None, verbose=False):
     hostname = socket.gethostname()
 
-    # 1. Determine script path
-    # Use __file__ to get the absolute path of the current script.
-    # There is a fallback to cwd() in case this is run in an interactive environment like Jupyter.
-    try:
-        current_file = Path(__file__).resolve()
-    except NameError:
-        current_file = Path.cwd().resolve()
+    # 1. Use the provided path, or default to where the pipeline/project script is being executed
+    if start_path:
+        anchor_path = Path(start_path).resolve()
+    else:
+        anchor_path = Path.cwd().resolve()
 
     # 2. Dynamically resolve RESOURCES root
-    # Search up the path tree for a directory named "Resources" or "EDAB_Resources" (case-insensitive)
     resource_candidates = [
-        p for p in [current_file] + list(current_file.parents)
+        p for p in [anchor_path] + list(anchor_path.parents)
         if p.name.lower() in ["resources", "edab_resources"]
     ]
 
     if not resource_candidates:
-        raise FileNotFoundError(f"[BOOTSTRAP] 'Resources' or 'EDAB_Resources' not found in path: {current_file}")
+        raise FileNotFoundError(f"[BOOTSTRAP] 'Resources' or 'EDAB_Resources' not found in path: {anchor_path}")
     elif len(resource_candidates) > 1:
-        raise ValueError(f"[BOOTSTRAP] Multiple Resources directories found in path, which is ambiguous: {resource_candidates}")
+        raise ValueError(f"[BOOTSTRAP] Multiple Resources directories found in path: {resource_candidates}")
 
     root_path = resource_candidates[0]
 

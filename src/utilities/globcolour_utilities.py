@@ -8,7 +8,7 @@ import sys
 from datetime import datetime
 import concurrent.futures
 
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 from utilities import (
     subset_dataset, 

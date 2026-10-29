@@ -1,5 +1,5 @@
 import os
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 from utilities import get_period_info
 env = bootstrap_environment(verbose=False)
 

@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict
 import re
 
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 """

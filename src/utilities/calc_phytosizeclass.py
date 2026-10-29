@@ -9,7 +9,7 @@ import xarray as xr
 import pandas
 import numpy as np
 
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 
 from utilities import regrid_wrapper, subset_dataset

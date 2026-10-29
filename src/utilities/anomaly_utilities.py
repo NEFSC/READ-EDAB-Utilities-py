@@ -14,7 +14,7 @@ import gc
 import dask
 
 # Local utilities (Adapted from stats_utilities)
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 from utilities import get_default_climatology_range, extract_period_code, get_clim_period 
 from utilities import get_prod_files, get_filepath, file_parser, corrupt_file_detector
 from utilities import get_default_product_dataset, get_default_dataset_product, is_log_product

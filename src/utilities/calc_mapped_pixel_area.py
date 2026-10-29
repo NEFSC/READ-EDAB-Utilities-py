@@ -2,7 +2,8 @@ import numpy as np
 import xarray as xr
 from pyproj import Geod
 from joblib import Parallel, delayed
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
+
 env = bootstrap_environment(verbose=False)
 
 

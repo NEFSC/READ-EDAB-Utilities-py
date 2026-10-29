@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 import numpy as np
 from dateutil.relativedelta import relativedelta
-from utilities.bootstrap.environment import bootstrap_environment
+from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
 from utilities import get_dates, get_source_file_dates
 
