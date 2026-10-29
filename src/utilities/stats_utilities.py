@@ -126,7 +126,7 @@ def build_stats_map(prod, period, output_dir=None,
                     dataset_version=None, dataset_map=None,
                     map_subset=None, is_running=True, overwrite=False, 
                     data_type=None,verbose=False, debug=False,
-                    allow_nrt=False, **kwargs):
+                    allow_nrt=False, verify_existing=True, **kwargs):
     """
     Purpose:
         Unified stats pipeline.
@@ -153,6 +153,8 @@ def build_stats_map(prod, period, output_dir=None,
         data_type (str, optional): The data type (STATS/CLIM) suffix appended to the output file names. Default is None and it is inferred based on the output period.
         verbose (bool, optional): If True, prints progress updates and routing information. Default is False.
         debug (bool, optional): If True, prints extensive troubleshooting and traceback information. Default is False.
+        allow_nrt(bool, optional): If True, allows near-real-time (NRT) files to be included in the climatology
+        verify_existing(bool, optional): If True, skips the step to verify the input files in existing output files to speed up the processing
 
     Returns:
         dict: A dictionary mapping each target output period to its specific processing task definition.
@@ -319,50 +321,51 @@ def build_stats_map(prod, period, output_dir=None,
             # Check 1: Does the output file have a newer mtime than ALL current inputs?
             mtime_ok = all(out_mtime > os.path.getmtime(f) for f in input_files)
             if mtime_ok:
-                # Check 2: Does the internal list of files perfectly match our current list?
-                try:
-                    check_corruption = False # Initialize flag
-
-                    # Use native h5netcdf to read the file attributes
-                    with h5netcdf.File(out_path, 'r') as existing_ds:
-                        stored_files_str = existing_ds.attrs.get('source_files', '')
-                        
-                        # Safely decode if the library returns bytes instead of a string
-                        if isinstance(stored_files_str, bytes):
-                            stored_files_str = stored_files_str.decode('utf-8')
-                        elif isinstance(stored_files_str, np.ndarray): # Handle numpy array strings
-                            stored_files_str = str(stored_files_str[0]) if stored_files_str.size > 0 else ""
+                if verify_existing:
+                    # Check 2: Does the internal list of files perfectly match our current list?
+                    try:
+                        check_corruption = False # Initialize flag
+    
+                        # Use native h5netcdf to read the file attributes
+                        with h5netcdf.File(out_path, 'r') as existing_ds:
+                            stored_files_str = existing_ds.attrs.get('source_files', '')
                             
-                    if stored_files_str:
-                        # Convert both to sets so order doesn't matter
-                        stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
-                        current_basenames = set(os.path.basename(f) for f in input_files)
-                        
-                        if stored_basenames == current_basenames:
-                            check_corruption = True
+                            # Safely decode if the library returns bytes instead of a string
+                            if isinstance(stored_files_str, bytes):
+                                stored_files_str = stored_files_str.decode('utf-8')
+                            elif isinstance(stored_files_str, np.ndarray): # Handle numpy array strings
+                                stored_files_str = str(stored_files_str[0]) if stored_files_str.size > 0 else ""
+                                
+                        if stored_files_str:
+                            # Convert both to sets so order doesn't matter
+                            stored_basenames = set(f.strip() for f in str(stored_files_str).split(','))
+                            current_basenames = set(os.path.basename(f) for f in input_files)
+                            
+                            if stored_basenames == current_basenames:
+                                check_corruption = True
+                            else:
+                                is_up_to_date = False
                         else:
                             is_up_to_date = False
-                    else:
-                        is_up_to_date = False
 
-                    if check_corruption:   
-                        # The file claims to be up-to-date. Deep-scan it for HDF corruption!
-                        is_corrupt = corrupt_file_detector([out_path])
-                        if is_corrupt:
-                            raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
-                        is_up_to_date = True
+                        if check_corruption:   
+                            # The file claims to be up-to-date. Deep-scan it for HDF corruption!
+                            is_corrupt = corrupt_file_detector([out_path])
+                            if is_corrupt:
+                                raise RuntimeError(f"Corrupt data chunk detected: {is_corrupt[0][1]}")
+                            is_up_to_date = True
                         
-                except Exception as e:
-                    if verbose: print(f"  ⚠️ Could not read attributes of {out_name}: {e}. Forcing update.")
-                    # Attempt to delete the corrupt/locked file
-                    try:
-                        os.remove(out_path)
-                        deleted_corrupt_files.append(out_name) # Track successful deletions
-                        if verbose: print(f"  🗑️ Deleted corrupt file: {out_name}. Forcing recreation.")
-                    except Exception as del_e:
-                        manual_delete_files.append(out_name) # Track locked files
-                        if verbose: print(f"  🚨 Failed to delete corrupt file {out_name}: {del_e}. Manual removal may be required.")
-                    is_up_to_date = False
+                    except Exception as e:
+                        if verbose: print(f"  ⚠️ Could not read attributes of {out_name}: {e}. Forcing update.")
+                        # Attempt to delete the corrupt/locked file
+                        try:
+                            os.remove(out_path)
+                            deleted_corrupt_files.append(out_name) # Track successful deletions
+                            if verbose: print(f"  🗑️ Deleted corrupt file: {out_name}. Forcing recreation.")
+                        except Exception as del_e:
+                            manual_delete_files.append(out_name) # Track locked files
+                            if verbose: print(f"  🚨 Failed to delete corrupt file {out_name}: {del_e}. Manual removal may be required.")
+                        is_up_to_date = False
 
         if is_up_to_date:
             up_to_date_count += 1
@@ -1197,6 +1200,7 @@ def run_stats_pipeline(prods=None, periods=None, **kwargs):
         map_subset  = kwargs.get('map_subset')
         parallel_runs = kwargs.pop('parallel_runs', 1) 
         allow_nrt = kwargs.pop('allow_nrt', False)
+        verify_existing = kwargs.pop('verify_existing',False)
         
         # 📋 Initialize an error log for the entire run
         total_input_files = 0
