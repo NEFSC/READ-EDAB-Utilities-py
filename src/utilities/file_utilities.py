@@ -50,6 +50,8 @@ Modification History
     Oct 27, 2026 - KJWH: Added get_base_product() functionality to find the correct path for various "subproducts" (e.g. PSC_micro)
                          Added get_base_product() functionality to get_prod_files so that it just finds the "subproduct" files if available and not duplicate files
                          Overhauled the file globbing loop in get_prod_files to use hierarchical, mutually exclusive fallback logic (exact subproduct match first, falling back to base product if empty) to eliminate duplicate file ingestion.
+    Oct 28, 2026 - KJWH: Added data_type flexibility for get_file_prods and get_filepath (e.g. could input either ANOM or ANOMS)
+                         Added the ability for get_filepath to find a reference_file for EXTRACT data_types if not provided
                          
 
     
@@ -307,7 +309,12 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
     dataset_type = kwargs.get('dataset_type', default_type).upper()
     period = (period or 'D').upper()
     data_type = kwargs.get('data_type')
-    if data_type: data_type = data_type.upper()
+    if data_type: 
+        data_type = data_type.upper()
+        # Smart Sanitization: Standardize common aliases
+        if data_type in ['STAT', 'STATS','STATISTICS']: data_type = 'STATS'
+        elif data_type in ['ANOM', 'ANOMS', 'ANOMALY', 'ANOMALIES']: data_type = 'ANOMS'
+        elif data_type in ['EXTRACT', 'EXTRACTS']: data_type = 'EXTRACT'
 
     # Extract processing_level and default to RAN only for SOURCE datasets
     processing_level = kwargs.get('processing_level')
@@ -333,14 +340,27 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         reference_file = kwargs.get('reference_file')
         region_name = kwargs.get('region_name')
         
-        if reference_file and region_name:
-            version_root = Path(reference_file).parents[3]
-            out_dir = version_root / "EXTRACTED_DATA" / region_name
-            if make_dir:
-                out_dir.mkdir(parents=True, exist_ok=True)
-            return str(out_dir)
-        else:
-            raise ValueError("Both 'reference_file' and 'region_name' must be provided in kwargs for EXTRACT data_type.")
+        if not region_name:
+            raise ValueError("'region_name' must be provided in kwargs for EXTRACT data_type.")
+            
+        # Auto-resolve the reference_file if one was not provided
+        if not reference_file:
+            debug_trace("No reference_file provided for EXTRACT. Attempting to auto-resolve via get_prod_files...")
+            # Search for the base STATS files to use as an anchor
+            found_files = get_prod_files(actual_prod, dataset=dataset, period=period, verbose=verbose, debug=debug)
+            if found_files:
+                reference_file = found_files[0]
+                debug_trace(f"Auto-resolved reference_file: {reference_file}")
+            else:
+                raise ValueError(f"Could not auto-resolve 'reference_file' for EXTRACT because no STATS files were found for {actual_prod}.")
+                
+        # Build the extraction directory path
+        version_root = Path(reference_file).parents[3]
+        out_dir = version_root / "EXTRACTED_DATA" / region_name
+        if make_dir:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        return str(out_dir)
+        
     
     # --- 2. Try to find the product in the dictionary ---
     debug_trace(f"Calling resolve_dataset_grid with actual_prod={actual_prod}, default_grid={dataset_grid or default_grid}, data_type={data_type}")
@@ -502,8 +522,14 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
     # Re-assign back to kwargs in case the rest of the function uses it
     kwargs['map_subset'] = map_subset
     
-    # 1. Infer data_type from the period if not explicitly provided
-    if data_type is None:
+    # 1. Smart Sanitization of explicitly provided data_type
+    if data_type:
+        data_type = data_type.upper()
+        if data_type in ['STAT', 'STATS']: data_type = 'STATS'
+        elif data_type in ['ANOM', 'ANOMS', 'ANOMALY', 'ANOMALIES']: data_type = 'ANOMS' # Standardize to plural for folder routing
+        elif data_type in ['EXTRACT', 'EXTRACTS']: data_type = 'EXTRACT'
+    else: 
+        #  Infer data_type from the period if not explicitly provided
         if period in ['D', 'DD']:
             debug_trace(f"Period is '{period}'. Leaving data_type as None.")
         else:
@@ -584,7 +610,10 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
         else: #  Strict product matching with base product fallback
             
             # Construct the search suffix based on data_type presence
-            type_suffix = f"-{data_type.upper()}" if data_type else ""
+            if data_type == 'ANOMS':
+                type_suffix = "-ANOM"
+            else:
+                type_suffix = f"-{data_type}" if data_type else ""
             
             # Pattern 1: Search specifically for the requested (sub)product
             exact_pattern = f"{period}_*-{prod.upper()}{type_suffix}*.nc"
