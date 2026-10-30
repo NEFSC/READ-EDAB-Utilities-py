@@ -554,7 +554,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                     
                     # Catch target_var and resolved_stat_type from the map builder
                     extraction_map, output_file, existing_df, target_var, resolved_stat_type = build_data_extraction_map(
-                        prod, period, region_name, dataset=current_dataset, map_subset=map_subset, verbose=verbose, stat_type=stat_type, data_type=data_type, **kwargs
+                        prod, period, region_name, dataset=current_dataset, map_subset=map_subset, verbose=verbose, stat_type=stat_type, data_type=search_dt, **kwargs
                     )
                     
                     tasks_to_run = {k: v for k, v in extraction_map.items() if v['needs_processing']}
