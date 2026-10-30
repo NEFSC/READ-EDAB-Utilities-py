@@ -336,15 +336,10 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, verbose=False, hi
     day_length_valid = daylength.where(valid_mask)
 
     # 3️⃣ Calculate PP on non-missing data and create dataset    
-    start_vgpm = time.perf_counter()
     pp_eppley, pp_vgpm, kdpar, chl_euphotic, zeu = vgpm_models(
         chl_valid, sst_valid, par_valid, day_length_valid)
-    elapsed_vgpm = (time.perf_counter() - start_vgpm) / 60
-    if verbose: print(f"    Finished running the VGPM models after {elapsed_vgpm:.2f} minutes.")
-
         
     # 4️⃣ Create output dataset
-    start_meta = time.perf_counter()
     def ensure_shape(var, template):
         if isinstance(var, xr.DataArray):
             var = var.data
@@ -415,20 +410,16 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, verbose=False, hi
     
     # Add metadta to the output dataset
     ds_out.attrs = attrs
-    elapsed_meta = (time.perf_counter() - start_meta) / 60
-    if verbose: print(f"    Finished building the dataset after {elapsed_meta:.2f} minutes.")
 
     # 7️⃣ Save results
-    if verbose: print (f"    Starting to write {output_pp_file}")
-    start_netcdf = time.perf_counter()
+    if verbose: print (f"    Writing {output_pp_file}")
     ds_out.to_netcdf(output_pp_file,encoding=encoding,format='NETCDF4', engine='h5netcdf')
-    elapsed_netcdf = (time.perf_counter() - start_netcdf) / 60
-    if verbose: print(f"    Finished writing {output_pp_file} after {elapsed_netcdf:.2f} minutes.")
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def process_single_day(date, chl_file, sst_file, par_file, output_file, sst_ds, par_ds, chl_nc_var, sst_nc_var, par_nc_var, map_subset, daylength_dir, merged_info, verbose, debug):
     """Standalone helper function to process a single day of PP for parallel execution."""
+    start_time = time.perf_counter()
     try:
         chl_ds = xr.open_dataset(chl_file)
         chl = chl_ds[chl_nc_var]
@@ -480,7 +471,6 @@ def process_single_day(date, chl_file, sst_file, par_file, output_file, sst_ds, 
                 f"Day length was calculated according to Kirk (1994)"
         ])
         
-        start_time = time.perf_counter()
         process_daily_pp(chl, sst, par, daylength_ds, output_file, history=history, verbose=verbose, sourceinfo=merged_info)
         elapsed = (time.perf_counter() - start_time) / 60
         
