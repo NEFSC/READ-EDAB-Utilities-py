@@ -193,8 +193,19 @@ def get_regrid_weights(target_path, source_path,
         except Exception:
             source_label = "CUSTOM_SOURCE"  # <-- Typo here!
     
-    target_ds = load_dataset(target_path)
-    source_ds = load_dataset(source_path)
+    # If a list of multiples of files is passed, just open the first one to extract the grid.
+    if isinstance(target_path, (list, tuple)):
+        target_eval_path = target_path[0]
+    else:
+        target_eval_path = target_path
+        
+    if isinstance(source_path, (list, tuple)):
+        source_eval_path = source_path[0]
+    else:
+        source_eval_path = source_path
+        
+    target_ds = load_dataset(target_eval_path)
+    source_ds = load_dataset(source_eval_path)
 
     if 'latitude' in target_ds.coords: target_ds = target_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
     if 'latitude' in source_ds.coords: source_ds = source_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
@@ -313,8 +324,16 @@ def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None):
     # 1. Get the weights file
     weight_file = get_regrid_weights(target_path, source_path)
 
-    # 2. Open the datasets    
-    target_ds = load_dataset(target_path)
+    # 2. Open the datasets
+    if isinstance(target_path, (list, tuple)):
+        # Only the first target_ds is needed as a grid template. 
+        target_eval_path = target_path[0]
+    else:
+        target_eval_path = target_path
+            
+    target_ds = load_dataset(target_eval_path)
+    
+    # Load the full source path to perform the actual data extraction and regridding
     source_ds = load_dataset(source_path)
 
     if 'latitude' in target_ds.coords: target_ds = target_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
