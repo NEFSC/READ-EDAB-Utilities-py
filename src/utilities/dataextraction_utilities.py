@@ -432,7 +432,7 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
         if ds is not None: ds.close()
         gc.collect()
 
-def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None, stat_type=None, **kwargs):
+def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None, stat_type=None, data_type=None, **kwargs):
     """
     Purpose:
         Main orchestrator for extracting time-series regional statistics from gridded files to CSVs. It supports dynamic defaults, hierarchical file fallbacks, parallel execution, and metadata-rich ERDDAP NCCSV formatting.
@@ -451,9 +451,16 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
     # 1. Extract global dataset early to establish defaults
     dataset = kwargs.pop('dataset', None)
     map_subset = kwargs.pop('map_subset', 'NWA')
-    data_type = kwargs.pop('data_type', 'STATS')
+
+    # Fallback and normalization for data_type
+    if not data_type: 
+        data_type = ['STATS']
+    elif isinstance(data_type, str):
+        data_type = [data_type.upper().strip()]
+    else:
+        data_type = [d.upper().strip() for d in data_type]
         
-    # 2. Fallback logic for products
+    # Fallback logic for products
     if not prods:
         if dataset:
             from dataset_utilities import get_default_dataset_product
@@ -531,175 +538,179 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                     continue
 
             for period in periods:
-                if should_log: print(f"\n🚀 Starting extraction for {prod} (Dataset: {current_dataset}) | Period: {period}")
-
-                try:
-                    p_info = get_period_info(period)
-                    p_code = period
-                    p_desc = p_info.get('description', f"{period} period")
-                except:
-                    p_code = period
-                    p_desc = f"{period} period"
-                
-                # Catch target_var and resolved_stat_type from the map builder
-                extraction_map, output_file, existing_df, target_var, resolved_stat_type = build_data_extraction_map(
-                    prod, period, region_name, dataset=current_dataset, map_subset=map_subset, verbose=verbose, stat_type=stat_type, data_type=data_type, **kwargs
-                )
-                
-                tasks_to_run = {k: v for k, v in extraction_map.items() if v['needs_processing']}
-                if not tasks_to_run:
-                    continue
-
-                new_records = []
-                successful, failed = 0, 0
-                completed_tasks = 0
-
-                # --- 🎯 PARALLEL EXTRACTION ---
-                if parallel_runs > 1:
-                    if should_log: print(f"  ⚡ Launching {len(tasks_to_run)} extractions across {parallel_runs} workers...")
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
-                        future_to_file = {
-                            # Pass explicit shapefile and bbox args
-                            executor.submit(process_single_extraction, file_path, target_var, shapefile, bbox,**kwargs, verbose=verbose): file_path
-                            for file_path in tasks_to_run.keys()
-                        }
-                        
-                        for future in concurrent.futures.as_completed(future_to_file):
-                            file_path = future_to_file[future]
-                            info = tasks_to_run[file_path]
-                            completed_tasks += 1
-                            if should_log: print(f"    [{completed_tasks}/{len(tasks_to_run)}] Finished: {info['source_file']}")
-                            try:
-                                stats, corrupt_files = future.result()
-                                if corrupt_files: all_corrupt_inputs.update(corrupt_files)
-                                
-                                if stats:
-                                    for single_stats in stats:
-                                        record = {
-                                            "Date": info['timestamp'],
-                                            "period_code": p_code,
-                                            "period_descrption": p_desc,
-                                            "source_file": info['source_file'],
-                                            "input_mtime": info['input_mtime'],
-                                            "is_nrt": info['is_nrt'],
-                                            **single_stats
-                                        }
-                                        new_records.append(record)
-                                    successful += 1
-                                else:
-                                    failed += 1
-                            except Exception as e:
-                                failed += 1
-                                if should_log: print(f"❌ [Parallel] Exception on {info['source_file']}: {e}")
-                
-                # --- SEQUENTIAL EXTRACTION ---
-                else:
-                    for file_path, info in tasks_to_run.items():
-                        completed_tasks += 1
-                        if should_log: print(f"    [{completed_tasks}/{len(tasks_to_run)}] Processing: {info['source_file']}")
-                        # Pass explicit shapefile and bbox args
-                        stats, corrupt_files = process_single_extraction(file_path, target_var, shapefile, bbox, verbose=verbose, **kwargs)
-                        if corrupt_files: all_corrupt_inputs.update(corrupt_files)
-                        
-                        if stats:
-                            for single_stats in stats:
-                                record = {
-                                    "Date": info['timestamp'],
-                                    "period_code": p_code,
-                                    "period_descrption": p_desc,
-                                    "source_file": info['source_file'],
-                                    "input_mtime": info['input_mtime'],
-                                    "is_nrt": info['is_nrt'],
-                                    **single_stats
-                                }
-                                new_records.append(record)
-                            successful += 1
-                        else:
-                            failed += 1
-
-                global_successful += successful
-                global_failed += failed
-                
-                # --- SEQUENTIAL WRITE / MERGE ---
-                if new_records:
-                    if should_log: print(f"  💾 Merging {len(new_records)} new records into master dataset...")
-                    new_df = pd.DataFrame(new_records)
+                for dt in data_type:
+                    # Sanitize explicit ANOM request for accurate file discovery
+                    search_dt = "ANOMS" if dt in ["ANOM", "ANOMALY", "ANOMALIES"] else dt
                     
-                    if not existing_df.empty:
-                        # Drop obsolete files (updated RANs replacing NRTs, or replaced source files)
-                        updated_files = set(new_df['source_file'])
-                        updated_timestamps = set(new_df['Date'].dropna())
-
-                        existing_df = existing_df[
-                            ~existing_df['source_file'].isin(updated_files) &
-                            ~((existing_df['is_nrt'] == True) & (existing_df['Date'].isin(updated_timestamps)))
-                        ]
-                        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-                    else:
-                        combined_df = new_df
-
-                    # Sort chronologically (and by subarea if present)
-                    if 'Date' in combined_df.columns:
-                        combined_df['Date'] = pd.to_datetime(combined_df['Date'], errors='coerce')
-                        sort_cols = ['Date', 'subarea'] if 'subarea' in combined_df.columns else ['Date']
-                        combined_df = combined_df.sort_values(by=sort_cols).reset_index(drop=True)
-
-                        # Format Date explicitly for ERDDAP
-                        combined_df['Date'] = combined_df['Date'].dt.strftime('%Y-%m-%d')
-
-                    # Assemble global metadata
-                    attrs = get_default_metadata(sheet="General") | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
-                    stat_label = f" ({resolved_stat_type})" if resolved_stat_type else ""
-                    attrs['title'] = f"Extracted data for {prod} {stat_label} - {region_name}"
-                    attrs['product'] = prod
-                    if resolved_stat_type:attrs['statistic_type'] = resolved_stat_type
-                    attrs['region'] = region_name
-                    attrs['Conventions'] = "COARDS, CF-1.6, ACDD-1.3, NCCSV-1.2"
-                    attrs['history'] = f"{get_current_utc_timestamp()} Extracted regional time-series using {extraction_type}."
-
-                    # Dynamic Temporal Details
-                    if 'Date' in combined_df.columns:
-                        dates = pd.to_datetime(combined_df['Date'])
-                        attrs['time_coverage_start'] = dates.min().strftime('%Y-%m-%dT%H:%M:%SZ')
-                        attrs['time_coverage_end'] = dates.max().strftime('%Y-%m-%dT%H:%M:%SZ')
-                    
-                    # Shapefile and Subarea details
-                    if shapefile:
-                        attrs['shapefile_source'] = str(os.path.basename(shapefile))
-                    if 'subarea' in combined_df.columns:
-                        attrs['subareas_included'] = ", ".join(combined_df['subarea'].dropna().unique().astype(str))
-                    
+                    if should_log: print(f"\n🚀 Starting {search_dt} extraction for {prod} (Dataset: {current_dataset}) | Period: {period}")
+                
                     try:
-                        attrs = attrs | get_source_metadata(current_dataset, source_prefix="source")
-                        attrs['references'] = get_reference_metadata(prod, refs_only=True)
-                    except: pass
+                        p_info = get_period_info(period)
+                        p_code = period
+                        p_desc = p_info.get('description', f"{period} period")
+                    except:
+                        p_code = period
+                        p_desc = f"{period} period"
+                    
+                    # Catch target_var and resolved_stat_type from the map builder
+                    extraction_map, output_file, existing_df, target_var, resolved_stat_type = build_data_extraction_map(
+                        prod, period, region_name, dataset=current_dataset, map_subset=map_subset, verbose=verbose, stat_type=stat_type, data_type=data_type, **kwargs
+                    )
+                    
+                    tasks_to_run = {k: v for k, v in extraction_map.items() if v['needs_processing']}
+                    if not tasks_to_run:
+                        continue
 
-                    # Write ERDDAP NCCSV format
-                    with open(output_file, 'w', encoding='utf-8') as f:
-                        # 1. Write *GLOBAL* attributes
-                        for k, v in attrs.items():
-                            clean_v = str(v).replace('"', '""').replace('\n', ' | ')
-                            f.write(f'*GLOBAL*,{k},"{clean_v}"\n')
+                    new_records = []
+                    successful, failed = 0, 0
+                    completed_tasks = 0
+
+                    # --- 🎯 PARALLEL EXTRACTION ---
+                    if parallel_runs > 1:
+                        if should_log: print(f"  ⚡ Launching {len(tasks_to_run)} extractions across {parallel_runs} workers...")
+                        with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                            future_to_file = {
+                                # Pass explicit shapefile and bbox args
+                                executor.submit(process_single_extraction, file_path, target_var, shapefile, bbox,**kwargs, verbose=verbose): file_path
+                                for file_path in tasks_to_run.keys()
+                            }
+                            
+                            for future in concurrent.futures.as_completed(future_to_file):
+                                file_path = future_to_file[future]
+                                info = tasks_to_run[file_path]
+                                completed_tasks += 1
+                                if should_log: print(f"    [{completed_tasks}/{len(tasks_to_run)}] Finished: {info['source_file']}")
+                                try:
+                                    stats, corrupt_files = future.result()
+                                    if corrupt_files: all_corrupt_inputs.update(corrupt_files)
+                                    
+                                    if stats:
+                                        for single_stats in stats:
+                                            record = {
+                                                "Date": info['timestamp'],
+                                                "period_code": p_code,
+                                                "period_descrption": p_desc,
+                                                "source_file": info['source_file'],
+                                                "input_mtime": info['input_mtime'],
+                                                "is_nrt": info['is_nrt'],
+                                                **single_stats
+                                            }
+                                            new_records.append(record)
+                                        successful += 1
+                                    else:
+                                        failed += 1
+                                except Exception as e:
+                                    failed += 1
+                                    if should_log: print(f"❌ [Parallel] Exception on {info['source_file']}: {e}")
+                    
+                    # --- SEQUENTIAL EXTRACTION ---
+                    else:
+                        for file_path, info in tasks_to_run.items():
+                            completed_tasks += 1
+                            if should_log: print(f"    [{completed_tasks}/{len(tasks_to_run)}] Processing: {info['source_file']}")
+                            # Pass explicit shapefile and bbox args
+                            stats, corrupt_files = process_single_extraction(file_path, target_var, shapefile, bbox, verbose=verbose, **kwargs)
+                            if corrupt_files: all_corrupt_inputs.update(corrupt_files)
+                            
+                            if stats:
+                                for single_stats in stats:
+                                    record = {
+                                        "Date": info['timestamp'],
+                                        "period_code": p_code,
+                                        "period_descrption": p_desc,
+                                        "source_file": info['source_file'],
+                                        "input_mtime": info['input_mtime'],
+                                        "is_nrt": info['is_nrt'],
+                                        **single_stats
+                                    }
+                                    new_records.append(record)
+                                successful += 1
+                            else:
+                                failed += 1
+
+                    global_successful += successful
+                    global_failed += failed
+                    
+                    # --- SEQUENTIAL WRITE / MERGE ---
+                    if new_records:
+                        if should_log: print(f"  💾 Merging {len(new_records)} new records into master dataset...")
+                        new_df = pd.DataFrame(new_records)
                         
-                        # 2. Write Variable attributes
-                        f.write('Date,*DATA_TYPE*,String\n')
-                        f.write('Date,standard_name,time\n')
-                        f.write('period_code,*DATA_TYPE*,String\n')
-                        f.write('period_desc,*DATA_TYPE*,String\n')
+                        if not existing_df.empty:
+                            # Drop obsolete files (updated RANs replacing NRTs, or replaced source files)
+                            updated_files = set(new_df['source_file'])
+                            updated_timestamps = set(new_df['Date'].dropna())
+
+                            existing_df = existing_df[
+                                ~existing_df['source_file'].isin(updated_files) &
+                                ~((existing_df['is_nrt'] == True) & (existing_df['Date'].isin(updated_timestamps)))
+                            ]
+                            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                        else:
+                            combined_df = new_df
+
+                        # Sort chronologically (and by subarea if present)
+                        if 'Date' in combined_df.columns:
+                            combined_df['Date'] = pd.to_datetime(combined_df['Date'], errors='coerce')
+                            sort_cols = ['Date', 'subarea'] if 'subarea' in combined_df.columns else ['Date']
+                            combined_df = combined_df.sort_values(by=sort_cols).reset_index(drop=True)
+
+                            # Format Date explicitly for ERDDAP
+                            combined_df['Date'] = combined_df['Date'].dt.strftime('%Y-%m-%d')
+
+                        # Assemble global metadata
+                        attrs = get_default_metadata(sheet="General") | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
+                        stat_label = f" ({resolved_stat_type})" if resolved_stat_type else ""
+                        attrs['title'] = f"Extracted data for {prod} {stat_label} - {region_name}"
+                        attrs['product'] = prod
+                        if resolved_stat_type:attrs['statistic_type'] = resolved_stat_type
+                        attrs['region'] = region_name
+                        attrs['Conventions'] = "COARDS, CF-1.6, ACDD-1.3, NCCSV-1.2"
+                        attrs['history'] = f"{get_current_utc_timestamp()} Extracted regional time-series using {extraction_type}."
+
+                        # Dynamic Temporal Details
+                        if 'Date' in combined_df.columns:
+                            dates = pd.to_datetime(combined_df['Date'])
+                            attrs['time_coverage_start'] = dates.min().strftime('%Y-%m-%dT%H:%M:%SZ')
+                            attrs['time_coverage_end'] = dates.max().strftime('%Y-%m-%dT%H:%M:%SZ')
                         
+                        # Shapefile and Subarea details
+                        if shapefile:
+                            attrs['shapefile_source'] = str(os.path.basename(shapefile))
                         if 'subarea' in combined_df.columns:
-                            f.write('subarea,*DATA_TYPE*,String\n')
+                            attrs['subareas_included'] = ", ".join(combined_df['subarea'].dropna().unique().astype(str))
                         
-                        # Declare stats variables as floats
-                        for col in ['N', 'Percent_Valid', 'Min', 'Max', 'Mean', 'Median', 'Stdev', 'CV', 'Geom_Mean', 'Geom_Stdev', 'Skewness', 'Kurtosis', 'True_Ratio', 'Percent_Normal']:
-                            if col in combined_df.columns:
-                                f.write(f'{col},*DATA_TYPE*,Float\n')
-                    
-                    # Append the dataframe below the header
-                    combined_df.to_csv(output_file, mode='a', index=False)
-                    
-                    if should_log: print(f"  ✅ Saved/Updated: {os.path.basename(output_file)}")
-                    updated_output_files.add(os.path.basename(output_file)) 
+                        try:
+                            attrs = attrs | get_source_metadata(current_dataset, source_prefix="source")
+                            attrs['references'] = get_reference_metadata(prod, refs_only=True)
+                        except: pass
+
+                        # Write ERDDAP NCCSV format
+                        with open(output_file, 'w', encoding='utf-8') as f:
+                            # 1. Write *GLOBAL* attributes
+                            for k, v in attrs.items():
+                                clean_v = str(v).replace('"', '""').replace('\n', ' | ')
+                                f.write(f'*GLOBAL*,{k},"{clean_v}"\n')
+                            
+                            # 2. Write Variable attributes
+                            f.write('Date,*DATA_TYPE*,String\n')
+                            f.write('Date,standard_name,time\n')
+                            f.write('period_code,*DATA_TYPE*,String\n')
+                            f.write('period_desc,*DATA_TYPE*,String\n')
+                            
+                            if 'subarea' in combined_df.columns:
+                                f.write('subarea,*DATA_TYPE*,String\n')
+                            
+                            # Declare stats variables as floats
+                            for col in ['N', 'Percent_Valid', 'Min', 'Max', 'Mean', 'Median', 'Stdev', 'CV', 'Geom_Mean', 'Geom_Stdev', 'Skewness', 'Kurtosis', 'True_Ratio', 'Percent_Normal']:
+                                if col in combined_df.columns:
+                                    f.write(f'{col},*DATA_TYPE*,Float\n')
+                        
+                        # Append the dataframe below the header
+                        combined_df.to_csv(output_file, mode='a', index=False)
+                        
+                        if should_log: print(f"  ✅ Saved/Updated: {os.path.basename(output_file)}")
+                        updated_output_files.add(os.path.basename(output_file)) 
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
