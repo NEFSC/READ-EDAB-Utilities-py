@@ -28,6 +28,27 @@ def derive_dataset_path(resources_path: Path) -> Path:
         raise FileNotFoundError(f"[BOOTSTRAP] Derived DATASETS path does not exist: {dataset_path}")
     return dataset_path
 
+def find_env_directory(anchor: Path, valid_names: list) -> Path:
+    """Searches upwards and sideways for a directory matching valid_names."""
+    targets = [name.lower() for name in valid_names]
+    
+    # Walk up the tree starting from the anchor
+    for parent in [anchor] + list(anchor.parents):
+        # 1. Is the current parent directory the target?
+        if parent.name.lower() in targets:
+            return parent
+        
+        # 2. Sibling search: Are any children of this parent the target?
+        try:
+            for child in parent.iterdir():
+                if child.is_dir() and child.name.lower() in targets:
+                    return child
+        except PermissionError:
+            # Safely ignore system directories we can't access during the search
+            continue
+            
+    return None
+
 def bootstrap_environment(start_path=None, verbose=False):
     hostname = socket.gethostname()
 
@@ -38,87 +59,51 @@ def bootstrap_environment(start_path=None, verbose=False):
         anchor_path = Path.cwd().resolve()
 
     # 2. Dynamically resolve RESOURCES root
-    resource_candidates = [
-        p for p in [anchor_path] + list(anchor_path.parents)
-        if p.name.lower() in ["resources", "edab_resources"]
-    ]
+    resources_path = find_env_directory(anchor_path, ["resources", "edab_resources"])
+    if not resources_path:
+        raise FileNotFoundError(f"[BOOTSTRAP] Resources directory not found relative to: {anchor_path}")
 
-    if not resource_candidates:
-        raise FileNotFoundError(f"[BOOTSTRAP] 'Resources' or 'EDAB_Resources' not found in path: {anchor_path}")
-    elif len(resource_candidates) > 1:
-        raise ValueError(f"[BOOTSTRAP] Multiple Resources directories found in path: {resource_candidates}")
+    datasets_path = find_env_directory(anchor_path, ["datasets", "edab_dataset", "edab_datasets"])
+    if not datasets_path:
+        datasets_path = resources_path.parent / "DATASETS"
+        datasets_path.mkdir(parents=True, exist_ok=True)
+        if verbose: print(f"⚠ DATASETS auto-created: {datasets_path}")
 
-    root_path = resource_candidates[0]
+    projects_path = find_env_directory(anchor_path, ["projects"])
+    if not projects_path:
+        projects_path = resources_path.parent / "PROJECTS"
+        projects_path.mkdir(parents=True, exist_ok=True)
+        if verbose: print(f"⚠ PROJECTS auto-created: {projects_path}")
 
-    if verbose:
-        print(f"✓ Dynamically resolved RESOURCES directory: {root_path}")
-
-    # 3. Dynamically resolve DATASETS root (and create if missing)
-    # Look in the directory exactly one level above the RESOURCES root
-    base_dir = root_path.parent
-    dataset_candidates = [
-        p for p in base_dir.iterdir()
-        if p.is_dir() and p.name.lower() in ["datasets", "edab_datasets"]
-    ]
-
-    if not dataset_candidates:
-        # If no datasets folder exists, automatically create a standard one
-        dataset_path = base_dir / "DATASETS"
-        dataset_path.mkdir(parents=True, exist_ok=True)
-        print(f"⚠ DATASETS directory not found. Auto-created: {dataset_path}")
-    elif len(dataset_candidates) > 1:
-        raise ValueError(f"[BOOTSTRAP] Multiple DATASETS directories found in {base_dir}, which is ambiguous: {dataset_candidates}")
-    else:
-        dataset_path = dataset_candidates[0]
-        if verbose:
-            print(f"✓ Dynamically resolved DATASETS directory: {dataset_path}")
-
-
-    # --- Resolve required source code subdirectories ---
-    python_path = root_path / "python"
-    utilities_path = python_path / "utilities_py" / "src" / "utilities"
-
-    # --- Validate existence of source subdirectories ---
-    for p in [python_path, utilities_path]:
-        if not p.is_dir():
-            raise FileNotFoundError(f"[BOOTSTRAP] Missing essential source directory (cannot auto-create): {p}")
-
-    # --- Resolve operational subdirectories (to be auto-created if missing) ---
+    # 2. Resolve Operational Subdirectories inside Resources
     operational_dirs = {
-        "workflow_path": root_path / "workflow_resources",
-        "metadata_path": root_path / "workflow_resources" / "metadata",
-        "lookup_path": root_path / "workflow_resources" / "lookuptables",
-        "shapefile_path": root_path / "workflow_resources" / "shapefiles",
-        "satlog_path": root_path / "logs" / "satprocessing"
+        "workflow_path": resources_path / "workflow_resources",
+        "metadata_path": resources_path / "workflow_resources" / "metadata",
+        "lookup_path": resources_path / "workflow_resources" / "lookuptables",
+        "shapefile_path": resources_path / "workflow_resources" / "shapefiles",
+        "satlog_path": resources_path / "logs" / "satprocessing"
     }
 
     for name, path in operational_dirs.items():
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
-            if verbose:
-                print(f"⚠ Missing operational directory auto-created: {path}")
 
     if verbose:
         print(f"[BOOTSTRAP] Hostname: {hostname}")
-        print(f"[BOOTSTRAP] Python path: {python_path}")
-        print(f"[BOOTSTRAP] Utilities path: {utilities_path}")
-        print(f"[BOOTSTRAP] Workflow resources: {operational_dirs['workflow_path']}")
-        print(f"[BOOTSTRAP] Metadata path: {operational_dirs['metadata_path']}")
-        print(f"[BOOTSTRAP] Look-up table path: {operational_dirs['lookup_path']}")
-        print(f"[BOOTSTRAP] Dataset path: {dataset_path}")
-        print(f"[BOOTSTRAP] Satprocessing logs path: {operational_dirs['satlog_path']}")
+        print(f"[BOOTSTRAP] Resources path: {resources_path}")
+        print(f"[BOOTSTRAP] Dataset path: {datasets_path}")
+        print(f"[BOOTSTRAP] Projects path: {projects_path}")
         print(f"[BOOTSTRAP] Timestamp: {datetime.now().isoformat()}")
 
     return {
         "hostname": hostname,
-        "project_root": python_path,
-        "python_path": python_path,
-        "utilities_path": utilities_path,
+        "resources_path": resources_path,
+        "dataset_path": datasets_path,
+        "projects_path": projects_path,
         "workflow_resources": operational_dirs["workflow_path"],
         "metadata_path": operational_dirs["metadata_path"],
         "lookuptable_path": operational_dirs["lookup_path"],
         "shapefile_path": operational_dirs["shapefile_path"],
-        "dataset_path": dataset_path,
         "satlogs_path": operational_dirs["satlog_path"],
         "timestamp": datetime.now()
     }

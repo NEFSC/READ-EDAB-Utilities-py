@@ -15,6 +15,7 @@ from .anomaly_utilities import *
 from .calc_daylength import *
 from .calc_phytosizeclass import *
 from .calc_primprod import *
+from .calc_mapped_pixel_area import *
 from .globcolour_utilities import *
 from .shapefile_utilities import *
 from .dataextraction_utilities import *
