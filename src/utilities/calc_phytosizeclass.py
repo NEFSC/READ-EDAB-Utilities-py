@@ -3,6 +3,7 @@ import xarray as xr
 import os
 import sys
 import time
+import gc
 import numpy as np
 from datetime import datetime
 import xarray as xr
@@ -25,7 +26,7 @@ from utilities import generate_logfile_path
 CALC_PHYTOSIZECLASS create daily phytoplankton size class files from daily satellite chlorophyll (CHL) and sea surface temperature (SST) inputs.
 It uses the Northeast U.S. regionally tuned phytoplankton size class model based on Turner et al. (2021) to compute the micro, nano, and picoplankton fractions of total chlorophyll.
 Main Functions:
-    - run_psc_pipline: Main function to run the full pipeline
+    - run_psc_pipeline: Main function to run the full pipeline
     - build_psc_date_map: Constructs a date → (CHL, SST, PSC) file path mapping and determines which files need to be processed
     - process_daily_psc: Runs the psc_models function using daily CHL and SST inputs, adds metadata, and saves the data as a netcdf file
     - psc_turner: Calculates the micro, nano, and picoplankton fractions of total chlorophyll using the Turner et al. (2021) model
@@ -362,11 +363,67 @@ def process_daily_psc(chl, sst, output_psc_file, history=None, sourceinfo=None):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+def process_single_day(date, chl_file, sst_file, output_file, sst_ds, chl_nc_var, sst_nc_var, map_subset, merged_info, verbose, debug):
+    """Standalone helper function to process a single day of PSC for parallel execution."""
+    try:
+        chl_ds = xr.open_dataset(chl_file)
+        chl = chl_ds[chl_nc_var]
+        
+        target_time = pd.to_datetime(date)
+        
+        # Force the slice into memory immediately to detach from massive array
+        sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var].load()         
+              
+        chl_date = pd.to_datetime(chl["time"].values[0]).date()
+        sst_date = pd.to_datetime(sst["time"].values).date()
+
+        if chl_date == sst_date:
+            sst = sst.expand_dims(time=chl["time"])
+            sst["time"] = chl["time"]
+        else:
+            raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+
+        # Subset CHL and SST if requested
+        if map_subset:
+            chl = subset_dataset(chl, map_subset)
+            sst = subset_dataset(sst, map_subset)
+        
+        chl, sst = xr.align(chl, sst, join="exact")
+
+        chl_source = get_source_metadata(merged_info["CHL"]["dataset"],dataset_version=merged_info["CHL"]["version"],source_prefix="source_chl")
+        sst_source = get_source_metadata(merged_info["SST"]["dataset"],dataset_version=merged_info["SST"]["version"],source_prefix="source_sst")
+
+        history = " ".join([f"{build_product_attributes('PSC')['long_name']} is calculated using the Northeast U.S. regionally tuned phytoplankton size class model based on Turner et al. {get_reference_metadata('PSC_TURNER')[0]['year']}. ",
+                f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
+                f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
+                f"The SST data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}."
+        ])
+        
+        start_time = time.perf_counter()
+        process_daily_psc(chl, sst, output_file, history=history, sourceinfo=merged_info)
+        elapsed = (time.perf_counter() - start_time) / 60
+        
+        return date, True, elapsed, None
+        
+    except Exception as e:
+        if debug:
+            import traceback
+            traceback.print_exc()
+        return date, False, 0, str(e)
+        
+    finally:
+        # Force RAM garbage collection
+        try:
+            chl_ds.close()
+        except: pass
+        gc.collect()
+
 
 def run_psc_pipeline(chl_dataset=None,
                     sst_dataset=None,
                     daterange=None,
                     map_subset='NES',
+                    parallel_runs=1,
                     overwrite=False,
                     verbose=False,
                     debug=False,
@@ -477,57 +534,40 @@ def run_psc_pipeline(chl_dataset=None,
         if should_log: print(f"Regridding SST files to CHL grid...")
         sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
         
-        # 6️⃣ Daily loop
+        # 6️⃣ Execute Daily Loop (Sequential or Parallel)
+        import concurrent.futures
         if should_log: print(f"Writing PSC files to {os.path.dirname(output_files[0])}")
-        
-        for i, (date, chl_file, sst_file, output_file) in enumerate(
-            zip(dates_to_run, chl_files, sst_files, output_files), start=1):
-            
-            try:
-                chl_ds = xr.open_dataset(chl_file)
-                chl = chl_ds[chl_nc_var]
-                
-                target_time = pd.to_datetime(date)
-                sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var]         
-                      
-                chl_date = pd.to_datetime(chl["time"].values[0]).date()
-                sst_date = pd.to_datetime(sst["time"].values).date()
 
-                if chl_date == sst_date:
-                    sst = sst.expand_dims(time=chl["time"])
-                    sst["time"] = chl["time"]
+        if parallel_runs == 1:
+            for i, (date, chl_file, sst_file, output_file) in enumerate(zip(dates_to_run, chl_files, sst_files, output_files), start=1):
+                date, success, elapsed, error = process_single_day(date, chl_file, sst_file, output_file, sst_ds, chl_nc_var, sst_nc_var, map_subset, merged_info, verbose, debug)
+                
+                if success:
+                    created_tasks.append(date)
+                    if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
                 else:
-                    raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
-
-                # Subset CHL and SST if requested
-                if map_subset:
-                    if verbose: print(f"Subsetting to region: {map_subset}")
-                    chl = subset_dataset(chl, map_subset)
-                    sst = subset_dataset(sst, map_subset)
+                    failed_tasks.append(f"{date}: {error}")
+                    if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {error}")
+        else:
+            if should_log: print(f"\n  ⚡ Launching {total_dates} daily tasks across {parallel_runs} parallel workers...")
+            with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                future_to_date = {
+                    executor.submit(process_single_day, date, chl_file, sst_file, output_file, sst_ds, chl_nc_var, sst_nc_var, map_subset, merged_info, verbose, debug): date
+                    for date, chl_file, sst_file, output_file in zip(dates_to_run, chl_files, sst_files, output_files)
+                }
                 
-                chl, sst = xr.align(chl, sst, join="exact")
-
-                history = " ".join([f"{build_product_attributes('PSC')['long_name']} is calculated using the Northeast U.S. regionally tuned phytoplankton size class model based on Turner et al. {get_reference_metadata('PSC_TURNER')[0]['year']}. ",
-                        f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
-                        f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
-                        f"The SST data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}."
-                ])
-                
-                # 7️⃣ Process daily PSC
-                start_time = time.perf_counter()
-                process_daily_psc(chl, sst, output_file, history=history, sourceinfo=merged_info)
-                elapsed = (time.perf_counter() - start_time) / 60
-                
-                created_tasks.append(date)
-                if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
-
-                pass
-            except Exception as e:
-                failed_tasks.append(f"{date}: {str(e)}")
-                if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {e}")
-                if debug:
-                    import traceback
-                    traceback.print_exc()
+                completed_count = 0
+                for future in concurrent.futures.as_completed(future_to_date):
+                    completed_count += 1
+                    date, success, elapsed, error = future.result()
+                    out_filename = os.path.basename(psc_data_map[date][2])
+                    
+                    if success:
+                        created_tasks.append(date)
+                        if should_log: print(f"  ✅ [Parallel] Created: {out_filename}, file {completed_count} of {total_dates} ({round((completed_count / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
+                    else:
+                        failed_tasks.append(f"{date}: {error}")
+                        if should_log: print(f"  ❌ [Parallel] Error creating {out_filename}: {error}")
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)

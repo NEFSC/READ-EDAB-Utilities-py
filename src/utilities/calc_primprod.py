@@ -4,7 +4,9 @@ import os
 import sys
 import time
 import numpy as np
+import gc
 from datetime import datetime
+import concurrent.futures
 
 from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
@@ -425,6 +427,78 @@ def process_daily_pp(chl, sst, par, daylength, output_pp_file, verbose=False, hi
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+def process_single_day(date, chl_file, sst_file, par_file, output_file, sst_ds, par_ds, chl_nc_var, sst_nc_var, par_nc_var, map_subset, daylength_dir, merged_info, verbose, debug):
+    """Standalone helper function to process a single day of PP for parallel execution."""
+    try:
+        chl_ds = xr.open_dataset(chl_file)
+        chl = chl_ds[chl_nc_var]
+        
+        target_time = pd.to_datetime(date)
+
+        # Force the slice into memory immediately
+        sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var].load()        
+        par = par_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[par_nc_var].load()        
+        
+        chl_date = pd.to_datetime(chl["time"].values[0]).date()
+        sst_date = pd.to_datetime(sst["time"].values).date()
+        par_date = pd.to_datetime(par["time"].values).date()
+
+        if chl_date == sst_date:
+            sst = sst.expand_dims(time=chl["time"])
+            sst["time"] = chl["time"]
+        else:
+            raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
+
+        if chl_date == par_date:
+            par = par.expand_dims(time=chl["time"])
+            par["time"] = chl["time"]
+        else:
+            raise ValueError(f"Date mismatch: chl={chl_date}, par={par_date}")
+
+        # Subset CHL and SST if requested
+        if map_subset:
+            chl = subset_dataset(chl, map_subset)
+            sst = subset_dataset(sst, map_subset)
+            par = subset_dataset(par, map_subset)
+        
+        chl, sst, par = xr.align(chl, sst, par, join="exact")
+
+        # Compute or load daylength
+        doy = pd.Timestamp(date).dayofyear
+        daylength_ds = get_daylength(chl_file, daylength_dir=daylength_dir, dayofyear=doy)
+        daylength_ds = subset_dataset(daylength_ds, map_subset)
+
+        chl_source = get_source_metadata(merged_info["CHL"]["dataset"], dataset_version=merged_info["CHL"]["version"], source_prefix="source_chl")
+        sst_source = get_source_metadata(merged_info["SST"]["dataset"], dataset_version=merged_info["SST"]["version"], source_prefix="source_sst")
+        par_source = get_source_metadata(merged_info["PAR"]["dataset"], dataset_version=merged_info["PAR"]["version"], source_prefix="source_par")
+
+        history = " ".join([f"{build_product_attributes('PPD')['long_name']} is calculated using the VGPM {get_reference_metadata('VGPM')[0]['citation']} and VGPM-EPPLEY {get_reference_metadata('VGPM_EPPLEY')[0]['citation']} models. ",
+                f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
+                f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
+                f"The input photosynthetic active radiation file ({os.path.basename(par_file)}) is from the {par_source['source_par_title']}. ",
+                f"The SST and PAR data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}.",
+                f"Day length was calculated according to Kirk (1994)"
+        ])
+        
+        start_time = time.perf_counter()
+        process_daily_pp(chl, sst, par, daylength_ds, output_file, history=history, verbose=verbose, sourceinfo=merged_info)
+        elapsed = (time.perf_counter() - start_time) / 60
+        
+        return date, True, elapsed, None
+        
+    except Exception as e:
+        if debug:
+            import traceback
+            traceback.print_exc()
+        return date, False, 0, str(e)
+        
+    finally:
+        try:
+            chl_ds.close()
+        except: pass
+        import gc
+        gc.collect()
+
 
 def run_pp_pipeline(chl_dataset=None,
                     sst_dataset=None,
@@ -433,6 +507,7 @@ def run_pp_pipeline(chl_dataset=None,
                     map_subset=None,
                     daylength_dir=None,
                     overwrite=False,
+                    parallel_runs=1,
                     verbose=False,
                     debug=False,
                     logfile=None
@@ -544,72 +619,38 @@ def run_pp_pipeline(chl_dataset=None,
         par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run)
         if should_log: print(f"...Finished regridding SST and PAR files to CHL grid.")
 
-        # 6️⃣ Daily loop        
-        for i, (date, chl_file, sst_file, par_file, output_file) in enumerate(
-            zip(dates_to_run, chl_files, sst_files, par_files, output_files), start=1):
-            
-            try:
-                chl_ds = xr.open_dataset(chl_file)
-                chl = chl_ds[chl_nc_var]
-                
-                target_time = pd.to_datetime(date)
-
-                sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var]        
-                par = par_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[par_nc_var]        
-                
-                chl_date = pd.to_datetime(chl["time"].values[0]).date()
-                sst_date = pd.to_datetime(sst["time"].values).date()
-                par_date = pd.to_datetime(par["time"].values).date()
-
-                if chl_date == sst_date:
-                    sst = sst.expand_dims(time=chl["time"])
-                    sst["time"] = chl["time"]
+        # 6️⃣ Daily loop (Sequential or Parallel)
+        if parallel_runs == 1:
+            # Sequential execution
+            for i, (date, chl_file, sst_file, par_file, output_file) in enumerate(zip(dates_to_run, chl_files, sst_files, par_files, output_files), start=1):
+                date, success, elapsed, error = process_single_day(date, chl_file, sst_file, par_file, output_file, sst_ds, par_ds, chl_nc_var, sst_nc_var, par_nc_var, map_subset, daylength_dir, merged_info, verbose, debug)
+                if success:
+                    created_tasks.append(date)
+                    if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
                 else:
-                    raise ValueError(f"Date mismatch: chl={chl_date}, sst={sst_date}")
-
-                if chl_date == par_date:
-                    par = par.expand_dims(time=chl["time"])
-                    par["time"] = chl["time"]
-                else:
-                    raise ValueError(f"Date mismatch: chl={chl_date}, par={par_date}")
-
-                # Subset CHL and SST if requested
-                if map_subset:
-                    if verbose: print(f"Subsetting to region: {map_subset}")
-                    chl = subset_dataset(chl, map_subset)
-                    sst = subset_dataset(sst, map_subset)
-                    par = subset_dataset(par, map_subset)
+                    failed_tasks.append(f"{date}: {error}")
+                    if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {error}")
+        else:
+            # Parallel execution
+            if should_log: print(f"\n  ⚡ Launching {total_dates} daily tasks across {parallel_runs} parallel workers...")
+            with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                future_to_date = {
+                    executor.submit(process_single_day, date, chl_file, sst_file, par_file, output_file, sst_ds, par_ds, chl_nc_var, sst_nc_var, par_nc_var, map_subset, daylength_dir, merged_info, verbose, debug): date
+                    for date, chl_file, sst_file, par_file, output_file in zip(dates_to_run, chl_files, sst_files, par_files, output_files)
+                }
                 
-                chl, sst, par = xr.align(chl, sst, par, join="exact")
-
-                # Compute or load daylength
-                doy = pd.Timestamp(date).dayofyear
-                daylength_ds = get_daylength(chl_file, daylength_dir=daylength_dir, dayofyear=doy)
-                daylength_ds = subset_dataset(daylength_ds, map_subset)
-
-                history = " ".join([f"{build_product_attributes('PPD')['long_name']} is calculated using the VGPM {get_reference_metadata('VGPM')[0]['citation']} and VGPM-EPPLEY {get_reference_metadata('VGPM_EPPLEY')[0]['citation']} models. ",
-                        f"The input chlorophyll file ({os.path.basename(chl_file)}) is from the {chl_source['source_chl_title']}. ",
-                        f"The input sea surface temperature file ({os.path.basename(sst_file)}) is from the {sst_source['source_sst_title']}. ",
-                        f"The input photosynthetic active radiation file ({os.path.basename(par_file)}) is from the {par_source['source_par_title']}. ",
-                        f"The SST and PAR data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}.",
-                        f"Day length was calculated according to Kirk (1994)"
-                ])
-                
-                # 7️⃣ Process daily PP
-                start_time = time.perf_counter()
-                process_daily_pp(chl, sst, par, daylength_ds, output_file, history=history, verbose=verbose, sourceinfo=merged_info)
-                elapsed = (time.perf_counter() - start_time) / 60
-                
-                created_tasks.append(date)
-                if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
-                
-                pass
-            except Exception as e:
-                failed_tasks.append(f"{date}: {str(e)}")
-                if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {e}")
-                if debug:
-                    import traceback
-                    traceback.print_exc()
+                completed_count = 0
+                for future in concurrent.futures.as_completed(future_to_date):
+                    completed_count += 1
+                    date, success, elapsed, error = future.result()
+                    out_filename = os.path.basename(pp_data_map[date][3])
+                    
+                    if success:
+                        created_tasks.append(date)
+                        if should_log: print(f"  ✅ [Parallel] Created: {out_filename}, file {completed_count} of {total_dates} ({round((completed_count / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
+                    else:
+                        failed_tasks.append(f"{date}: {error}")
+                        if should_log: print(f"  ❌ [Parallel] Error creating {out_filename}: {error}")
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
