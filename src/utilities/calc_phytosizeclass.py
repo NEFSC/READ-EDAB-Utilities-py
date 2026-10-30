@@ -365,6 +365,7 @@ def process_daily_psc(chl, sst, output_psc_file, history=None, sourceinfo=None):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def process_single_day(date, chl_file, sst_file, output_file, sst_ds, chl_nc_var, sst_nc_var, map_subset, merged_info, verbose, debug):
     """Standalone helper function to process a single day of PSC for parallel execution."""
+    start_time = time.perf_counter()
     try:
         chl_ds = xr.open_dataset(chl_file)
         chl = chl_ds[chl_nc_var]
@@ -399,7 +400,6 @@ def process_single_day(date, chl_file, sst_file, output_file, sst_ds, chl_nc_var
                 f"The SST data were regridded to the CHL grid using xESMF bilinear regridding {get_reference_metadata('xesmf')[0]['citation']}."
         ])
         
-        start_time = time.perf_counter()
         process_daily_psc(chl, sst, output_file, history=history, sourceinfo=merged_info)
         elapsed = (time.perf_counter() - start_time) / 60
         
