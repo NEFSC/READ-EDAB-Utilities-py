@@ -70,10 +70,24 @@ def bootstrap_environment(start_path=None, verbose=False):
         if verbose: print(f"⚠ DATASETS auto-created: {datasets_path}")
 
     projects_path = find_env_directory(anchor_path, ["projects"])
+    server_projects = Path("/mnt/EDAB_Indicators/khyde/Projects")
+
+    # If dynamic search fails, check the hardcoded server path
+    if not projects_path and server_projects.exists():
+        projects_path = server_projects
+
+    # If it still isn't found, attempt auto-creation or set to None
     if not projects_path:
-        projects_path = resources_path.parent / "PROJECTS"
-        projects_path.mkdir(parents=True, exist_ok=True)
-        if verbose: print(f"⚠ PROJECTS auto-created: {projects_path}")
+        fallback_path = resources_path.parent / "PROJECTS"
+        try:
+            fallback_path.mkdir(parents=True, exist_ok=True)
+            projects_path = fallback_path
+            if verbose: 
+                print(f"⚠ PROJECTS auto-created: {projects_path}")
+        except PermissionError:
+            projects_path = None
+            if verbose: 
+                print("⚠ PROJECTS path not found and cannot be created (Permission Denied). Proceeding without it.")
 
     # 2. Resolve Operational Subdirectories inside Resources
     operational_dirs = {
