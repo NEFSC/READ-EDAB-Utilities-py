@@ -58,6 +58,8 @@ Modification History
                          Added validate_inputs function to check input data types and shapes
     Oct 15, 2026 - KJWH: Added DualLogger and updated logfile output
     Oct 21, 2026 - KJWH: Forced h5netcdf engine in all .to_netcdf() calls
+    Oct 30, 2026 - KJWH: Added steps to prevent memory leaks and speed up processing. 
+                         Now closing open files and pre-loading slices of data into memory
 """
 
 class DualLogger:
@@ -554,8 +556,9 @@ def run_pp_pipeline(chl_dataset=None,
                 
                 target_time = pd.to_datetime(date)
 
-                sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var]        
-                par = par_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[par_nc_var]        
+                # Force the slice into memory using .load() to detach it from the massive multi-year chunk
+                sst = sst_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[sst_nc_var].load()        
+                par = par_ds.sel(time=target_time, method='nearest', tolerance=pd.Timedelta('1D'), drop=False)[par_nc_var].load()       
                 
                 chl_date = pd.to_datetime(chl["time"].values[0]).date()
                 sst_date = pd.to_datetime(sst["time"].values).date()
@@ -610,6 +613,19 @@ def run_pp_pipeline(chl_dataset=None,
                 if debug:
                     import traceback
                     traceback.print_exc()
+            finally:
+                # Force xarray to release file locks and RAM
+                try:
+                    chl_ds.close()
+                except Exception:
+                    pass
+                
+                # Delete the large arrays explicitly
+                del chl, sst, par, daylength_ds
+                
+                # Force Python's Garbage Collector to run
+                import gc
+                gc.collect()
 
         # --- FINAL SUMMARY REPORT ---
         print("\n" + "="*60)
