@@ -153,7 +153,8 @@ def get_regrid_weights(target_path, source_path,
                        method='bilinear',
                        overwrite=False, 
                        target_label=None,
-                       source_label=None
+                       source_label=None,
+                       map_subset=None
 ):
     """
         Use Xesmf to create the regridding weights file based on the input datasets and return the full path of the weigths file.
@@ -209,6 +210,11 @@ def get_regrid_weights(target_path, source_path,
 
     if 'latitude' in target_ds.coords: target_ds = target_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
     if 'latitude' in source_ds.coords: source_ds = source_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
+
+    # Spatially subset BEFORE creating the weights matrix!
+    if map_subset:
+        target_ds = subset_dataset(target_ds, map_subset)
+        source_ds = subset_dataset(source_ds, map_subset)
   
     if "lat" not in target_ds or "lon" not in target_ds:
         raise ValueError("Target dataset must include 'lat' and 'lon' coordinates.")
@@ -309,7 +315,7 @@ def regrid_dataset(
     regridded.attrs.update(target_ds.attrs)
     return regridded
 
-def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None):
+def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None, map_subset=None):
     """
     Wrapper function to regrid source dataset to target dataset grid.
     Parameters:
@@ -339,6 +345,11 @@ def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None):
     if 'latitude' in target_ds.coords: target_ds = target_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
     if 'latitude' in source_ds.coords: source_ds = source_ds.rename({'latitude': 'lat', 'longitude': 'lon'})
 
+    # Spatially subset the actual arrays BEFORE they are regridded
+    if map_subset:
+        target_ds = subset_dataset(target_ds, map_subset)
+        source_ds = subset_dataset(source_ds, map_subset)
+    
     # 3 Subset dataset by time (daterange) and products if needed    
     if daterange:
         dates = get_dates(daterange,day_format='datetime')

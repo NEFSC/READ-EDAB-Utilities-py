@@ -532,7 +532,7 @@ def run_psc_pipeline(chl_dataset=None,
 
         # 5️⃣ Batch regrid SST
         if should_log: print(f"Regridding SST files to CHL grid...")
-        sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
+        sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run, map_subset=map_subset)
         
         # 6️⃣ Execute Daily Loop (Sequential or Parallel)
         import concurrent.futures
