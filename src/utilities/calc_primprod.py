@@ -517,6 +517,8 @@ def run_pp_pipeline(chl_dataset=None,
         logfile (str): Optional file to log the progress
     """
 
+    map_subset = map_subset or "NWA" 
+    
     original_stdout = sys.stdout 
 
     if logfile in ["auto", True]:
@@ -605,8 +607,8 @@ def run_pp_pipeline(chl_dataset=None,
 
         # 5️⃣ Batch regrid SST and PAR
         if should_log: print(f"Regridding SST and PAR files to CHL grid...")
-        sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run)
-        par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run)
+        sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run, map_subset=map_subset)
+        par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run, map_subset=map_subset)
         if should_log: print(f"...Finished regridding SST and PAR files to CHL grid.")
 
         # 6️⃣ Daily loop (Sequential or Parallel)
