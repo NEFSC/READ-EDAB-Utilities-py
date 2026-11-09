@@ -124,7 +124,9 @@ def load_dataset(path_or_paths):
     """
     mf_kwargs = {
         'combine': 'nested',
-        'concat_dim': 'time'
+        'concat_dim': 'time',
+        'join': 'override',    # Force xarray to trust the first file's grid
+        'compat': 'override'   # Ignore microscopic metadata jitter across years
     }
 
     if isinstance(path_or_paths, (list, tuple)):
@@ -133,7 +135,7 @@ def load_dataset(path_or_paths):
             return xr.open_mfdataset(path_or_paths, **mf_kwargs)
         except ValueError:
             # Fallback just in case the files are structured completely differently
-            return xr.open_mfdataset(path_or_paths, combine='by_coords')
+            return xr.open_mfdataset(path_or_paths, combine='by_coords', join='override', compat='override')
 
     if os.path.isfile(path_or_paths) and path_or_paths.endswith(".nc"):
         # Single file
@@ -287,6 +289,12 @@ def regrid_dataset(
     else:
         target_chunks = compute_dynamic_chunks(target_ds)
 
+    # Force coordinates into memory. xESMF crashes if lat/lon are lazy Dask arrays!
+    source_ds['lat'] = source_ds['lat'].compute()
+    source_ds['lon'] = source_ds['lon'].compute()
+    target_grid['lat'] = target_grid['lat'].compute()
+    target_grid['lon'] = target_grid['lon'].compute()
+
     regridder = xe.Regridder(source_ds, target_grid, method, filename=weights_file, reuse_weights=True)
 
     # 2. Regrid variables
@@ -360,5 +368,10 @@ def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None, m
 
     # 4. Regrid datasets
     regridded_ds = regrid_dataset(weights_file=weight_file,target_ds=target_ds,source_ds=source_ds,variables=source_vars)
+    # Safely close the target dataset as it was only needed for the grid template
+    try:
+        target_ds.close()
+    except:
+        pass
 
     return regridded_ds

@@ -606,10 +606,12 @@ def run_pp_pipeline(chl_dataset=None,
         par_nc_var = get_nc_prod(par_info['dataset'],'PAR')
 
         # 5️⃣ Batch regrid SST and PAR
-        if should_log: print(f"Regridding SST and PAR files to CHL grid...")
+        if should_log: print(f"Regridding SST files to {map_subset} CHL grid...")
         sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run, map_subset=map_subset)
+        if should_log: print(f"...Finished regridding SST files to CHL grid.")
+        if should_log: print(f"Regridding PAR files to {map_subset} CHL grid...")
         par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run, map_subset=map_subset)
-        if should_log: print(f"...Finished regridding SST and PAR files to CHL grid.")
+        if should_log: print(f"...Finished regridding PAR files to CHL grid.")
 
         # 6️⃣ Daily loop (Sequential or Parallel)
         if parallel_runs == 1:
