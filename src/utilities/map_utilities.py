@@ -226,8 +226,9 @@ def get_regrid_weights(target_path, source_path,
 
     source_hash = hash_grid(source_ds)
     target_hash = hash_grid(target_ds)
-    weights_file = os.path.join(weights_dir, f"regrid_weights_for_{source_label}_{source_hash}_to_{target_label}_{target_hash}.nc")
-
+    region_label = map_subset if map_subset else "GLOBAL"
+    weights_file = os.path.join(weights_dir, f"regrid_weights_{region_label}_for_{source_label}_{source_hash}_to_{target_label}_{target_hash}.nc")
+    
     if overwrite or not os.path.exists(weights_file):
         target_grid = target_ds[["lat", "lon"]]
         
