@@ -336,7 +336,7 @@ def regrid_wrapper(target_path, source_path, source_vars=None, daterange=None, m
     """
 
     # 1. Get the weights file
-    weight_file = get_regrid_weights(target_path, source_path)
+    weight_file = get_regrid_weights(target_path, source_path, map_subset=map_subset)
 
     # 2. Open the datasets
     if isinstance(target_path, (list, tuple)):
