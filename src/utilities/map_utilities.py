@@ -215,6 +215,7 @@ def get_regrid_weights(target_path, source_path,
 
     # Spatially subset BEFORE creating the weights matrix!
     if map_subset:
+        print(f"🛠️ Subsetting the datasets to the {map_subset} map")
         target_ds = subset_dataset(target_ds, map_subset)
         source_ds = subset_dataset(source_ds, map_subset)
   
