@@ -88,6 +88,9 @@ def _get_os_default_projects():
 def bootstrap_environment(start_path=None, verbose=False):
     hostname = socket.gethostname()
 
+    print(f"[BOOTSTRAP] Hostname: {hostname}")
+  
+    print(f" establishing environment paths...")
     # 1. Determine anchor path
     if start_path:
         anchor_path = Path(start_path).resolve()
