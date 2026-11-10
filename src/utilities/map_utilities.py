@@ -125,8 +125,6 @@ def load_dataset(path_or_paths):
     mf_kwargs = {
         'combine': 'nested',
         'concat_dim': 'time',
-        #'join': 'override',    # Force xarray to trust the first file's grid
-        #'compat': 'override'   # Ignore microscopic metadata jitter across years
     }
 
     if isinstance(path_or_paths, (list, tuple)):
@@ -135,7 +133,7 @@ def load_dataset(path_or_paths):
             return xr.open_mfdataset(path_or_paths, **mf_kwargs)
         except ValueError:
             # Fallback just in case the files are structured completely differently
-            return xr.open_mfdataset(path_or_paths, combine='by_coords')#, join='override', compat='override')
+            return xr.open_mfdataset(path_or_paths, combine='by_coords')
 
     if os.path.isfile(path_or_paths) and path_or_paths.endswith(".nc"):
         # Single file
