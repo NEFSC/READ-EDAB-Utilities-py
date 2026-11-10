@@ -116,7 +116,7 @@ def validate_inputs(chl, sst, par, daylength):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def build_pp_date_map(chl_dataset=None, sst_dataset=None, par_dataset=None, map_subset=None, 
+def build_pp_date_map(chl_dataset=None, sst_dataset=None, par_dataset=None, get_date_prod="CHL", map_subset=None, 
                       input_period='D', dates=None, overwrite=False, verbose=False, debug=False, **kwargs):
     """
     Constructs a date→(CHL, SST, PAR, PPD) file path mapping using get_prod_files.

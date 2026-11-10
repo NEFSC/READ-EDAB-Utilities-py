@@ -102,7 +102,7 @@ def validate_inputs(chl, sst):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def build_psc_date_map(chl_dataset=None, sst_dataset=None, map_subset=None, input_period='D',
+def build_psc_date_map(chl_dataset=None, sst_dataset=None, get_date_prod="CHL", map_subset=None, input_period='D',
                        dates=None, overwrite=False, verbose=False, debug=False, **kwargs):
     """
     Constructs a date→(CHL, SST, PSC) file path mapping using get_prod_files.

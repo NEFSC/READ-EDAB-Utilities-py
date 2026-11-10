@@ -330,11 +330,15 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
     
     debug_trace(f"Dataset Defaults: default_grid={default_grid}, default_product={default_product}")
 
+    # Pre-scan the physical directories to avoid "guessing" later
     dataset_products = get_dataset_products(dataset)
-    debug_trace(f"get_dataset_products keys: {list(dataset_products.keys())}")
     
-    filtered_structure = {dataset_type: dataset_products[dataset_type]} if dataset_type in dataset_products else dataset_products
-    debug_trace(f"filtered_structure keys: {list(filtered_structure.keys())}")
+    # Safely handle missing dataset products (e.g., brand new datasets)
+    if dataset_products:
+        debug_trace(f"get_dataset_products keys: {list(dataset_products.keys())}")
+        filtered_structure = {dataset_type: dataset_products[dataset_type]} if dataset_type in dataset_products else dataset_products
+    else:
+        filtered_structure = {}
 
     if data_type == "EXTRACT":
         reference_file = kwargs.get('reference_file')
@@ -365,15 +369,35 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
     # --- 2. Try to find the product in the dictionary ---
     debug_trace(f"Calling resolve_dataset_grid with actual_prod={actual_prod}, default_grid={dataset_grid or default_grid}, data_type={data_type}")
     
-    resolved_grid, path = resolve_dataset_grid(
-        filtered_structure, 
-        prod=actual_prod, 
-        default_grid=dataset_grid or default_grid,
-        period=period,
-        processing_level=processing_level,
-        data_type=data_type,
-        verbose=debug
-    )
+    path = None
+    resolved_grid = None
+    
+    if filtered_structure:
+        # Check if the exact map_subset folder already exists
+        target_grid = f"{map_subset.upper()}_" if map_subset else ""
+        if target_grid or dataset_grid:
+            search_grid = dataset_grid if dataset_grid else target_grid
+            resolved_grid, path = resolve_dataset_grid(
+                filtered_structure, 
+                prod=actual_prod, 
+                default_grid=search_grid,
+                period=period,
+                processing_level=processing_level,
+                data_type=data_type,
+                verbose=debug
+            )
+            
+        # If the subset doesn't exist, instantly fallback to the default grid
+        if not path:
+            resolved_grid, path = resolve_dataset_grid(
+                filtered_structure, 
+                prod=actual_prod, 
+                default_grid=default_grid,
+                period=period,
+                processing_level=processing_level,
+                data_type=data_type,
+                verbose=debug
+            )
     
     debug_trace(f"Result from resolve_dataset_grid: resolved_grid={resolved_grid}, path={path}")
 
@@ -576,19 +600,15 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
 
    # Handle fallback logic safely
         if (not path or not os.path.isdir(path)) and current_kwargs.get('map_subset'):
-            # Prevent falling back to GLOBAL if we are explicitly looking for a SOURCE subset
-            if path and '/SOURCE/' in path.upper():  
-                debug_trace(f"Subset directory not found. Skipping fallback to base grid to enforce SOURCE subset match.")
-                path = None  
-            else:
-                debug_trace(f"Subset directory not found. Falling back to base grid...")
-                fallback_kwargs = current_kwargs.copy()
-                fallback_kwargs.pop('map_subset')
-                try:
-                    path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, debug=debug, **fallback_kwargs)
-                except (FileNotFoundError, ValueError) as e:
-                    debug_trace(f"Fallback path resolution failed: {e}")
-                    path = None
+            # Allow fallback to the base grid so SOURCE data can be loaded and subsetted in-memory!
+            debug_trace(f"Subset directory not found. Falling back to base grid...")
+            fallback_kwargs = current_kwargs.copy()
+            fallback_kwargs.pop('map_subset')
+            try:
+                path = get_filepath(prod, dataset=dataset, period=period, verbose=verbose, debug=debug, **fallback_kwargs)
+            except (FileNotFoundError, ValueError) as e:
+                debug_trace(f"Fallback path resolution failed: {e}")
+                path = None
 
         if path and isinstance(path, str) and os.path.isdir(path):
             if path not in search_paths:
@@ -672,8 +692,8 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
     if daterange:
         std_daterange = get_daterange(daterange)
         if std_daterange:
-            start_str = str(daterange[0]).replace("-", "")
-            end_str = str(daterange[1]).replace("-", "")
+            start_str = str(std_daterange[0]).replace("-", "")
+            end_str = str(std_daterange[1]).replace("-", "")
             
             # Extract dates again because indexes may have changed after deduplication
             file_dates = get_source_file_dates(nc_files, format="yyyymmdd")
