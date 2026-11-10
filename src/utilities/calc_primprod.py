@@ -116,7 +116,8 @@ def validate_inputs(chl, sst, par, daylength):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dataset=None, par_dataset=None, map_subset=None, verbose=False):
+def build_pp_date_map(chl_dataset=None, sst_dataset=None, par_dataset=None, map_subset=None, 
+                      input_period='D', dates=None, overwrite=False, verbose=False, debug=False, **kwargs):
     """
     Constructs a date→(CHL, SST, PAR, PPD) file path mapping using get_prod_files.
 
@@ -124,15 +125,16 @@ def build_pp_date_map(dates=None, get_date_prod="CHL", chl_dataset=None, sst_dat
         dates (list of str): List of dates (YYYYMMDD) to process.
         get_date_prod (str): Which product to use for date filtering.
         chl_dataset, sst_dataset, par_dataset (str): Dataset identifiers.   
-        subset (str): The subset region (e.g. NES, NWA) to subset the data 
+        map_subset (str): The subset region (e.g. NES, NWA) to subset the data 
+        input_period (str): The period code (e.g. D, D7, W) of the input (and output) files
     Returns:
         dict: Mapping of date → (chl_path, sst_path, par_path,ppd_output_path)
     """
         
     # Get files
-    chl_files = get_prod_files("CHL", dataset=chl_dataset)
-    sst_files = get_prod_files("SST", dataset=sst_dataset)
-    par_files = get_prod_files("PAR", dataset=par_dataset,map_subset=map_subset)
+    chl_files = get_prod_files("CHL", dataset=chl_dataset, period=input_period, map_subset=map_subset, daterange=dates, verbose=verbose, debug=debug)
+    sst_files = get_prod_files("SST", dataset=sst_dataset, period=input_period, map_subset=map_subset, daterange=dates, verbose=verbose, debug=debug)
+    par_files = get_prod_files("PAR", dataset=par_dataset, period=input_period, map_subset=map_subset, daterange=dates, verbose=verbose, debug=debug)
     
     # Extract metadata from first CHL file
     if not chl_files:
