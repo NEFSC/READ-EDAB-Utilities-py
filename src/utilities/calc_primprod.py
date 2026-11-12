@@ -612,7 +612,7 @@ def run_pp_pipeline(chl_dataset=None,
                 print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
                 print(f"🆕 New files created:       0")
                 print("="*60)
-                return
+                continue
 
             if should_log: print(f"\n🚀 Processing {total_dates} dates...")
 
