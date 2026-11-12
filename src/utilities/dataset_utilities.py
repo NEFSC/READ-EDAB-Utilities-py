@@ -123,7 +123,7 @@ def get_datasets_path(preferred=None,verbose=False):
     raise FileNotFoundError("No valid DATASETS directory found in the provided environment.")
 
 #--------------------------------------------------------------------------------------
-def get_dataset_dirs(dataset=None,verbose=True):
+def get_dataset_dirs(dataset=None,verbose=True, datasets_dir=None):
     """
     Search for subfolders within a directory and return a dictionary mapping
     folder names to their full paths.
@@ -131,13 +131,14 @@ def get_dataset_dirs(dataset=None,verbose=True):
     Parameters:
         root_dir (str): The directory to search.
         verbose (bool): Whether to print status messages.
+        datasets_dir (str): Optional datasets directory 
 
     Returns:
         dict: Dictionary with subfolder names as keys and full paths as values.
               If dataset is provided, returns only its matching subfolders.
 
     """
-    root_dir = get_datasets_path(verbose=verbose)
+    root_dir = datasets_dir if datasets_dir else get_datasets_path(verbose=verbose)
     
     if verbose:
         print(f"🔍 SCANNING ROOT DIRECTORY: {root_dir}")
@@ -178,7 +179,7 @@ def get_dataset_dirs(dataset=None,verbose=True):
     return results
 
 #--------------------------------------------------------------------------------------
-def get_dataset_products(dataset, dataset_map=None, verbose=False):
+def get_dataset_products(dataset, dataset_map=None, verbose=False, datasets_dir=None):
     """
     Searches within the given SOURCE and OUTPUT paths for a dataset,
     organizes the results into:
@@ -193,6 +194,7 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
     Parameters:
         dataset (str): Top-level dataset folder name.
         dataset_map (str, optional): Specific map type folder to scan (e.g., 'GLOBAL_4KM_DAILY','NES_2KM_STATS').
+        datasets_dir (str): Optional datasets directory
 
     Returns:
         dict: Nested dictionary grouped by source_type → map_type → product.
@@ -215,7 +217,7 @@ def get_dataset_products(dataset, dataset_map=None, verbose=False):
             }
     """
     # First, get all available SOURCE paths
-    all_sources = get_dataset_dirs(verbose=False)
+    all_sources = get_dataset_dirs(verbose=False, datasets_dir=datasets_dir)
     
     if dataset not in all_sources:
         print(f"❌ {dataset} not found in available sources.")
