@@ -12,6 +12,58 @@ env = bootstrap_environment(verbose=False)
 from utilities import parse_dataset_info
 from utilities import get_dates
 
+"""
+Purpose:
+    MAP_UTILITIES is a collection of utility functions for spatial data manipulation, including regional bounding box subsetting, dynamic xarray chunking, and grid interpolation (regridding) utilizing xESMF.
+
+Main Functions:
+    - map_subset_defaults: Returns the default longitude and latitude coordinate boundaries for predefined regions (e.g., NWA, NES, GLOBAL).
+    - subset_dataset: Crops an xarray Dataset or DataArray spatially using the predefined regional bounding boxes.
+    - get_regrid_weights: Uses xESMF to generate and cache interpolation weight matrices based on source and target grids.
+    - regrid_dataset: Applies an xESMF weight matrix to regrid selected variables from a source dataset onto a target grid.
+    - regrid_wrapper: Orchestrates the complete regridding pipeline (loading data, subsetting spatially/temporally, generating weights, and regridding).
+
+Helper Functions:
+    - compute_dynamic_chunks: Calculates optimal chunk sizes across spatial dimensions for xarray datasets to maintain Dask performance.
+    - hash_grid: Generates a unique MD5 hash for coordinate arrays to create reproducible and collision-proof weight filenames.
+    - load_dataset: Robustly loads single or multiple NetCDF files into an xarray dataset using strict coordinate concatenation rules.
+    
+Copywrite: 
+    Copyright (C) 2025, Department of Commerce, National Oceanic and Atmospheric Administration, National Marine Fisheries Service,
+    Northeast Fisheries Science Center, Narragansett Laboratory.
+    This software may be used, copied, or redistributed as long as it is not sold and this copyright notice is reproduced on each copy made.
+    This routine is provided AS IS without any express or implied warranties whatsoever.
+
+Author:
+    This program was written on August 01, 2025 by Kimberly J. W. Hyde, Northeast Fisheries Science Center | NOAA Fisheries | U.S. Department of Commerce, 28 Tarzwell Dr, Narragansett, RI 02882
+  
+Modification History:
+    Aug 01, 2025 - KJWH: Initial code written
+                         Added gridding functions
+    Sep 03, 2025 - KJWH: Now regridding in batches
+    Sep 12, 2025 - KJWH: Changed gridding_utilities.py to mapping_utilities.py
+                         Added a subsetting function
+    Apr 17, 2026 - KJWH: Changed the max latitude of the NES map from 46.0 to 47.0
+    May 04, 2026 - KJWH: Added a latitude/lat and longitude/lon dataset coordinate name checks
+                         Updated the regridding chunks
+    May 20, 2026 - KJWH: Changed name from mapping_utilities.py to map_utilities.py
+    Jul 28, 2026 - KJWH: Moved the import xesmf to be inside the regridding function
+    Aug 18, 2026 - KJWH: xr.open_mfdataset now using combine and concat_dim inputs
+    Aug 20, 2026 - KJWH: Updated how the lat/lon values are handled when subsetting
+    Oct 16, 2026 - KJWH: Changed the output regrid weights file name
+                         Now subsetting to the map_subset before regridding
+    Nov 09, 2026 - KJWH: Added additional print statements to track regridding
+                         Forcing coordinates into memory for xESMF
+                         Closing the input file
+                         Renamed the output regridded weight file
+    Nov 10, 2026 - KJWH: Updated load_dataset() to enforce coords='minimal' in the xarray.open_mfdataset arguments, resolving coordinate concatenation conflicts (and removed join/compat overrides that were fighting perfectly aligned grid data).
+                         Forced eager evaluation of spatial coordinates (lat and lon.compute()) in regrid_dataset() to prevent xESMF crashes caused by lazy Dask arrays.
+                         Fixed a 32-bit integer overflow memory crash by ensuring map_subset is correctly passed down from regrid_wrapper() to get_regrid_weights(), enforcing spatial cropping before matrix generation.
+                         Appended the map_subset label to the output NetCDF filename in get_regrid_weights() to prevent global and regional weight matrices from overwriting each other in the cache.
+                         Added target_ds.close() at the end of regrid_wrapper() to release file locks and free memory once the grid template is extracted.
+                         Updated history and documentation
+"""
+
 def map_subset_defaults():
     """
     Returns the default longitude and latitude coordinates for map subsets
@@ -125,6 +177,10 @@ def load_dataset(path_or_paths):
     mf_kwargs = {
         'combine': 'nested',
         'concat_dim': 'time',
+        'compat': 'override',
+        'coords': 'minimal',
+        'data_vars': 'minimal', # Silences the warning and speeds up dataset combination
+        'parallel': True   # Use multithreading to read NetCDF headers instantly
     }
 
     if isinstance(path_or_paths, (list, tuple)):
@@ -133,7 +189,7 @@ def load_dataset(path_or_paths):
             return xr.open_mfdataset(path_or_paths, **mf_kwargs)
         except ValueError:
             # Fallback just in case the files are structured completely differently
-            return xr.open_mfdataset(path_or_paths, combine='by_coords')
+            return xr.open_mfdataset(path_or_paths, combine='by_coords', parallel=True, compat='override', coords='minimal', data_vars='minimal')
 
     if os.path.isfile(path_or_paths) and path_or_paths.endswith(".nc"):
         # Single file
@@ -294,6 +350,11 @@ def regrid_dataset(
     source_ds['lon'] = source_ds['lon'].compute()
     target_grid['lat'] = target_grid['lat'].compute()
     target_grid['lon'] = target_grid['lon'].compute()
+
+    # Consolidate spatial chunks before regridding to stop Dask graph explosion!
+    spatial_dims = [dim for dim in source_ds.dims if dim in ['lat', 'lon', 'latitude', 'longitude']]
+    if spatial_dims:
+        source_ds = source_ds.chunk({dim: -1 for dim in spatial_dims})
 
     regridder = xe.Regridder(source_ds, target_grid, method, filename=weights_file, reuse_weights=True)
 
