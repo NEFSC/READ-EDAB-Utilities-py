@@ -19,6 +19,7 @@ from utilities import get_geospatial_metadata, get_temporal_metadata, get_summar
 from utilities import parse_dataset_info
 from utilities import get_source_file_dates, get_prod_files, get_dates, get_filepath
 from utilities import generate_logfile_path
+from utilities import dataset_defaults, get_daterange, get_default_product_dataset
 
 
 """
@@ -60,6 +61,9 @@ Modification History
                          Added validate_inputs function to check input data types and shapes
     Oct 15, 2026 - KJWH: Added DualLogger and updated logfile output
     Oct 21, 2026 - KJWH: Forced h5netcdf engine in all .to_netcdf() calls
+    Nov 10, 2026 - KJWH: Updated build_pp_date_map() to pass the daterange=dates parameter directly into get_prod_files(). This applies the temporal filter during the initial globbing step, drastically reducing the number of files xarray has to process.
+                         Added a get_date_prod="CHL" parameter to build_pp_date_map() to serve as an anchor, ensuring the pipeline only wastes cycles searching for SST and PAR files on dates where the requisite primary chlorophyll data exists.
+    Nov 12, 2026 - KJWH: Now looping through dataset years in run_pp_pipeline() to optimize the processing workflow
 """
 
 class DualLogger:
@@ -536,132 +540,162 @@ def run_pp_pipeline(chl_dataset=None,
         print(f"📄 Logging to: {logfile}")
         print("="*80)
 
+    # Determine Start and End Years ---
+    if not chl_dataset:
+        chl_dataset = get_default_product_dataset('CHL')
+        if verbose: print(f"ℹ️ No CHL dataset provided. Defaulting to: {chl_dataset}")
+    
+    current_year = datetime.now().year
+    
+    if daterange:
+        # If a specific daterange is provided, clamp the loop to those exact years
+        std_daterange = get_daterange(daterange)
+        min_year = int(std_daterange[0][:4])
+        max_year = int(std_daterange[1][:4])
+    else:
+        # Fallback to the dataset's chronological beginning
+        defaults = dataset_defaults()
+        if chl_dataset in defaults:
+            min_year = defaults[chl_dataset][3] # Index 3 is the start_year
+        else:
+            min_year = 1997 # Safe global fallback
+        max_year = current_year
 
+    if should_log: print(f"\n🚀 Starting Primary Productivity Pipeline...")
     try:
-        # 1️⃣ Build date→file map
-        if should_log: print(f"\n🚀 Starting Primary Productivity Pipeline...")
-        if should_log: print(f"\n🚀 Building PP data map...")
-        
-        pp_data_map = build_pp_date_map(dates=daterange,
-                                        chl_dataset=chl_dataset,
-                                        sst_dataset=sst_dataset,
-                                        par_dataset=par_dataset,
-                                        map_subset=map_subset,
-                                        verbose=verbose)
-
-        # 2️⃣ Filter dates to run and Track Progress
-        dates_to_run = []
-        skipped_tasks = []
-        created_tasks = []
-        failed_tasks = []
-        
-        for date, info in pp_data_map.items():
-            chl_path, sst_path, par_path, ppd_path, up_to_date = info
-            file_name = os.path.basename(ppd_path)
+        for target_year in range(min_year, max_year + 1):
+            if verbose: print(f"\n{'='*60}\n🗓️ PROCESSING YEAR: {target_year}\n{'='*60}")
             
-            if up_to_date and not overwrite:
-                skipped_tasks.append(date)
-                if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
+            # Build the exact bounding dates for this specific year
+            year_bounds = [f"{target_year}0101", f"{target_year}1231"]
+            
+            if should_log: print(f"\n🚀 Building PP data map for {target_year}...")
+            
+            # 1️⃣ Build date→file map
+            pp_data_map = build_pp_date_map(
+                chl_dataset=chl_dataset, 
+                sst_dataset=sst_dataset, 
+                par_dataset=par_dataset, 
+                map_subset=map_subset, 
+                dates=year_bounds, # Build the map ONLY for this year! 
+                overwrite=overwrite, 
+                verbose=verbose, 
+                debug=debug
+            )
+        
+            # 2️⃣ Filter dates to run and Track Progress
+            dates_to_run = []
+            skipped_tasks = []
+            created_tasks = []
+            failed_tasks = []
+            
+            for date, info in pp_data_map.items():
+                chl_path, sst_path, par_path, ppd_path, up_to_date = info
+                file_name = os.path.basename(ppd_path)
+                
+                if up_to_date and not overwrite:
+                    skipped_tasks.append(date)
+                    if should_log: print(f"  ⏭  Skipped: {file_name} (Up-to-date)")
+                else:
+                    dates_to_run.append(date)
+                    if should_log: print(f"  🆕 Queued for Creation: {file_name}")
+            
+            total_dates = len(dates_to_run)
+
+            if not dates_to_run:
+                if should_log: print("✅ All outputs are up-to-date. Nothing to run.")
+                
+                print("\n" + "="*60)
+                print("🏁 PRIMARY PRODUCTIVITY PIPELINE SUMMARY")
+                print("="*60)
+                print(f"📥 Input dates found:       {len(pp_data_map)}")
+                print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
+                print(f"🆕 New files created:       0")
+                print("="*60)
+                return
+
+            if should_log: print(f"\n🚀 Processing {total_dates} dates...")
+
+            # 3️⃣ Collect input files
+            chl_files = [pp_data_map[d][0] for d in dates_to_run]
+            sst_files = [pp_data_map[d][1] for d in dates_to_run]
+            par_files = [pp_data_map[d][2] for d in dates_to_run]
+            output_files = [pp_data_map[d][3] for d in dates_to_run]
+
+            # 4️⃣ Get input data information
+            chl_info = parse_dataset_info(chl_files[0])
+            sst_info = parse_dataset_info(sst_files[0])
+            par_info = parse_dataset_info(par_files[0])
+
+            chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
+            sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
+            par_source = get_source_metadata(par_info["dataset"],dataset_version=par_info["version"],source_prefix="source_par")
+            
+            merged_info = {
+                chl_info["product"]: chl_info,
+                sst_info["product"]: sst_info,
+                par_info["product"]: par_info
+            }
+
+            chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
+            sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
+            par_nc_var = get_nc_prod(par_info['dataset'],'PAR')
+
+            # 5️⃣ Batch regrid SST and PAR
+            if should_log: print(f"Regridding SST files to {map_subset} CHL grid...")
+            sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run, map_subset=map_subset)
+            if should_log: print(f"...Finished regridding SST files to CHL grid.")
+            if should_log: print(f"Regridding PAR files to {map_subset} CHL grid...")
+            par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run, map_subset=map_subset)
+            if should_log: print(f"...Finished regridding PAR files to CHL grid.")
+
+            # 6️⃣ Daily loop (Sequential or Parallel)
+            if parallel_runs == 1:
+                # Sequential execution
+                for i, (date, chl_file, sst_file, par_file, output_file) in enumerate(zip(dates_to_run, chl_files, sst_files, par_files, output_files), start=1):
+                    date, success, elapsed, error = process_single_day(date, chl_file, sst_file, par_file, output_file, sst_ds, par_ds, chl_nc_var, sst_nc_var, par_nc_var, map_subset, daylength_dir, merged_info, verbose, debug)
+                    if success:
+                        created_tasks.append(date)
+                        if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
+                    else:
+                        failed_tasks.append(f"{date}: {error}")
+                        if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {error}")
             else:
-                dates_to_run.append(date)
-                if should_log: print(f"  🆕 Queued for Creation: {file_name}")
-        
-        total_dates = len(dates_to_run)
+                # Parallel execution
+                if should_log: print(f"\n  ⚡ Launching {total_dates} daily tasks across {parallel_runs} parallel workers...")
+                with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                    future_to_date = {
+                        executor.submit(process_single_day, date, chl_file, sst_file, par_file, output_file, sst_ds, par_ds, chl_nc_var, sst_nc_var, par_nc_var, map_subset, daylength_dir, merged_info, verbose, debug): date
+                        for date, chl_file, sst_file, par_file, output_file in zip(dates_to_run, chl_files, sst_files, par_files, output_files)
+                    }
+                    
+                    completed_count = 0
+                    for future in concurrent.futures.as_completed(future_to_date):
+                        completed_count += 1
+                        date, success, elapsed, error = future.result()
+                        out_filename = os.path.basename(pp_data_map[date][3])
+                        
+                        if success:
+                            created_tasks.append(date)
+                            if should_log: print(f"  ✅ [Parallel] Created: {out_filename}, file {completed_count} of {total_dates} ({round((completed_count / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
+                        else:
+                            failed_tasks.append(f"{date}: {error}")
+                            if should_log: print(f"  ❌ [Parallel] Error creating {out_filename}: {error}")
 
-        if not dates_to_run:
-            if should_log: print("✅ All outputs are up-to-date. Nothing to run.")
-            
+            # --- FINAL SUMMARY REPORT ---
             print("\n" + "="*60)
-            print("🏁 PRIMARY PRODUCTIVITY PIPELINE SUMMARY")
+            print("🏁 PRIMARY PRODUCTIVITY PIPELINE FINISHED SUMMARY")
             print("="*60)
             print(f"📥 Input dates found:       {len(pp_data_map)}")
             print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
-            print(f"🆕 New files created:       0")
+            print(f"🆕 New files created:       {len(created_tasks)}")
+            print(f"❌ Errors/Not created:      {len(failed_tasks)}")
+            
+            if failed_tasks:
+                print(f"\n📂 FAILED TASKS DETAILS:")
+                for task in failed_tasks:
+                    print(f"  • {task}")
             print("="*60)
-            return
-
-        if should_log: print(f"\n🚀 Processing {total_dates} dates...")
-
-        # 3️⃣ Collect input files
-        chl_files = [pp_data_map[d][0] for d in dates_to_run]
-        sst_files = [pp_data_map[d][1] for d in dates_to_run]
-        par_files = [pp_data_map[d][2] for d in dates_to_run]
-        output_files = [pp_data_map[d][3] for d in dates_to_run]
-
-        # 4️⃣ Get input data information
-        chl_info = parse_dataset_info(chl_files[0])
-        sst_info = parse_dataset_info(sst_files[0])
-        par_info = parse_dataset_info(par_files[0])
-
-        chl_source = get_source_metadata(chl_info["dataset"],dataset_version=chl_info["version"],source_prefix="source_chl")
-        sst_source = get_source_metadata(sst_info["dataset"],dataset_version=sst_info["version"],source_prefix="source_sst")
-        par_source = get_source_metadata(par_info["dataset"],dataset_version=par_info["version"],source_prefix="source_par")
-        
-        merged_info = {
-            chl_info["product"]: chl_info,
-            sst_info["product"]: sst_info,
-            par_info["product"]: par_info
-        }
-
-        chl_nc_var = get_nc_prod(chl_info['dataset'],'CHL')
-        sst_nc_var = get_nc_prod(sst_info['dataset'],'SST')
-        par_nc_var = get_nc_prod(par_info['dataset'],'PAR')
-
-        # 5️⃣ Batch regrid SST and PAR
-        if should_log: print(f"Regridding SST files to {map_subset} CHL grid...")
-        sst_ds = regrid_wrapper(chl_files, sst_files, source_vars=[sst_nc_var], daterange=dates_to_run, map_subset=map_subset)
-        if should_log: print(f"...Finished regridding SST files to CHL grid.")
-        if should_log: print(f"Regridding PAR files to {map_subset} CHL grid...")
-        par_ds = regrid_wrapper(chl_files, par_files, source_vars=[par_nc_var], daterange=dates_to_run, map_subset=map_subset)
-        if should_log: print(f"...Finished regridding PAR files to CHL grid.")
-
-        # 6️⃣ Daily loop (Sequential or Parallel)
-        if parallel_runs == 1:
-            # Sequential execution
-            for i, (date, chl_file, sst_file, par_file, output_file) in enumerate(zip(dates_to_run, chl_files, sst_files, par_files, output_files), start=1):
-                date, success, elapsed, error = process_single_day(date, chl_file, sst_file, par_file, output_file, sst_ds, par_ds, chl_nc_var, sst_nc_var, par_nc_var, map_subset, daylength_dir, merged_info, verbose, debug)
-                if success:
-                    created_tasks.append(date)
-                    if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_dates} ({round((i / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
-                else:
-                    failed_tasks.append(f"{date}: {error}")
-                    if should_log: print(f"  ❌ Error creating {os.path.basename(output_file)}: {error}")
-        else:
-            # Parallel execution
-            if should_log: print(f"\n  ⚡ Launching {total_dates} daily tasks across {parallel_runs} parallel workers...")
-            with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
-                future_to_date = {
-                    executor.submit(process_single_day, date, chl_file, sst_file, par_file, output_file, sst_ds, par_ds, chl_nc_var, sst_nc_var, par_nc_var, map_subset, daylength_dir, merged_info, verbose, debug): date
-                    for date, chl_file, sst_file, par_file, output_file in zip(dates_to_run, chl_files, sst_files, par_files, output_files)
-                }
-                
-                completed_count = 0
-                for future in concurrent.futures.as_completed(future_to_date):
-                    completed_count += 1
-                    date, success, elapsed, error = future.result()
-                    out_filename = os.path.basename(pp_data_map[date][3])
-                    
-                    if success:
-                        created_tasks.append(date)
-                        if should_log: print(f"  ✅ [Parallel] Created: {out_filename}, file {completed_count} of {total_dates} ({round((completed_count / total_dates) * 100)}%) after {elapsed:.2f} minutes.")
-                    else:
-                        failed_tasks.append(f"{date}: {error}")
-                        if should_log: print(f"  ❌ [Parallel] Error creating {out_filename}: {error}")
-
-        # --- FINAL SUMMARY REPORT ---
-        print("\n" + "="*60)
-        print("🏁 PRIMARY PRODUCTIVITY PIPELINE FINISHED SUMMARY")
-        print("="*60)
-        print(f"📥 Input dates found:       {len(pp_data_map)}")
-        print(f"⏭  Existing files skipped:  {len(skipped_tasks)}")
-        print(f"🆕 New files created:       {len(created_tasks)}")
-        print(f"❌ Errors/Not created:      {len(failed_tasks)}")
-        
-        if failed_tasks:
-            print(f"\n📂 FAILED TASKS DETAILS:")
-            for task in failed_tasks:
-                print(f"  • {task}")
-        print("="*60)
 
     finally:
         if logfile and logfile not in ["auto", True]:
