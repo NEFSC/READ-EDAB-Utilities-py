@@ -52,6 +52,9 @@ Modification History
                          Overhauled the file globbing loop in get_prod_files to use hierarchical, mutually exclusive fallback logic (exact subproduct match first, falling back to base product if empty) to eliminate duplicate file ingestion.
     Oct 28, 2026 - KJWH: Added data_type flexibility for get_file_prods and get_filepath (e.g. could input either ANOM or ANOMS)
                          Added the ability for get_filepath to find a reference_file for EXTRACT data_types if not provided
+    Nov 10, 2026 - KJWH: Optimized get_filepath() by pre-scanning directories with get_dataset_products() and passing the existing structure to resolve_dataset_grid(). This prevents the script from blindly templating paths and throwing false "Path not found" warnings for missing subset directories.
+                         Removed a restriction in get_prod_files() that prevented /SOURCE/ datasets from falling back to base grids (e.g., GLOBAL). This allows the orchestrator to dynamically pull global files for in-memory subsetting when a pre-binned regional folder does not exist.
+                         Resolved an IndexError in get_prod_files() by updating the date filtering logic to correctly reference the standardized two-element std_daterange array rather than the raw user input.
                          
 
     
@@ -331,7 +334,8 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
     debug_trace(f"Dataset Defaults: default_grid={default_grid}, default_product={default_product}")
 
     # Pre-scan the physical directories to avoid "guessing" later
-    dataset_products = get_dataset_products(dataset)
+    datasets_dir_override = kwargs.get('datasets_dir',None)
+    dataset_products = get_dataset_products(dataset, datasets_dir=datasets_dir_override)
     
     # Safely handle missing dataset products (e.g., brand new datasets)
     if dataset_products:
@@ -454,7 +458,7 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         debug_trace(f"New grid name: {new_grid}")
         
         # Replace the grid folder name in the physical string
-        res_info = parse_dataset_info(path)
+        res_info = parse_dataset_info(path, base=datasets_dir_override)
         old_grid = res_info.get("dataset_grid", res_info.get("dataset_map")) if res_info else resolved_grid        
         if old_grid:
             path = path.replace(old_grid, new_grid)
