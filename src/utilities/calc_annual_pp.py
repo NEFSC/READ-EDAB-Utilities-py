@@ -368,17 +368,3 @@ def run_annual_pp_pipeline(prods=None, input_periods=None, stat_type='median', *
             print(f"\n🔴 PIPELINE RUN ENDED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             sys.stdout.close()
             sys.stdout = original_stdout
-
-    # Check input data
-
-    # Create monthly means
-
-    # Find all valid data - IDL code first subset by region and then filled in any missing data with the monthly mean of the region, but that won't work if this code is just returning the summed PP for the entire map.
-
-    
-
-    # Replicate monthly data based on the number of days in the month
-
-    # Sum all data within a year
-
-    # Return annual sums
