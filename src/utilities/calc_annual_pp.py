@@ -208,6 +208,7 @@ def process_single_year(year, task, prod, input_period, stat_type, dataset, map_
         if verbose: print(f"  📖 Opening {len(input_files)} files for {year}...")
         
         ds = xr.open_mfdataset(input_files, combine='by_coords', engine='h5netcdf', parallel=False)
+        ds = ds.chunk({'time': -1}) # Consolidate the time dimension to prevent apply_ufunc core dimension errors
         
         # Resolve target variables dynamically
         if prod.upper() == 'PPD':
