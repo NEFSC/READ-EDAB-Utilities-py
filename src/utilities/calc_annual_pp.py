@@ -17,7 +17,7 @@ from utilities import (
     pixel_area,
     get_prod_files, get_filepath, file_parser,
     get_default_metadata, get_current_utc_timestamp, get_lut_metadata, get_source_metadata, get_geospatial_metadata, get_temporal_metadata,
-    get_default_product_dataset, get_default_dataset_product
+    get_default_product_dataset, get_default_dataset_product, dataset_defaults
 )
 
 
@@ -74,8 +74,15 @@ def build_annual_pp_map(prod, input_period, dataset, map_subset, output_dir=None
         and builds a processing map evaluating if the annual output file needs creation/updating.
     """
     if output_dir is None:
-        output_dir = get_filepath(prod, dataset=dataset, period='A', data_type='ANNUAL', 
-                                  map_subset=map_subset, getfilepath=True, make_dir=True)
+        if output_dir is None:
+            # Dynamically construct the correct regional grid (e.g., 'NWA_4KM')
+            default_grid = dataset_defaults().get(dataset, [None, 'GLOBAL_4KM'])[1]
+            target_grid = default_grid.replace("GLOBAL", map_subset) if map_subset else default_grid
+            
+            # Force get_filepath to use this specific grid when creating the folder
+            output_dir = get_filepath(prod, dataset=dataset, period='A', data_type='ANNUAL', 
+                                    map_subset=map_subset, dataset_grid=target_grid, 
+                                    getfilepath=True, make_dir=True)
 
     if verbose: print(f"🔍 Searching for {input_period} STATS files for {dataset}:{prod}...")
     
