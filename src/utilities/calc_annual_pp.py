@@ -291,7 +291,7 @@ def run_annual_pp_pipeline(prods=None, input_periods=None, stat_type='median', *
         Orchestrates the Annual Primary Productivity workflow across multiple products and years.
     """
     dataset = kwargs.pop('dataset', None)
-    map_subset = kwargs.get('map_subset', 'NWA')
+    map_subset = kwargs.pop('map_subset', 'NWA')
     
     if not prods: prods = ['PPD']
     if isinstance(prods, str): prods = [prods.upper().strip()]
