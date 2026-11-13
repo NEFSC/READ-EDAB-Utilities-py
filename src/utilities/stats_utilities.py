@@ -1084,8 +1084,6 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                 # 6. Write the netcdf file to disk 
                 if debug: print(f"      💾 Saving {out_path}")
                 stats_ds.to_netcdf(out_path,format='NETCDF4', engine='h5netcdf')
-                        
-                print(f"  Saved: {os.path.basename(out_path)}")
                             
             except Exception as e:
                 print(f"❌ Error processing {out_path}: {e}")
@@ -1103,7 +1101,7 @@ def process_single_stat(task, prod, per, verbose, **kwargs):
                     pass
             gc.collect()
             
-            if verbose: print(f"  ✅ Successfully wrote: {os.path.basename(out_path)}")
+            if verbose: print(f"  ✅ Successfully saved: {os.path.basename(out_path)}")
             return True, corrupt_files_found
         except Exception as e:
             # The traceback catcher will ONLY print if a file completely fails.
