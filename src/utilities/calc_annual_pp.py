@@ -308,7 +308,7 @@ def run_annual_pp_pipeline(prods=None, input_periods=None, stat_type='median', *
         print("="*80)
 
     try:
-        verbose = kwargs.get('verbose', False)
+        verbose = kwargs.pop('verbose', False)
         parallel_runs = kwargs.get('parallel_runs', 1)
         
         skipped, created, replaced, failed = [], [], [], []
@@ -319,7 +319,7 @@ def run_annual_pp_pipeline(prods=None, input_periods=None, stat_type='median', *
             for input_period in input_periods:
                 print(f"\n🚀 Starting Annual Pipeline for {prod} (Dataset: {current_dataset}) | Input: {input_period}")
                 
-                stats_map = build_annual_pp_map(prod, input_period, current_dataset, map_subset, **kwargs)
+                stats_map = build_annual_pp_map(prod, input_period, current_dataset, map_subset, verbose=verbose, **kwargs)
                 tasks_to_run = [(yr, task) for yr, task in stats_map.items() if not task['is_up_to_date']]
                 
                 for yr, task in stats_map.items():
