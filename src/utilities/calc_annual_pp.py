@@ -8,6 +8,7 @@ import warnings
 import traceback
 import concurrent.futures
 from datetime import datetime
+import multiprocessing 
 
 from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
@@ -330,7 +331,7 @@ def run_annual_pp_pipeline(prods=None, input_periods=None, stat_type='median', *
 
                 if parallel_runs > 1:
                     if verbose: print(f"  ⚡ Launching {len(tasks_to_run)} years across {parallel_runs} workers...")
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs,mp_context=multiprocessing.get_context('spawn')) as executor:
                         future_map = {
                             executor.submit(process_single_year, yr, task, prod, input_period, stat_type, current_dataset, map_subset, verbose, **kwargs): yr
                             for yr, task in tasks_to_run
