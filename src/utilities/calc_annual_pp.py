@@ -271,7 +271,14 @@ def process_single_year(year, input_files, output_file , input_period, stat_type
         out_ds = out_ds.expand_dims('time').assign_coords(time=[ref_time])
 
         attrs = get_default_metadata(sheet="General") | get_lut_metadata(add_program="Ecosystem Dynamics and Assessment Branch")
-        attrs = attrs | get_geospatial_metadata(dataset=out_ds) | get_temporal_metadata(ds=out_ds)
+        #attrs = attrs | get_geospatial_metadata(dataset=out_ds) | get_temporal_metadata(ds=out_ds)
+
+        # Geospatial Attributes
+        attrs = attrs | get_geospatial_metadata(dataset=out_ds)
+    
+        # Temporal Attributes
+        attrs = attrs | get_temporal_metadata(ds=out_ds)
+    
         
         attrs['title'] = f"Annual Total Primary Productivity for {year}"
         attrs['product'] = prod
