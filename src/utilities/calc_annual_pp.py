@@ -195,7 +195,7 @@ def compute_annual_sum(da, input_period, gap_fill=True, min_valid_fraction=0.75,
     return annual_sum_m2, valid_obs_count
 
 
-def process_single_year(year, input_files, output_file , input_period, stat_type, dataset, map_subset, verbose, **kwargs):
+def process_single_year(year, input_files, output_file , input_period, stat_type, dataset, map_subset, verbose, prod, **kwargs):
     """
     Purpose:
         Processes a single year: opens all period files, calculates the annual sum, 
@@ -204,6 +204,7 @@ def process_single_year(year, input_files, output_file , input_period, stat_type
     
     debug = kwargs.get('debug', False)
     ds = None
+    prod = prod or "PPD"
     
     try:
         if verbose: print(f"  📖 Opening {len(input_files)} files for {year}...")
@@ -369,7 +370,7 @@ def run_annual_pp_pipeline(dataset=None,
                 if should_log: print(f"  ⚡ Launching {total_tasks} years across {parallel_runs} workers...")
                 with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs, mp_context=multiprocessing.get_context('spawn')) as executor:
                     future_map = {
-                        executor.submit(process_single_year, yr, task['inputs'], task['output'], input_period, stat_type, dataset, map_subset, verbose, **kwargs): yr
+                        executor.submit(process_single_year, yr, task['inputs'], task['output'], input_period, stat_type, dataset, map_subset, verbose, prod, **kwargs): yr
                         for yr, task in tasks_to_run
                     }
                     
@@ -394,7 +395,7 @@ def run_annual_pp_pipeline(dataset=None,
                     input_files = task['inputs']
                     output_file = task['output']
                     start_time = time.perf_counter()
-                    success, err = process_single_year(yr, input_files, output_file, input_period, stat_type, dataset, map_subset, verbose, **kwargs)
+                    success, err = process_single_year(yr, input_files, output_file, input_period, stat_type, dataset, map_subset, verbose, prod, **kwargs)
                     elapsed = (time.perf_counter() - start_time) / 60
                     if success:
                         if task['file_exists']: replaced.append(yr)
