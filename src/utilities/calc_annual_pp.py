@@ -310,7 +310,7 @@ def run_annual_pp_pipeline(dataset=None,
         Orchestrates the Annual Primary Productivity workflow across multiple products and years.
     """
     
-    prod = ['PPD']
+    prod = 'PPD'
     map_subset = map_subset or "NWA" 
     input_periods = input_periods or ['M']
 
