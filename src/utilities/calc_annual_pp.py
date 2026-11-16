@@ -283,8 +283,8 @@ def process_single_year(year, input_files, output_file , input_period, stat_type
 
         out_ds.attrs = attrs
 
-        if verbose: print(f"    💾 Saving {os.path.basename(out_path)}...")
-        out_ds.to_netcdf(out_path, format='NETCDF4', engine='h5netcdf')
+        if verbose: print(f"    💾 Saving {os.path.basename(output_file)}...")
+        out_ds.to_netcdf(output_file, format='NETCDF4', engine='h5netcdf')
         
         return True, None
 
