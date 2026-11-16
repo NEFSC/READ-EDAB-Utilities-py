@@ -527,6 +527,11 @@ def run_pp_pipeline(chl_dataset=None,
     
     original_stdout = sys.stdout 
 
+    # Determine Start and End Years ---
+    if not chl_dataset:
+        chl_dataset = get_default_product_dataset('CHL')
+        if verbose: print(f"ℹ️ No CHL dataset provided. Defaulting to: {chl_dataset}")
+
     if logfile in ["auto", True]:
         logfile = generate_logfile_path("prim_prod", prods=['PPD'], dataset=chl_dataset, env_dict=env)    
         
@@ -540,10 +545,6 @@ def run_pp_pipeline(chl_dataset=None,
         print(f"📄 Logging to: {logfile}")
         print("="*80)
 
-    # Determine Start and End Years ---
-    if not chl_dataset:
-        chl_dataset = get_default_product_dataset('CHL')
-        if verbose: print(f"ℹ️ No CHL dataset provided. Defaulting to: {chl_dataset}")
     
     current_year = datetime.now().year
     

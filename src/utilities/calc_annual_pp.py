@@ -1,6 +1,7 @@
 import os
 import sys
 import gc
+from tabnanny import verbose
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -9,6 +10,7 @@ import traceback
 import concurrent.futures
 from datetime import datetime
 import multiprocessing 
+import time
 
 from utilities import bootstrap_environment
 env = bootstrap_environment(verbose=False)
@@ -17,7 +19,7 @@ from utilities import (
     pixel_area,
     get_prod_files, get_filepath, file_parser,
     get_default_metadata, get_current_utc_timestamp, get_lut_metadata, get_source_metadata, get_geospatial_metadata, get_temporal_metadata,
-    get_default_product_dataset, get_default_dataset_product, dataset_defaults
+    get_default_product_dataset, generate_logfile_path, dataset_defaults
 )
 
 
@@ -193,14 +195,13 @@ def compute_annual_sum(da, input_period, gap_fill=True, min_valid_fraction=0.75,
     return annual_sum_m2, valid_obs_count
 
 
-def process_single_year(year, task, prod, input_period, stat_type, dataset, map_subset, verbose, **kwargs):
+def process_single_year(year, input_files, output_file , input_period, stat_type, dataset, map_subset, verbose, **kwargs):
     """
     Purpose:
         Processes a single year: opens all period files, calculates the annual sum, 
         integrates with pixel area, and writes the resulting NetCDF.
     """
-    input_files = task['inputs']
-    out_path = task['output']
+    
     debug = kwargs.get('debug', False)
     ds = None
     
@@ -294,72 +295,113 @@ def process_single_year(year, task, prod, input_period, stat_type, dataset, map_
         gc.collect()
 
 
-def run_annual_pp_pipeline(prods=None, input_periods=None, stat_type='median', **kwargs):
+def run_annual_pp_pipeline(dataset=None,
+                           input_periods=None, 
+                           stat_type='median',
+                           map_subset=None,
+                           overwrite=False,
+                           parallel_runs=1,
+                           verbose=False,
+                           debug=False,
+                           logfile=None,
+                           **kwargs):
     """
     Purpose:
         Orchestrates the Annual Primary Productivity workflow across multiple products and years.
     """
-    dataset = kwargs.pop('dataset', None)
-    map_subset = kwargs.pop('map_subset', 'NWA')
     
-    if not prods: prods = ['PPD']
-    if isinstance(prods, str): prods = [prods.upper().strip()]
+    prod = ['PPD']
+    map_subset = map_subset or "NWA" 
+    input_periods = input_periods or ['M']
 
-    if not input_periods: input_periods = ['M']
-    elif isinstance(input_periods, str): input_periods = [input_periods]
-
-    logfile = kwargs.pop('logfile', None)
     original_stdout = sys.stdout 
+
+    if not dataset:
+        dataset = get_default_product_dataset('PPD')
+        if verbose: print(f"ℹ️ No dataset provided. Defaulting to: {dataset}")
+        
+    if logfile in ["auto", True]:
+        logfile = generate_logfile_path("annual_pp", prods=['PPD'], dataset=dataset, env_dict=env)    
+            
+    should_log = verbose or bool(logfile)
+
     if logfile:
+        os.makedirs(os.path.dirname(logfile), exist_ok=True)
         sys.stdout = DualLogger(logfile)
         print("\n" + "="*80)
         print(f"🟢 ANNUAL PP PIPELINE STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"📄 Logging to: {logfile}")
         print("="*80)
 
     try:
-        verbose = kwargs.pop('verbose', False)
-        parallel_runs = kwargs.get('parallel_runs', 1)
         
-        skipped, created, replaced, failed = [], [], [], []
-
-        for prod in prods:
-            current_dataset = dataset or get_default_product_dataset(prod)
+        tasks_to_run,skipped, created, replaced, failed = [], [], [], [], []
+        
+        for input_period in input_periods:
+            if should_log: print(f"\n🚀 Starting Annual Pipeline for {prod} (Dataset: {dataset}) | Input: {input_period}")
             
-            for input_period in input_periods:
-                print(f"\n🚀 Starting Annual Pipeline for {prod} (Dataset: {current_dataset}) | Input: {input_period}")
-                
-                stats_map = build_annual_pp_map(prod, input_period, current_dataset, map_subset, verbose=verbose, **kwargs)
-                tasks_to_run = [(yr, task) for yr, task in stats_map.items() if not task['is_up_to_date']]
-                
-                for yr, task in stats_map.items():
-                    if task['is_up_to_date']: skipped.append(yr)
+            annual_pp_map = build_annual_pp_map(prod, input_period, dataset, map_subset, verbose=verbose, **kwargs)
+            #tasks_to_run = [(yr, task) for yr, task in annual_pp_map.items() if not task['is_up_to_date']]
+            
+            for yr, task in annual_pp_map.items():
+                input_files = task['inputs']
+                output_file = task['output']
+                is_up_to_date = task['is_up_to_date']
+                file_exists = task['file_exists']
 
-                if not tasks_to_run:
-                    continue
-
-                if parallel_runs > 1:
-                    if verbose: print(f"  ⚡ Launching {len(tasks_to_run)} years across {parallel_runs} workers...")
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs,mp_context=multiprocessing.get_context('spawn')) as executor:
-                        future_map = {
-                            executor.submit(process_single_year, yr, task, prod, input_period, stat_type, current_dataset, map_subset, verbose, **kwargs): yr
-                            for yr, task in tasks_to_run
-                        }
-                        for future in concurrent.futures.as_completed(future_map):
-                            yr = future_map[future]
-                            success, err = future.result()
-                            if success:
-                                if stats_map[yr]['file_exists']: replaced.append(yr)
-                                else: created.append(yr)
-                            else:
-                                failed.append(f"{yr} ({err})")
+                outfile = os.path.basename(output_file)
+                if is_up_to_date and not overwrite: 
+                    skipped.append(yr)
+                    if should_log: print(f" ⏭  Skipped: {outfile} (Up-to-date)")
                 else:
-                    for yr, task in tasks_to_run:
-                        success, err = process_single_year(yr, task, prod, input_period, stat_type, current_dataset, map_subset, verbose, **kwargs)
+                    tasks_to_run.append((yr,task))
+                    if should_log: print(f"  🆕 Queued for Creation: {outfile}")
+
+            total_tasks = len(tasks_to_run)
+
+            if not tasks_to_run:
+                if should_log: print(f"✅ All outputs for {input_period} period are up-to-date. Nothing to run.")
+                continue
+
+            if should_log: print(f"\n🚀 Processing {total_tasks} dates...")
+
+            if parallel_runs > 1:
+                if should_log: print(f"  ⚡ Launching {total_tasks} years across {parallel_runs} workers...")
+                with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs, mp_context=multiprocessing.get_context('spawn')) as executor:
+                    future_map = {
+                        executor.submit(process_single_year, yr, task['inputs'], task['output'], input_period, stat_type, dataset, map_subset, verbose, **kwargs): yr
+                        for yr, task in tasks_to_run
+                    }
+                    
+                    completed_count = 0
+                    for future in concurrent.futures.as_completed(future_map):
+                        completed_count += 1
+                        yr = future_map[future]
+                        success, err = future.result()
+                        
+                        # Find the matching task data to get the file status and name
+                        task_info = next(t for y, t in tasks_to_run if y == yr)
+                        outfile = os.path.basename(task_info['output'])
+                        
                         if success:
-                            if task['file_exists']: replaced.append(yr)
+                            if task_info['file_exists']: replaced.append(yr)
                             else: created.append(yr)
+                            if should_log: print(f"  ✅ [Parallel] Created: {outfile}, file {completed_count} of {total_tasks} ({round((completed_count / total_tasks) * 100)}%)")
                         else:
                             failed.append(f"{yr} ({err})")
+            else:
+                for i, (yr, task) in enumerate(tasks_to_run, start=1):
+                    input_files = task['inputs']
+                    output_file = task['output']
+                    start_time = time.perf_counter()
+                    success, err = process_single_year(yr, input_files, output_file, input_period, stat_type, dataset, map_subset, verbose, **kwargs)
+                    elapsed = (time.perf_counter() - start_time) / 60
+                    if success:
+                        if task['file_exists']: replaced.append(yr)
+                        else: created.append(yr)
+                        if should_log: print(f"  ✅ Created: {os.path.basename(output_file)}, file {i} of {total_tasks} ({round((i / total_tasks) * 100)}%) after {elapsed:.2f} minutes.")
+                    else:
+                        failed.append(f"{yr} ({err})")
 
         print("\n" + "="*60)
         print("🏁 ANNUAL PP PIPELINE FINISHED")
