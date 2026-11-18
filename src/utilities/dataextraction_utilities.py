@@ -134,7 +134,7 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, data_typ
     input_files = get_prod_files(prod, dataset=dataset, dataset_version=dataset_version, period=period, map_subset=map_subset, data_type=data_type, verbose=verbose)
 
     if not input_files:
-        return {}, None, pd.DataFrame()
+        return {}, None, pd.DataFrame(), None, None
 
     # Auto-detect stat_type if not explicitly provided
     if not stat_type:
@@ -170,8 +170,8 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, data_typ
         )
 
     # 4. Define Output File Name
-    suffix = f"-{data_type}-EXTRACT" if data_type != "STATS" else "-EXTRACT"
-    out_name = f"{period}-{actual_dataset}-{prod}-{shapefile}{suffix}.csv"
+    suffix = "EXTRACTED_DATA"
+    out_name = f"{period}-{actual_dataset}-{prod}-{data_type}-{shapefile}-{suffix}.csv"
     output_file = os.path.join(output_dir, out_name)
     if verbose: print(f"Creating/updating {output_file}")
 
@@ -270,6 +270,7 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
     subarea_column = kwargs.get('subarea_column', None)
     merge_all = kwargs.get('merge_all', False) 
     verbose = kwargs.get('verbose',False)
+    data_type = kwargs.get('data_type', 'STATS')
     
     try:
         if debug: print(f"    📖 Extracting from {os.path.basename(file_path)}...")
@@ -303,7 +304,15 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
                 # 4. Match variables in the family that share the SAME statistical suffix
                 for v in ds.data_vars:
                     v_str = str(v)
-                    if base_search in v_str.upper():
+
+                    # Skip Per_m2 and Valid_Periods for ANNUAL data to avoid meaningless statistics
+                    if 'ANNUAL' in data_type and ('Per_m2' in v_str or 'Valid_Periods' in v_str):
+                        continue
+                    
+                    # Handle 'PPD' alias mapping to 'PP_' variables natively
+                    is_match = (base_search == 'PPD' and v_str.upper().startswith('PP_')) or (base_search in v_str.upper())
+                    
+                    if is_match:
                         if expected_suffix:
                             if v_str.endswith(expected_suffix):
                                 actual_vars_to_extract.append(v_str)
@@ -315,11 +324,13 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
         if not actual_vars_to_extract:
             actual_vars_to_extract = list(ds.data_vars)
 
+        # Subset the dataset to just the actual extract variabiles 
+        ds = ds[actual_vars_to_extract]
+
         records = []
 
         # Helper to calculate stats and append
-        # Helper to calculate stats and append
-        def append_stats(clipped_ds, subarea_name):
+        def append_stats(clipped_ds, subarea_name, total_pixels):
             # Base record for this spatial zone
             stats = {"subarea": subarea_name}
             
@@ -329,7 +340,7 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
                 valid_pixels = flat_data[~np.isnan(flat_data)]
                 n_valid = valid_pixels.size
                 
-                # 3. Clean the variable name by removing input stat suffixes for a cleaner CSV header
+                # Clean the variable name for the CSV header
                 clean_var = str(var_name)
                 stat_suffixes = ['_mean', '_median', '_max', '_min', '_std', '_sum', '_var', '_count', '_skew', '_kurt', '_anom_logdif', '_anom_ratio', '_anom_dif', '_anom']
                 for stat_suffix in stat_suffixes:
@@ -340,51 +351,72 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
                 prefix = f"{clean_var}_"
                 
                 if n_valid == 0:
+                    # Core stats for both ANNUAL and STATS
                     stats.update({
-                        f"{prefix}N": 0, f"{prefix}Percent_Valid": 0.0, f"{prefix}Min": np.nan, 
-                        f"{prefix}Max": np.nan, f"{prefix}Mean": np.nan, f"{prefix}Median": np.nan, 
-                        f"{prefix}Stdev": np.nan, f"{prefix}CV": np.nan, f"{prefix}Geom_Mean": np.nan, 
-                        f"{prefix}Geom_Stdev": np.nan, f"{prefix}Skewness": np.nan, f"{prefix}Kurtosis": np.nan,
-                        f"{prefix}True_Ratio": np.nan, f"{prefix}Percent_Normal": np.nan
+                        f"{prefix}N": 0, 
+                        f"{prefix}Percent_Valid": 0.0,
                     })
+                    
+                    if data_type == 'ANNUAL':
+                        stats.update({f"{prefix}Sum": np.nan})
+                        
+                    stats.update({
+                        f"{prefix}Min": np.nan, f"{prefix}Max": np.nan, 
+                        f"{prefix}Mean": np.nan, f"{prefix}Median": np.nan,
+                        f"{prefix}Stdev": np.nan, f"{prefix}CV": np.nan, 
+                    })
+                    
+                    # Extended stats only for daily/monthly STATS and ANOMS
+                    if data_type != 'ANNUAL':
+                        stats.update({
+                            f"{prefix}Geom_Mean": np.nan, f"{prefix}Geom_Stdev": np.nan, 
+                            f"{prefix}Skewness": np.nan, f"{prefix}Kurtosis": np.nan
+                        })
+                        if str(var_name).endswith('_anom_logdif'):
+                            stats.update({f"{prefix}True_Ratio": np.nan, f"{prefix}Percent_Normal": np.nan})
+                            
                 else:
                     mean_val = np.mean(valid_pixels)
                     stdev_val = np.std(valid_pixels)
                     
-                    # Safely calculate Geometric Stats (requires strictly positive numbers)
-                    pos_pixels = valid_pixels[valid_pixels > 0]
-                    if pos_pixels.size > 0:
-                        log_pos = np.log(pos_pixels)
-                        geom_mean = np.exp(np.mean(log_pos))
-                        geom_stdev = np.exp(np.std(log_pos))
-                    else:
-                        geom_mean = np.nan
-                        geom_stdev = np.nan
-                        
-                    # Use update() previous loop variables aren't erased
+                    # Core stats for both ANNUAL and STATS
                     stats.update({
                         f"{prefix}N": n_valid,
-                        f"{prefix}Percent_Valid": (n_valid / flat_data.size) * 100,
+                        f"{prefix}Percent_Valid": (n_valid / total_pixels) * 100 if total_pixels > 0 else 0.0,
+                    })
+                    
+                    if data_type == 'ANNUAL':
+                        stats.update({f"{prefix}Sum": float(np.sum(valid_pixels))})
+                        
+                    stats.update({
                         f"{prefix}Min": np.min(valid_pixels),
                         f"{prefix}Max": np.max(valid_pixels),
                         f"{prefix}Mean": mean_val,
                         f"{prefix}Median": np.median(valid_pixels),
                         f"{prefix}Stdev": stdev_val,
                         f"{prefix}CV": (stdev_val / mean_val) * 100 if mean_val != 0 else np.nan,
-                        f"{prefix}Geom_Mean": geom_mean,
-                        f"{prefix}Geom_Stdev": geom_stdev,
-                        f"{prefix}Skewness": float(skew(valid_pixels)) if stdev_val > 1e-6 else np.nan,
-                        f"{prefix}Kurtosis": float(kurtosis(valid_pixels)) if stdev_val > 1e-6 else np.nan
                     })
-                    # Calculate the physical ratio from the log-difference
-                    if str(var_name).endswith('_anom_logdif'):
-                        true_ratio = 10 ** mean_val
-                        stats.update({
-                            f"{prefix}True_Ratio": true_ratio,
-                            f"{prefix}Percent_Normal": true_ratio * 100
-                        })
                     
-            # Append the dictionary after the loop finishes all variables
+                    # Extended stats only for daily/monthly STATS and ANOMS
+                    if data_type != 'ANNUAL':
+                        pos_pixels = valid_pixels[valid_pixels > 0]
+                        if pos_pixels.size > 0:
+                            log_pos = np.log(pos_pixels)
+                            geom_mean, geom_stdev = np.exp(np.mean(log_pos)), np.exp(np.std(log_pos))
+                        else:
+                            geom_mean, geom_stdev = np.nan, np.nan
+                            
+                        stats.update({
+                            f"{prefix}Geom_Mean": geom_mean,
+                            f"{prefix}Geom_Stdev": geom_stdev,
+                            f"{prefix}Skewness": float(skew(valid_pixels)) if stdev_val > 1e-6 else np.nan,
+                            f"{prefix}Kurtosis": float(kurtosis(valid_pixels)) if stdev_val > 1e-6 else np.nan
+                        })
+                        
+                        if str(var_name).endswith('_anom_logdif'):
+                            true_ratio = 10 ** mean_val
+                            stats.update({f"{prefix}True_Ratio": true_ratio, f"{prefix}Percent_Normal": true_ratio * 100})
+                            
             records.append(stats)
 
         # Ensure spatial dimensions are set for rioxarray on the entire Dataset
@@ -393,24 +425,38 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
         if 'lon' in ds.coords and 'lat' in ds.coords: 
             ds = ds.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
         
+        # Create a dummy grid of 1s to calculate true interior polygon pixel counts
+        template_var = list(ds.data_vars)[0]
+        domain_mask = xr.DataArray(np.ones(ds[template_var].shape), coords=ds[template_var].coords, dims=ds[template_var].dims)
+        domain_mask = domain_mask.rio.write_crs(ds.rio.crs)
+        if 'lon' in domain_mask.coords and 'lat' in domain_mask.coords: 
+            domain_mask = domain_mask.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+
         # Clip Data based on provided input
         if bbox is not None:
             minx, miny, maxx, maxy = bbox
             clipped = ds.rio.clip_box(minx=minx, miny=miny, maxx=maxx, maxy=maxy, crs="EPSG:4326")
-            append_stats(clipped, "BBOX")
+            
+            # A bounding box is a perfect rectangle, so the array size is accurate
+            total_pixels = clipped[template_var].size
+            append_stats(clipped, "BBOX", total_pixels)
             
         elif shapefile is not None:
-            # Fetch pre-filtered geometries from shapefile_utilities using ds.rio.crs
             subarea_geoms = get_subarea_geometries(shapefile, subarea_column=subarea_column, subareas=subareas, target_crs=ds.rio.crs, merge_all=merge_all, verbose=verbose)
             
-            # Iterate through the returned dictionary
             for sa_name, geom in subarea_geoms.items():
                 clipped = ds.rio.clip([geom], ds.rio.crs, drop=True) 
-                append_stats(clipped, sa_name)
+                
+                # 🎯 Clip the dummy grid to the exact same geometry and count the surviving pixels
+                clipped_mask = domain_mask.rio.clip([geom], ds.rio.crs, drop=True)
+                total_pixels = int(clipped_mask.notnull().sum().item())
+                
+                append_stats(clipped, sa_name, total_pixels)
 
         else:
             # Fallback: Use the entire map_subset domain
-            append_stats(ds, "ALL")
+            total_pixels = ds[template_var].size
+            append_stats(ds, "ALL", total_pixels)
 
         return records, []
 
@@ -472,7 +518,11 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
     
     # Fallback and normalization for periods
     if not periods: 
-        periods = ['W', 'M']
+        # Dynamically default to 'A' if processing annual data
+        if 'ANNUAL' in data_type:
+            periods = ['A']
+        else:
+            periods = ['W', 'M']
     elif isinstance(periods, str):
         periods = [periods]
 
@@ -565,13 +615,13 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                     successful, failed = 0, 0
                     completed_tasks = 0
 
-                    # --- 🎯 PARALLEL EXTRACTION ---
+                    # --- PARALLEL EXTRACTION ---
                     if parallel_runs > 1:
                         if should_log: print(f"  ⚡ Launching {len(tasks_to_run)} extractions across {parallel_runs} workers...")
                         with concurrent.futures.ProcessPoolExecutor(max_workers=parallel_runs) as executor:
                             future_to_file = {
                                 # Pass explicit shapefile and bbox args
-                                executor.submit(process_single_extraction, file_path, target_var, shapefile, bbox,**kwargs, verbose=verbose): file_path
+                                executor.submit(process_single_extraction, file_path, target_var, shapefile, bbox, data_type=search_dt, verbose=verbose, **kwargs): file_path
                                 for file_path in tasks_to_run.keys()
                             }
                             
@@ -609,7 +659,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                             completed_tasks += 1
                             if should_log: print(f"    [{completed_tasks}/{len(tasks_to_run)}] Processing: {info['source_file']}")
                             # Pass explicit shapefile and bbox args
-                            stats, corrupt_files = process_single_extraction(file_path, target_var, shapefile, bbox, verbose=verbose, **kwargs)
+                            stats, corrupt_files = process_single_extraction(file_path, target_var, shapefile, bbox, data_type=search_dt, verbose=verbose, **kwargs)
                             if corrupt_files: all_corrupt_inputs.update(corrupt_files)
                             
                             if stats:
@@ -701,9 +751,15 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                             if 'subarea' in combined_df.columns:
                                 f.write('subarea,*DATA_TYPE*,String\n')
                             
+                            # Dynamically adjust columns based on data type
+                            if 'ANNUAL' in data_type:
+                                target_suffixes = ['_N', '_Percent_Valid', '_Sum', '_Min', '_Max', '_Mean', '_Median']
+                            else:
+                                target_suffixes = ['_N', '_Percent_Valid', '_Sum', '_Min', '_Max', '_Mean', '_Median', '_Stdev', '_CV', '_Geom_Mean', '_Geom_Stdev', '_Skewness', '_Kurtosis', '_True_Ratio', '_Percent_Normal']
+                            
                             # Declare stats variables as floats
-                            for col in ['N', 'Percent_Valid', 'Min', 'Max', 'Mean', 'Median', 'Stdev', 'CV', 'Geom_Mean', 'Geom_Stdev', 'Skewness', 'Kurtosis', 'True_Ratio', 'Percent_Normal']:
-                                if col in combined_df.columns:
+                            for col in combined_df.columns:
+                                if any(col.endswith(suffix) for suffix in target_suffixes):
                                     f.write(f'{col},*DATA_TYPE*,Float\n')
                         
                         # Append the dataframe below the header
@@ -719,7 +775,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
         print(f"✅ Extracted Records: {global_successful}")
         print(f"❌ Failed Files:      {global_failed}")
 
-        # 🎯 Print the list of updated files
+        # Print the list of updated files
         if updated_output_files:
             print(f"\n💾 FILES SAVED/UPDATED ({len(updated_output_files)}):")
             for f in sorted(updated_output_files):
