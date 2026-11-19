@@ -139,7 +139,7 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, data_typ
     # Auto-detect stat_type if not explicitly provided
     if not stat_type:
         first_file_upper = os.path.basename(input_files[0]).upper()
-        if "STATS" in first_file_upper or "CLIM" in first_file_upper::
+        if "STATS" in first_file_upper or "CLIM" in first_file_upper:
             stat_type = 'median'
         elif "ANOM" in first_file_upper or "ANOMS" in first_file_upper:
             # Route log-normal products to their specific log anomaly variable
