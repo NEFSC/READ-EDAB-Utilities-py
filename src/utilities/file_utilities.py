@@ -315,9 +315,9 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
     if data_type: 
         data_type = data_type.upper()
         # Smart Sanitization: Standardize common aliases
-        if data_type in ['STAT', 'STATS','STATISTICS']: data_type = 'STATS'
-        elif data_type in ['ANOM', 'ANOMS', 'ANOMALY', 'ANOMALIES']: data_type = 'ANOMS'
-        elif data_type in ['EXTRACT', 'EXTRACTS']: data_type = 'EXTRACT'
+        if data_type.startswith('STAT'): data_type = 'STATS'
+        elif data_type.startswith('ANOM'): data_type = 'ANOMS'
+        elif data_type.startswith('EXTRACT'): data_type = 'EXTRACT'
 
     # Extract processing_level and default to RAN only for SOURCE datasets
     processing_level = kwargs.get('processing_level')
@@ -345,25 +345,19 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         filtered_structure = {}
 
     if data_type == "EXTRACT":
-        reference_file = kwargs.get('reference_file')
-        region_name = kwargs.get('region_name')
+        # Accept either region_name (explicit) or map_subset (fallback)
+        region_name = kwargs.get('region_name') or kwargs.get('map_subset')
         
         if not region_name:
-            raise ValueError("'region_name' must be provided in kwargs for EXTRACT data_type.")
+            raise ValueError("'region_name' or 'map_subset' must be provided in kwargs for EXTRACT data_type.")
             
-        # Auto-resolve the reference_file if one was not provided
-        if not reference_file:
-            debug_trace("No reference_file provided for EXTRACT. Attempting to auto-resolve via get_prod_files...")
-            # Search for the base STATS files to use as an anchor
-            found_files = get_prod_files(actual_prod, dataset=dataset, period=period, verbose=verbose, debug=debug)
-            if found_files:
-                reference_file = found_files[0]
-                debug_trace(f"Auto-resolved reference_file: {reference_file}")
-            else:
-                raise ValueError(f"Could not auto-resolve 'reference_file' for EXTRACT because no STATS files were found for {actual_prod}.")
-                
-        # Build the extraction directory path
-        version_root = Path(reference_file).parents[3]
+        # Reliably find the dataset root (e.g. /DATASETS/OCCCI/V6.0/) using the default product
+        try:
+            default_path = get_filepath(default_product, dataset=dataset, period='D')
+            version_root = Path(default_path).parents[2]
+        except Exception as e:
+            raise ValueError(f"Could not resolve dataset root for EXTRACT: {e}")
+
         out_dir = version_root / "EXTRACTED_DATA" / region_name
         if make_dir:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -553,9 +547,13 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
     # 1. Smart Sanitization of explicitly provided data_type
     if data_type:
         data_type = data_type.upper()
-        if data_type in ['STAT', 'STATS']: data_type = 'STATS'
-        elif data_type in ['ANOM', 'ANOMS', 'ANOMALY', 'ANOMALIES']: data_type = 'ANOMS' # Standardize to plural for folder routing
-        elif data_type in ['EXTRACT', 'EXTRACTS']: data_type = 'EXTRACT'
+        if data_type.startswith('STAT'): 
+            data_type = 'STATS'
+        elif data_type.startswith('ANOM'): 
+            data_type = 'ANOMS'
+        elif data_type.startswith('EXTRACT'):
+            print("⚠ WARNING: get_prod_files() is for gridded NetCDF files. Please use get_extracted_files() to retrieve extracted CSV data.")
+            return []
     else: 
         #  Infer data_type from the period if not explicitly provided
         if period in ['D', 'DD']:
@@ -625,6 +623,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
 
     nc_files = []
     for path in search_paths:
+        if verbose: print(f"Searching for files in {path}...")
         # 4. Build the search pattern
         if "/SOURCE/" in path:
             search_pattern = "*.nc"
@@ -632,7 +631,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
             found_files = glob.glob(os.path.join(path, search_pattern))
             nc_files.extend(found_files)
         else: #  Strict product matching with base product fallback
-            
+                        
             # Construct the search suffix based on data_type presence
             if data_type == 'ANOMS':
                 type_suffix = "-ANOM"
@@ -668,7 +667,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
             nc_files.extend(found_files)
 
     if not nc_files:
-        if verbose: print("⚠ No .nc files found.")
+        if verbose: print("⚠ No files found.")
         return []
 
     # 5. Deduplicate SOURCE files if multiple paths were searched (i.e. RAN and NRT combo)
@@ -716,3 +715,56 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
     # to ensure NRT and RAN files are interleaved chronologically.
     nc_files.sort(key=lambda f: os.path.basename(f))
     return nc_files
+
+def get_extracted_files(dataset, region_name, prod=None, period=None, data_type=None, verbose=False):
+    """
+    Purpose:
+        Retrieves extracted CSV files from the dataset's EXTRACTED_DATA directory.
+        Bypasses the complex gridded NetCDF logic used in get_prod_files().
+        
+    Parameters:
+        dataset (str): The dataset name (e.g., 'OCCCI').
+        region_name (str): The extraction region/shapefile name (e.g., 'NES_EPU_NOESTUARIES').
+        prod (str, optional): The product to filter by (e.g., 'CHL', 'PPD').
+        period (str, optional): The period prefix to filter by (e.g., 'M', 'W', 'A').
+        data_type (str, optional): The data type modifier (e.g., 'STATS', 'ANOMS', 'ANNUAL').
+        
+    Returns:
+        list: Sorted list of matching .csv file paths.
+    """
+    # 1. Resolve the target directory using our fixed get_filepath
+    try:
+        extract_dir = Path(get_filepath('CHL', dataset=dataset, data_type='EXTRACT', region_name=region_name))
+    except Exception as e:
+        if verbose: print(f"⚠ Could not resolve directory: {e}")
+        return []
+
+    if not extract_dir.exists():
+        if verbose: print(f"⚠ Directory does not exist: {extract_dir}")
+        return []
+
+    # 2. Build smart wildcards for the search
+    p_str = f"{period.upper()}*" if period else "*"
+    prod_str = f"*{prod.upper()}*" if prod else "*"
+    
+    if data_type:
+        dt = data_type.upper()
+        if dt in ['STAT', 'STATS']: dt_str = "*STATS*"
+        elif dt in ['ANOM', 'ANOMS', 'ANOMALY']: dt_str = "*ANOM*"
+        elif dt == 'ANNUAL': dt_str = "*ANNUAL*"
+        else: dt_str = f"*{dt}*"
+    else:
+        dt_str = "*"
+
+    # Pattern accounts for flexible naming (e.g., M-OCCCI-PSC-ANOMS... or A_1998-NWA-OCCCI-PPD...)
+    search_pattern = f"{p_str}*{dataset.upper()}*{prod_str}{dt_str}*.csv"
+    
+    if verbose: print(f"🔍 Searching for: {search_pattern}\n   in: {extract_dir}")
+    
+    found_files = glob.glob(str(extract_dir / search_pattern))
+    found_files.sort(key=lambda f: os.path.basename(f))
+    
+    if verbose:
+        print(f"📦 Found {len(found_files)} files.")
+        
+    return found_files
