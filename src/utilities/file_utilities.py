@@ -316,7 +316,7 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
         data_type = data_type.upper()
         # Smart Sanitization: Standardize common aliases
         if data_type.startswith('STAT'): data_type = 'STATS'
-        elif data_type.startswith('ANOM'): data_type = 'ANOMS'
+        elif data_type.startswith('ANOM'): data_type = 'ANOM'
         elif data_type.startswith('EXTRACT'): data_type = 'EXTRACT'
 
     # Extract processing_level and default to RAN only for SOURCE datasets
@@ -435,13 +435,11 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
 
     debug_trace(f"Transforming: is_derived={is_derived}, needs_subset={needs_subset}")
 
-    if is_derived or data_type == 'ANOMS' or needs_subset:
+    if is_derived or data_type == 'ANOM' or needs_subset:
         debug_trace("Transforming path for derived product or subset...")
         p_info = get_period_info(period) if period else {}
         suffix = p_info.get('folder_name', data_type or 'DERIVED').upper()
-        if data_type == 'ANOMS' or (period and 'ANOM' in period):
-            suffix = 'ANOMS'
-
+        
         parts = resolved_grid.split('_') if resolved_grid else ['GLOBAL', '4KM']
         region = map_subset.upper() if map_subset else parts[0]
         resolution_str = kwargs.get('resolution', parts[1] if len(parts) > 1 else '4KM')
@@ -459,7 +457,7 @@ def get_filepath(prod, dataset=None, period='D', make_dir=False, verbose=False, 
             debug_trace(f"Path after grid replacement: {path}")
         
         # Ensure derived data goes to PRODUCTS (but leave daily subset SOURCE data alone)
-        if "/SOURCE/" in path and (is_derived or data_type == 'ANOMS' or dataset_type != 'SOURCE'):
+        if "/SOURCE/" in path and (is_derived or data_type == 'ANOM' or dataset_type != 'SOURCE'):
             path = path.replace("/SOURCE/", "/PRODUCTS/")
             debug_trace(f"Path after PRODUCTS routing: {path}")
 
@@ -550,7 +548,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
         if data_type.startswith('STAT'): 
             data_type = 'STATS'
         elif data_type.startswith('ANOM'): 
-            data_type = 'ANOMS'
+            data_type = 'ANOM'
         elif data_type.startswith('EXTRACT'):
             print("⚠ WARNING: get_prod_files() is for gridded NetCDF files. Please use get_extracted_files() to retrieve extracted CSV data.")
             return []
@@ -633,10 +631,7 @@ def get_prod_files(prod, dataset=None, period='D', data_type=None, verbose=False
         else: #  Strict product matching with base product fallback
                         
             # Construct the search suffix based on data_type presence
-            if data_type == 'ANOMS':
-                type_suffix = "-ANOM"
-            else:
-                type_suffix = f"-{data_type}" if data_type else ""
+            type_suffix = f"-{data_type}" if data_type else ""
             
             # Pattern 1: Search specifically for the requested (sub)product
             exact_pattern = f"{period}_*-{prod.upper()}{type_suffix}*.nc"
@@ -727,7 +722,7 @@ def get_extracted_files(dataset, region_name, prod=None, period=None, data_type=
         region_name (str): The extraction region/shapefile name (e.g., 'NES_EPU_NOESTUARIES').
         prod (str, optional): The product to filter by (e.g., 'CHL', 'PPD').
         period (str, optional): The period prefix to filter by (e.g., 'M', 'W', 'A').
-        data_type (str, optional): The data type modifier (e.g., 'STATS', 'ANOMS', 'ANNUAL').
+        data_type (str, optional): The data type modifier (e.g., 'STATS', 'ANOM', 'ANNUAL').
         
     Returns:
         list: Sorted list of matching .csv file paths.
