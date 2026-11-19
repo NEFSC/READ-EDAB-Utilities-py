@@ -139,8 +139,8 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, data_typ
     # Auto-detect stat_type if not explicitly provided
     if not stat_type:
         first_file_upper = os.path.basename(input_files[0]).upper()
-        if "STATS" in first_file_upper:
-            stat_type = 'mean'
+        if "STATS" in first_file_upper or "CLIM" in first_file_upper::
+            stat_type = 'median'
         elif "ANOM" in first_file_upper or "ANOMS" in first_file_upper:
             # Route log-normal products to their specific log anomaly variable
             if is_log_product(prod):
@@ -322,10 +322,15 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
                 
         # Fallback to everything if resolution fails
         if not actual_vars_to_extract:
-            actual_vars_to_extract = list(ds.data_vars)
+            #actual_vars_to_extract = list(ds.data_vars)
+            if verbose: print(f"  ⚠️ Warning: Target variables for {target_vars} not found. Skipping file.")
+            return [], []
 
-        # Subset the dataset to just the actual extract variabiles 
-        ds = ds[actual_vars_to_extract]
+        # Subset the dataset, but explicitly keep the area variable so we can sum it!
+        vars_to_keep = actual_vars_to_extract.copy()
+        if 'pixel_area_km2' in ds.variables:
+            vars_to_keep.append('pixel_area_km2')
+        ds = ds[vars_to_keep]
 
         records = []
 
@@ -333,6 +338,10 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
         def append_stats(clipped_ds, subarea_name, total_pixels):
             # Base record for this spatial zone
             stats = {"subarea": subarea_name}
+            
+            # Calculate Total Area (if the variable exists in the file)
+            if 'pixel_area_km2' in clipped_ds.variables:
+                stats["Total_Area_km2"] = float(np.nansum(clipped_ds['pixel_area_km2'].values))
             
             # Loop through all requested variables in the file
             for var_name in actual_vars_to_extract:
@@ -445,10 +454,10 @@ def process_single_extraction(file_path, target_var, shapefile=None, bbox=None, 
             subarea_geoms = get_subarea_geometries(shapefile, subarea_column=subarea_column, subareas=subareas, target_crs=ds.rio.crs, merge_all=merge_all, verbose=verbose)
             
             for sa_name, geom in subarea_geoms.items():
-                clipped = ds.rio.clip([geom], ds.rio.crs, drop=True) 
+                clipped = ds.rio.clip([geom], ds.rio.crs, drop=True, all_touched=False) 
                 
-                # 🎯 Clip the dummy grid to the exact same geometry and count the surviving pixels
-                clipped_mask = domain_mask.rio.clip([geom], ds.rio.crs, drop=True)
+                # Clip the dummy grid to the exact same geometry and count the surviving pixels
+                clipped_mask = domain_mask.rio.clip([geom], ds.rio.crs, drop=True, all_touched=False)
                 total_pixels = int(clipped_mask.notnull().sum().item())
                 
                 append_stats(clipped, sa_name, total_pixels)
@@ -753,7 +762,7 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                             
                             # Dynamically adjust columns based on data type
                             if 'ANNUAL' in data_type:
-                                target_suffixes = ['_N', '_Percent_Valid', '_Sum', '_Min', '_Max', '_Mean', '_Median']
+                                target_suffixes = ['_N', '_Percent_Valid', '_Sum', '_Min', '_Max', '_Mean', '_Median','Total_Area_km2']
                             else:
                                 target_suffixes = ['_N', '_Percent_Valid', '_Sum', '_Min', '_Max', '_Mean', '_Median', '_Stdev', '_CV', '_Geom_Mean', '_Geom_Stdev', '_Skewness', '_Kurtosis', '_True_Ratio', '_Percent_Normal']
                             
