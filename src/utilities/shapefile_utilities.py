@@ -35,6 +35,7 @@ Modification History
     Oct 21, 2026 - KJWH: Added get_shapefile_subareas
     Oct 22, 2026 - KJWH: Updated get_shapefile_subareas functionality (now looking for string variables)
                          Added get_subarea_geometries()
+    Nov 25, 2026 - KJWH: Added an error statement if the .crs is not found and defaults to EPSG:4326
 
 
 
@@ -157,6 +158,14 @@ def get_subarea_geometries(shapefile, subarea_column=None, subareas=None, target
         dict - A dictionary mapping subarea names (keys) to their corresponding shapely Geometries (values).
     """
     gdf = gpd.read_file(shapefile)
+
+    if gdf.crs is None:
+        if verbose:
+            print("  ⚠️ Shapefile has no CRS defined. Assuming EPSG:4326.")
+        gdf = gdf.set_crs("EPSG:4326")
+
+    if target_crs is not None:
+        gdf = gdf.to_crs(target_crs)
     
     if target_crs and gdf.crs != target_crs:
         gdf = gdf.to_crs(target_crs)

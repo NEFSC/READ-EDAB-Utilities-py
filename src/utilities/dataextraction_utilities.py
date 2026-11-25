@@ -23,7 +23,7 @@ from utilities import (
     generate_logfile_path, get_current_utc_timestamp, get_default_metadata,
     get_lut_metadata, get_source_metadata, get_reference_metadata,
     get_shapefile, get_subarea_geometries,
-    get_default_product_dataset, is_log_product
+    get_default_product_dataset, is_log_product,read_nccsv
 )
 
 """
@@ -67,19 +67,12 @@ Modification History
                          Fixed xarray and rioxarray object referencing errors by correctly applying CRS and spatial dimensions to the Dataset (ds) rather than a DataArray (da) prior to shapefile clipping.
                          Added a standard deviation check (> 1e-6) prior to calculating skewness and kurtosis to permanently suppress SciPy catastrophic cancellation precision warnings when clipping homogenous subareas.
                          Updated comprehensive docstrings outlining purpose, inputs, and returns for build_data_extraction_map, process_single_extraction, and run_extraction_pipeline.
+    Nov 26, 2026 - KJWH: Now using read_nccsv when reading the existing files
+                         Fixed input_mtime and added a 1e-3 second tolerance
+                         Made existing-file read warnings unconditional
+                         Added *END_METADATA* marker to the output file
+                         Changed the output filenaming convention
 
-"""
-
-"""
-FUNCTIONS to fix
-    * search for multiple periods
-    * set default periods
-    * determine if a file will be saved by period
-    * should there be a merged file if there are multiple periods???
-    * fix incomplete stats
-    * documentation
-    * logging steps
-    * optional shapefile subregions
 """
 
 # Initialize DualLogger class
@@ -179,19 +172,9 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, data_typ
     existing_df = pd.DataFrame()
     if os.path.exists(output_file) and not overwrite:
         try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
-            # Find where the actual data columns begin
-            header_idx = 0
-            for i, line in enumerate(lines):
-                if line.startswith('Date,') or line.startswith('timestamp,'):
-                    header_idx = i
-                    break
-                    
-            existing_df = pd.read_csv(output_file, skiprows=header_idx)
+            existing_df = read_nccsv(output_file, parse_dates=False, return_metadata=False)
         except Exception as e:
-            if verbose: print(f"  ⚠️ Could not read existing extraction file '{out_name}': {e}. Forcing full rebuild.")
+            print(f"  ⚠️ Could not read existing extraction file '{out_name}': {e}. Forcing full rebuild.")
 
     # 6. Build Extraction Map
     extraction_map = {}
@@ -214,7 +197,7 @@ def build_data_extraction_map(prod, period, shapefile, map_subset=None, data_typ
                 recorded_mtime = match.iloc[0].get('input_mtime', 0)
                 
                 # Compare modification times
-                if current_mtime <= recorded_mtime:
+                if current_mtime <= recorded_mtime + 1e-3:
                     needs_processing = False
             else:
                 # If it's a new RAN file, check if it replaces an old NRT file for the same timestamp
@@ -770,7 +753,9 @@ def run_extraction_pipeline(prods=None, periods=None, shapefile=None, bbox=None,
                             for col in combined_df.columns:
                                 if any(col.endswith(suffix) for suffix in target_suffixes):
                                     f.write(f'{col},*DATA_TYPE*,Float\n')
-                        
+
+                            f.write('*END_METADATA*\n')
+
                         # Append the dataframe below the header
                         combined_df.to_csv(output_file, mode='a', index=False)
                         

@@ -3,6 +3,7 @@ import glob
 from pathlib import Path
 import stat
 import xarray as xr
+import pandas as pd
 from utilities import bootstrap_environment
 from utilities import parse_dataset_info, extract_period_code, get_period_info, get_base_product, get_source_file_dates
 from utilities import product_defaults, dataset_defaults, get_dataset_products, resolve_dataset_grid, get_daterange
@@ -20,6 +21,7 @@ Main Functions:
     - corrupt_file_detector: Searches for corrupt files in a list of files
     - get_filepath: Resolves the exact directory path for a product, optionally creating it if it doesn't exist.
     - get_prod_files: Retrieves a list of NetCDF files for a specified product, optionally filtering by date range.
+    - read_nccsv: Reads nccsv files
 
 Helper Functions:
     - verbose_trace: Internal function for conditional debug printing.
@@ -55,6 +57,7 @@ Modification History
     Nov 10, 2026 - KJWH: Optimized get_filepath() by pre-scanning directories with get_dataset_products() and passing the existing structure to resolve_dataset_grid(). This prevents the script from blindly templating paths and throwing false "Path not found" warnings for missing subset directories.
                          Removed a restriction in get_prod_files() that prevented /SOURCE/ datasets from falling back to base grids (e.g., GLOBAL). This allows the orchestrator to dynamically pull global files for in-memory subsetting when a pre-binned regional folder does not exist.
                          Resolved an IndexError in get_prod_files() by updating the date filtering logic to correctly reference the standardized two-element std_daterange array rather than the raw user input.
+    Nov 25, 2026 - KJWH: Added read_nccsv to read nccsv files
                          
 
     
@@ -763,3 +766,57 @@ def get_extracted_files(dataset, region_name, prod=None, period=None, data_type=
         print(f"📦 Found {len(found_files)} files.")
         
     return found_files
+
+def read_nccsv(filepath, parse_dates=True, return_metadata=True):
+    """
+    Reads an ERDDAP NCCSV file, separating the metadata header lines from the
+    tabular data.
+
+    Handles standard '*END_METADATA*' markers as well as '*GLOBAL*' and
+    '*DATA_TYPE*' attribute blocks without colliding with 'Date,*DATA_TYPE*,String'.
+
+    Parameters:
+        filepath (str or Path): Path to the NCCSV file.
+        parse_dates (bool, optional): If True and a 'Date' column exists, parses it
+                                      to pandas datetime. Default is True.
+        return_metadata (bool, optional): If True, returns (metadata_lines, df).
+                                          If False, returns only df. Default is True.
+
+    Returns:
+        tuple or pd.DataFrame: (metadata_lines, df) if return_metadata=True, else df.
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    header_idx = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # Standard ERDDAP NCCSV end-of-metadata marker
+        if stripped.startswith('*END_METADATA*'):
+            header_idx = i + 1
+            break
+
+        # Skip blank lines, comments, global attributes, and variable attribute rows
+        if (
+            not stripped
+            or stripped.startswith('#')
+            or stripped.startswith('*GLOBAL*,')
+            or ',*DATA_TYPE*,' in stripped
+            or stripped.startswith('Date,standard_name,')
+        ):
+            continue
+
+        # First non-metadata line is the CSV column header
+        header_idx = i
+        break
+
+    metadata_lines = lines[:header_idx]
+    df = pd.read_csv(filepath, skiprows=header_idx)
+
+    if parse_dates and 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+
+    if return_metadata:
+        return metadata_lines, df
+    return df
